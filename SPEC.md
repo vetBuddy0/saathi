@@ -258,7 +258,9 @@ that is actually hard. Fall back to
 [pywebrtc-audio](https://github.com/strands-labs/pywebrtc-audio) (Apache 2.0,
 aarch64 wheels).
 
-**Bench test:** play a known tone, capture, assert residual below threshold.
+**Bench test:** headless in CI, synthetic near/far signals through the real
+AEC algorithm. Hardware-in-the-loop in `smoke.py` — real speaker, real
+mic, at listening volume — required before checkpoint 2 is done.
 
 ---
 

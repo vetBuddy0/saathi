@@ -13,16 +13,30 @@ from typing import Sequence
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(argv if argv is not None else [])
     parser = argparse.ArgumentParser(prog="saathi")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="start core.py and the screen server")
-    subparsers.add_parser("smoke", help="report what hardware is plugged in")
+    smoke_parser = subparsers.add_parser("smoke", help="report what hardware is plugged in")
+    smoke_parser.add_argument(
+        "--aec", action="store_true", help="hardware-in-the-loop AEC check (echo only)"
+    )
+    smoke_parser.add_argument(
+        "--aec-double-talk",
+        action="store_true",
+        help="hardware-in-the-loop AEC check (double-talk)",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "smoke":
-        from saathi.smoke import main as smoke_main
+        from saathi.smoke import cli as smoke_cli
 
-        return smoke_main([])
+        smoke_args = []
+        if args.aec:
+            smoke_args.append("--aec")
+        if args.aec_double_talk:
+            smoke_args.append("--aec-double-talk")
+        return smoke_cli(smoke_args)
 
     if args.command == "run":
         return _run()

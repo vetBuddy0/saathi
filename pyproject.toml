@@ -20,6 +20,12 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
 ]
+# STT for smoke.py's hardware-in-the-loop AEC check only (SPEC.md,
+# "Audio"). Not a dependency of the default install or CI: that check
+# needs a real speaker and mic, so it never runs headless.
+hardware = [
+    "faster-whisper>=1.0",
+]
 
 [build-system]
 requires = ["hatchling"]
