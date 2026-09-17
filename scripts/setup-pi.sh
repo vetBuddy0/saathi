@@ -74,6 +74,69 @@ wait_for_clock_sync() {
     fi
 }
 
+# Re-running this script is meant to be safe (it's how you pick up a
+# `git pull`), but installing *on top of a different, older build* is
+# not the same thing — a leftover display manager, a stale autologin
+# override for some other user, or a process that already has the mic
+# open would all make the real checks below (saathi smoke, the face
+# actually appearing) fail for a reason that has nothing to do with
+# this script. Checked once, early, before anything is installed.
+check_for_conflicts() {
+    log "Checking for anything that would conflict with this install"
+    local problems=()
+
+    local other_display_unit
+    for other_display_unit in lightdm.service sddm.service gdm.service gdm3.service; do
+        if systemctl is-enabled "$other_display_unit" >/dev/null 2>&1; then
+            problems+=(
+                "$other_display_unit is enabled -- it will fight saathi-face.service for the display"
+            )
+        fi
+    done
+
+    local autologin_conf="/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+    if [ -f "$autologin_conf" ] && ! grep -q "$SAATHI_USER" "$autologin_conf" 2>/dev/null; then
+        problems+=(
+            "$autologin_conf exists and doesn't mention '$SAATHI_USER' -- a previous, non-Saathi kiosk setup may already own tty1"
+        )
+    fi
+
+    if command -v fuser >/dev/null 2>&1 && [ -d /dev/snd ]; then
+        local holders
+        holders="$(fuser /dev/snd/* 2>/dev/null || true)"
+        if [ -n "$holders" ]; then
+            problems+=(
+                "something already has /dev/snd open ($holders) -- likely a leftover process from a previous install, holding the mic or speaker"
+            )
+        fi
+    fi
+
+    # A saathi-engine/-face unit already existing isn't itself a
+    # conflict -- re-running this script to update one is the point.
+    # Only flag it if it's running as some other user, which this script
+    # never configures -- that means a differently-built previous
+    # install, not a stale run of this one.
+    local unit existing_user
+    for unit in saathi-engine.service saathi-face.service; do
+        existing_user="$(systemctl show "$unit" --property=User --value 2>/dev/null || true)"
+        if [ -n "$existing_user" ] && [ "$existing_user" != "$SAATHI_USER" ]; then
+            problems+=(
+                "$unit already exists and runs as '$existing_user', not '$SAATHI_USER' -- looks like a previous, differently-configured install"
+            )
+        fi
+    done
+
+    if [ "${#problems[@]}" -gt 0 ]; then
+        log "Found ${#problems[@]} potential conflict(s) with an existing setup:"
+        local problem
+        for problem in "${problems[@]}"; do
+            log "  - $problem"
+        done
+        die "resolve the above before continuing. Installing on top of a conflicting setup is how a kiosk ends up pointed at hardware something else already owns. Nothing below this point has been touched -- re-run once they're cleared."
+    fi
+    log "No conflicts found"
+}
+
 # -- system packages ------------------------------------------------------
 
 APT_UPDATED=0
@@ -209,12 +272,16 @@ install_piper_voices() {
             continue
         fi
         log "  $voice: downloading"
-        # UNVERIFIED (explicitly flagged by name, per the brief): the
-        # piper-tts PyPI wheel does ship a real manylinux aarch64 build
-        # (confirmed against PyPI's file listing this session), so this
-        # should not need to compile anything — but "should" is doing
-        # real work in that sentence; it was never run on a Pi.
-        run_as_saathi "'$UV_BIN' run python3 -m piper.download_voices '$voice' --download-dir '$voice_dir'" \
+        # Confirmed on real Pi hardware: the aarch64 wheel concern this
+        # comment used to flag as unverified was not the problem. This
+        # line was, though — it ran without cd'ing into $REPO_ROOT first,
+        # so it inherited the caller's cwd. On Pi OS Bookworm+, a mode
+        # 0700 home directory the saathi user can't read makes uv fail
+        # outright trying to look for a uv.toml there:
+        #   error: failed to open file `/home/<caller>/uv.toml`: Permission denied
+        # cd into a directory saathi actually owns first, same as
+        # install_python_deps above.
+        run_as_saathi "cd '$REPO_ROOT' && '$UV_BIN' run python3 -m piper.download_voices '$voice' --download-dir '$voice_dir'" \
             || die "failed to download Piper voice '$voice'. Check network access and the output above."
     done
 }
@@ -358,6 +425,15 @@ EOF
     # give cage a real logind session for DRM/input device access without
     # needing to run as root. Never confirmed against real Pi graphics
     # hardware (the vc4/KMS display stack) or a real cage binary.
+    #
+    # Confirmed wrong on a real Pi: WantedBy=graphical.target used to be
+    # here on the assumption a kiosk service belongs with a graphical
+    # session. Pi OS Lite boots to multi-user.target by default, so
+    # graphical.target is never reached and the face never starts after
+    # a real reboot -- caught only because someone ran
+    # 'systemctl set-default graphical.target' by hand to work around it.
+    # WantedBy=multi-user.target below is what actually gets pulled in on
+    # this image; it doesn't need a graphical session; it *is* one.
     cat > "$SYSTEMD_DIR/saathi-face.service" <<EOF
 [Unit]
 Description=Saathi face (cage + Chromium kiosk)
@@ -381,7 +457,7 @@ Restart=always
 RestartSec=2
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target
 EOF
 
     chmod +x "$REPO_ROOT/scripts/saathi-face-kiosk.sh" \
@@ -429,6 +505,7 @@ EOF
 main() {
     preflight
     wait_for_clock_sync
+    check_for_conflicts
     install_base_packages
     enable_seatd
     install_chromium
