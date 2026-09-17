@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install the pinned interpreter
+        run: uv python install
+
+      # Real hardware isn't required: everything checkpoint 1 touches
+      # (audio, screen) runs against a fake or an in-process test server.
+      # libudev is still needed at import time for audio/devices.py.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev1
+
+      - name: Install project
+        run: uv sync --all-extras --dev
+
+      - name: Undefined-name check
+        run: uv run ruff check --select=F821 saathi
+
+      - name: Lint
+        run: uv run ruff check saathi tests
+
+      - name: Test
+        run: uv run pytest -v

@@ -1,0 +1,96 @@
+/* Warm and soft, not flat cyan on black (SPEC.md, "The face": "flat cyan
+   on black is a hardware limit, not a style"). No status text anywhere in
+   here — the face itself is the only signal. */
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #0d0d10;
+  overflow: hidden;
+}
+
+#face-container {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Orb face */
+
+.orb-face {
+  --orb-color: #3a4a63;
+  width: 32vh;
+  height: 32vh;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--orb-color) 70%, white 30%), var(--orb-color) 70%);
+  box-shadow: 0 0 6vh 1vh color-mix(in srgb, var(--orb-color) 55%, transparent);
+  transition: background 0.15s ease-out, box-shadow 0.15s ease-out, transform 0.15s ease-out;
+}
+
+.orb-face--active {
+  animation: orb-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes orb-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+/* Ink face */
+
+.ink-face {
+  width: 40vh;
+  height: 34vh;
+  background: #2a2a33;
+  border-radius: 46% 54% 58% 42% / 52% 44% 56% 48%;
+  transition: background-color 0.15s ease-out, transform 0.2s ease-out, border-radius 0.3s ease-out;
+}
+
+.ink-face--sleeping {
+  background: #17171d;
+  transform: scale(0.85);
+}
+
+.ink-face--idle {
+  background: #2a2a33;
+  transform: scale(1);
+}
+
+.ink-face--attentive {
+  background: #35406b;
+  transform: scale(1.05);
+  border-radius: 50% 50% 50% 50% / 50% 50% 50% 50%;
+}
+
+.ink-face--listening {
+  background: #3f6fa8;
+  transform: scale(1.12);
+  border-radius: 40% 60% 62% 38% / 55% 40% 60% 45%;
+}
+
+.ink-face--thinking {
+  background: #5a4a8a;
+  transform: scale(1.0) translateY(-1vh);
+  border-radius: 60% 40% 45% 55% / 40% 60% 40% 60%;
+}
+
+.ink-face--speaking {
+  background: #a8823f;
+  transform: scale(1.08);
+  border-radius: 45% 55% 50% 50% / 60% 45% 55% 40%;
+}
+
+.ink-face--handoff {
+  background: #a85f3f;
+  transform: scale(1.03);
+}
+
+/* Eyes face: layout for the vendored library's own container. Colors and
+   motion inside `.eye-container` are the vendored script's own CSS,
+   injected by web-eye-animation.js at load time — left untouched here. */
+
+.eye-container {
+  background: #0d0d10 !important;
+}
