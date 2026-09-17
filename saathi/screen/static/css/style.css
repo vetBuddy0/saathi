@@ -7,6 +7,11 @@ html, body {
   height: 100%;
   background: #0d0d10;
   overflow: hidden;
+  /* Cursor hidden here, not at the kiosk/compositor level: this is the
+     one layer that works the same under cage (Wayland) and under a
+     browser running on X11 or a dev laptop, and it's ours to keep
+     working without depending on whatever's launching the browser. */
+  cursor: none;
 }
 
 #face-container {

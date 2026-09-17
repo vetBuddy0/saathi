@@ -6,10 +6,14 @@
 #
 # UNVERIFIED (no Pi to test on — see scripts/setup-pi.sh's header and the
 # report this shipped with): the exact Chromium flags for running cleanly
-# under cage's Wayland compositor, and whether the cursor stays hidden
-# without an X11-only tool like unclutter (which cannot work here — cage
-# is Wayland, not X). If the cursor is visible and that matters, that is
-# the first thing to revisit.
+# under cage's Wayland compositor.
+#
+# Cursor hiding is deliberately NOT handled here or by cage — it's
+# `cursor: none` on html/body in screen/static/css/style.css instead, the
+# one layer that works the same under cage (Wayland) and under a plain
+# browser on X11 or a dev laptop. An X11-only tool like unclutter would
+# not have worked here anyway (cage is Wayland, not X), and a
+# compositor-level fix would only cover this one launch path.
 set -euo pipefail
 
 PORT="${SAATHI_SCREEN_PORT:-8765}"
