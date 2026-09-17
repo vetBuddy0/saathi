@@ -87,10 +87,5 @@ html, body {
   transform: scale(1.03);
 }
 
-/* Eyes face: layout for the vendored library's own container. Colors and
-   motion inside `.eye-container` are the vendored script's own CSS,
-   injected by web-eye-animation.js at load time — left untouched here. */
-
-.eye-container {
-  background: #0d0d10 !important;
-}
+/* Eyes face draws everything itself onto a <canvas> — no CSS needed
+   beyond letting it fill #face-container (see eyes-face.js). */

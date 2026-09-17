@@ -156,11 +156,18 @@ lands as patronising.
 Four cues: gaze toward her when she speaks; irregular blinking; looking away
 while thinking; narrowing at the corners for warmth.
 
-Vendor [Web-Eye-Animation](https://github.com/CyberAgentAILab/Web-Eye-Animation)
-(MIT, 14 commits — copy it in). Port the timing grammar from
-[RoboEyes](https://github.com/FluxGarage/RoboEyes) — autoblink, idle drift,
-confused. Those are OLED libraries: **ideas port, code does not.** Render warm
-and soft; flat cyan on black is a hardware limit, not a style.
+Eyes are a from-scratch reimplementation of
+[RoboEyes](https://github.com/FluxGarage/RoboEyes)' animation model —
+studied for its geometry and timing, never copied (RoboEyes is GPL-3.0;
+nothing GPL enters this repo). Per-eye width/height/borderRadius and a
+shared spaceBetween, everything else derived from those four; moods
+DEFAULT/TIRED/ANGRY/HAPPY as eyelid geometry; blink, autoblinker, idle-mode
+gaze drift, confused and laugh macros. (Supersedes the original plan to
+vendor Web-Eye-Animation and port RoboEyes as loose ideas on top of it —
+"exactly like RoboEyes" turned out to mean the model itself, not a
+different library wearing its timing.) Render warm and soft: a warm dark
+ground, not OLED black, eyes in warm gradients with glow, eased
+continuously. Flat colour on pure black is a hardware limit, not a style.
 
 **No status text under the face.** A person doesn't display a status label.
 State lives in the eyes plus one ambient light cue. On-screen text is for
@@ -234,7 +241,9 @@ useful one.
 | Brain finishes | 3 s — hidden behind speech |
 
 **A test reads the `turns` table and fails the build when a turn exceeds
-budget.** Speed is a feature; it gets a regression test.
+budget.** Speed is a feature; it gets a regression test. It asserts on the
+95th percentile, not the mean — a companion device's bad turns are the ones
+a person notices, and a mean hides exactly those.
 
 ---
 
@@ -276,7 +285,8 @@ something critical is down. It gates every deploy.
   standing next to a Pi.
 - **Undefined-name check** over the package — a rename that missed one call
   site already shipped a crash on this project.
-- **Latency budget test**, from the `turns` table.
+- **Latency budget test**, from the `turns` table — 95th percentile, not
+  the mean.
 - **AEC bench**, as above.
 - Audio, camera and screen behind interfaces with fakes, so the suite runs
   headless.
