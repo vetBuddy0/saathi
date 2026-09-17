@@ -37,6 +37,15 @@ noticing she started talking, stopping playback — lives in
 `audio/vad.py` and `audio/playback.py`; `core.py` only owns what happens
 to the state once that event arrives, same as every other event here.
 
+`(SPEAKING, "press") -> LISTENING` is the same shortcut, wired to the
+trigger that actually exists today: the spacebar is the interrupt button
+before voice-triggered barge-in (the `barge_in` event above) is. Pressing
+space now means the same thing in every state that has an edge for it —
+"start listening" — instead of doing nothing the one time it happens to
+matter most. `screen/server.py` is what actually stops the audio
+(`VoiceSession.interrupt()`) once this transition fires; this table only
+ever says what state that leaves the device in.
+
 `handle()` returns whether the event actually caused a transition, not
 the resulting state (read `.state` for that). Found missing during the
 one-hour cascade spike: `screen/server.py` was starting mic capture on
@@ -94,6 +103,7 @@ _TRANSITIONS: dict[tuple[State | None, str], State] = {
     (State.THINKING, "no_response"): State.IDLE,
     (State.SPEAKING, "done"): State.IDLE,
     (State.SPEAKING, "barge_in"): State.LISTENING,
+    (State.SPEAKING, "press"): State.LISTENING,
     (State.HANDOFF, "resolved"): State.THINKING,
     (_ANY, "idle_timeout"): State.SLEEPING,
     (_ANY, "handoff"): State.HANDOFF,

@@ -7,9 +7,12 @@ hardware-in-the-loop AEC check SPEC.md's "Audio" section requires before
 checkpoint 2 counts as done: a real speaker, a real mic, at listening
 volume — the synthetic bench test in `tests/test_aec.py` proves the AEC
 *algorithm* works, this proves the *device* does, on the actual machine it
-runs on. Neither runs in CI; both need hardware CI doesn't have. They gate
-a deploy the way `main`'s device check does, just less often — before
-checkpoint 2 ships, not on every push.
+runs on. `check_barge_in()` is the same idea for barge-in: the headless
+tests (`tests/test_screen_server.py`) prove the wiring is correct with
+fakes; this proves the timing and the real acoustic bleed are actually
+within budget on real hardware. None of the three run in CI; all need
+hardware CI doesn't have. They gate a deploy the way `main`'s device check
+does, just less often — before checkpoint 2 ships, not on every push.
 
 Requires the `hardware` dependency group (`uv sync --group hardware`) for
 `faster-whisper` — not a default install dependency, because nothing else
@@ -30,6 +33,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 from dataclasses import dataclass
@@ -45,6 +49,17 @@ _TESTDATA_DIR = Path(__file__).parent / "audio" / "testdata"
 _KNOWN_SENTENCE_WAV = _TESTDATA_DIR / "known_sentence.wav"
 _KNOWN_SENTENCE_TEXT = "good morning today is tuesday and the weather is sunny"
 _PLEASE_SPEAK_WAV = _TESTDATA_DIR / "please_speak.wav"
+
+# Long enough that a 500ms-in interrupt cuts it off well before it would
+# have finished naturally — synthesized fresh each run via Piper, not a
+# vendored fixture, since it only exists to be interrupted.
+_LONG_REPLY_TEXT = (
+    "Your daughter called this morning and mentioned she will visit on "
+    "Saturday afternoon after her shift ends, and she also said your "
+    "grandson passed his exam and is very excited to tell you all about "
+    "it himself when he sees you soon."
+)
+_LONG_REPLY_TELLTALE_WORDS = ("daughter", "saturday", "grandson", "exam")
 
 _SAMPLE_RATE = 16000
 _ERLE_TARGET_DB = (25.0, 30.0)  # SPEC.md's target range
@@ -300,11 +315,100 @@ def _print_result(label: str, result: AecHardwareResult) -> None:
     print(f"  {'PASS' if result.passed else 'FAIL'}")
 
 
+# -- hardware-in-the-loop barge-in check --------------------------------
+
+
+@dataclass
+class BargeInResult:
+    stop_latency_s: float
+    transcript: str
+    passed: bool
+    note: str = ""
+
+
+def check_barge_in(
+    listening_volume_pct: int = 40, interrupt_after_seconds: float = 0.5
+) -> BargeInResult:
+    """The hardware half of barge-in — `tests/test_screen_server.py`
+    proves the wiring is correct with fakes; this proves the timing and
+    the real acoustic bleed are within budget. Plays a long reply for
+    real, calls the real `CascadeSession.interrupt()` (the same method
+    `screen/server.py` calls on a barge-in press) partway through, and
+    checks both halves of the claim: playback actually stops quickly,
+    and a capture starting right after doesn't pick up the tail of what
+    was cut off. No Groq needed — a dummy client is fine, since this
+    never calls `end_turn()`, only the real `say()`/`interrupt()`.
+    """
+    manager = DeviceManager(PulseAudioBackend())
+    mic, speaker = manager.choose("input"), manager.choose("output")
+    if mic is None or speaker is None:
+        return BargeInResult(0.0, "", False, "no microphone/speaker on this machine")
+
+    handles = _ensure_system_echo_cancel(mic, speaker)
+    if handles is None:
+        return BargeInResult(
+            0.0, "", False, "no system echo-cancel available; WebrtcAec hardware path not built"
+        )
+
+    from saathi.voice.engine.cascade import CascadeSession
+
+    session = CascadeSession(handles.sink_id, client=object())
+    # In production, end_turn()'s STT/LLM round trip to Groq gives the
+    # voice time to load before say() is ever called (see cascade.py).
+    # This check calls say() directly, skipping that turn entirely, so
+    # it warms the same way here — otherwise this would be measuring a
+    # cold model load, not the interrupt path a real barge-in hits.
+    session._voice_for(session._last_language)
+
+    original_volume = _sink_volume_pct(handles.sink_id)
+    _set_sink_volume_pct(handles.sink_id, listening_volume_pct)
+    try:
+        say_thread = threading.Thread(target=session.say, args=(_LONG_REPLY_TEXT,))
+        say_thread.start()
+        time.sleep(interrupt_after_seconds)
+
+        interrupt_at = time.monotonic()
+        session.interrupt()
+        say_thread.join(timeout=5.0)
+        stop_latency = time.monotonic() - interrupt_at
+        still_speaking = say_thread.is_alive()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cleaned_path = Path(tmp_dir) / "post_interrupt.wav"
+            capture_proc = _record(handles.source_id, cleaned_path)
+            time.sleep(2.0)  # window to catch any bleed from the cut-off reply
+            _stop(capture_proc)
+            transcript = _transcribe(cleaned_path)
+    finally:
+        if original_volume is not None:
+            _set_sink_volume_pct(handles.sink_id, original_volume)
+
+    bled_words = [w for w in _LONG_REPLY_TELLTALE_WORDS if w in transcript.lower()]
+    passed = not still_speaking and stop_latency <= 0.3 and transcript.strip() == ""
+    note = f"stop latency: {stop_latency * 1000:.0f} ms (interrupt() call -> say() thread joined)"
+    if bled_words:
+        note += f"; bled words in the post-interrupt capture: {bled_words}"
+    elif transcript.strip():
+        note += f"; post-interrupt capture transcribed something unrelated: {transcript!r}"
+    return BargeInResult(
+        stop_latency_s=stop_latency, transcript=transcript, passed=passed, note=note
+    )
+
+
+def _print_barge_in_result(result: BargeInResult) -> None:
+    print("\nBarge-in check")
+    print(f"  stop latency: {result.stop_latency_s * 1000:.0f} ms (budget: ~300 ms)")
+    print(f"  post-interrupt transcript: {result.transcript!r}")
+    if result.note:
+        print(f"  note: {result.note}")
+    print(f"  {'PASS' if result.passed else 'FAIL'}")
+
+
 def cli(argv: Sequence[str] | None = None) -> int:
     """Entry point for both `python -m saathi.smoke` and `saathi smoke`.
     Plain `smoke` is the fast device-inventory check `main()` does;
-    `--aec`/`--aec-double-talk` are the slower hardware-in-the-loop AEC
-    checks, run explicitly rather than on every invocation."""
+    `--aec`/`--aec-double-talk`/`--barge-in` are the slower hardware-in-
+    the-loop checks, run explicitly rather than on every invocation."""
     args = list(argv if argv is not None else sys.argv[1:])
     if "--aec" in args:
         result = check_echo()
@@ -313,6 +417,10 @@ def cli(argv: Sequence[str] | None = None) -> int:
     if "--aec-double-talk" in args:
         result = check_double_talk()
         _print_result("Double-talk check", result)
+        return 0 if result.passed else 1
+    if "--barge-in" in args:
+        result = check_barge_in()
+        _print_barge_in_result(result)
         return 0 if result.passed else 1
     return main(args)
 

@@ -37,13 +37,16 @@ def test_barge_in_is_a_no_op_outside_speaking():
     assert core.state == State.IDLE
 
 
-def test_press_is_a_no_op_while_speaking():
-    # The exact scenario the one-hour spike hit live: screen/server.py
-    # must be able to tell that a press during SPEAKING did nothing, so
-    # it doesn't start a second capture on top of a turn still speaking.
+def test_press_during_speaking_is_barge_in_not_a_no_op():
+    # Was a no-op through the one-hour spike (see core.py's module
+    # docstring) — an interim guard against the double-sound bug, not
+    # the final answer. Checkpoint 2 wires the spacebar as the real
+    # interrupt trigger: pressing space while she's speaking now means
+    # the same thing "press" means everywhere else it has an edge —
+    # start listening — immediately, not after the sentence finishes.
     core = Core(initial=State.SPEAKING)
-    assert core.handle(Event("press")) is False
-    assert core.state == State.SPEAKING
+    assert core.handle(Event("press")) is True
+    assert core.state == State.LISTENING
 
 
 def test_full_table_is_reachable_with_fake_events():

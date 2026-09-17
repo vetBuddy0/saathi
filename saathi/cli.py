@@ -29,6 +29,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="hardware-in-the-loop AEC check (double-talk)",
     )
+    smoke_parser.add_argument(
+        "--barge-in",
+        action="store_true",
+        help="hardware-in-the-loop barge-in check (stop latency + post-interrupt bleed)",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "smoke":
@@ -39,6 +44,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             smoke_args.append("--aec")
         if args.aec_double_talk:
             smoke_args.append("--aec-double-talk")
+        if args.barge_in:
+            smoke_args.append("--barge-in")
         return smoke_cli(smoke_args)
 
     if args.command == "run":

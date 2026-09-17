@@ -31,8 +31,27 @@ voice from that same resolved value — never from the raw detection.
 
 Ships without tests on purpose in its first commit — that was debt, on
 the record. Tests landed the same session; see `tests/test_cascade.py`.
-Still not done: barge-in wired into a real turn boundary, memory,
-cost logging, retrieval, reflection.
+Still not done: memory, cost logging, retrieval, reflection.
+
+`interrupt()` is real now, not a stub: it calls `.stop()` on whatever
+`PlaybackHandle` `_speak()` is currently blocked on `.wait()`-ing for, in
+whatever thread called `say()` (always a different thread than
+`interrupt()`'s caller — `screen/server.py` runs the turn in an executor
+so the event loop stays responsive, and calls `interrupt()` from the
+event loop thread while that executor thread is still blocked).
+
+`_interrupt_requested` exists because of a real, not theoretical, race:
+`synthesize_wav()` for a two-sentence reply routinely takes 700ms+ on
+this machine — longer than the 500ms `saathi smoke --barge-in` interrupts
+at — so `interrupt()` regularly lands *before* `_current_playback` is
+set, with nothing yet to `.stop()`. The first version of this file
+shipped without that flag and documented the gap instead of closing
+it; `saathi smoke --barge-in`'s first real run turned "narrow window,
+rarely hit" into "hit on the very first try," which is the difference
+between a caveat and a bug. `_speak()` now checks the flag once
+synthesis finishes and skips starting playback at all if it's set,
+under the same lock — an interrupt during synthesis now means "never
+play this," not "stop nothing, then play anyway."
 """
 
 from __future__ import annotations
@@ -41,6 +60,7 @@ import io
 import os
 import subprocess
 import tempfile
+import threading
 import wave
 from pathlib import Path
 from typing import Callable
@@ -48,7 +68,7 @@ from typing import Callable
 from groq import Groq
 from piper import PiperVoice
 
-from saathi.audio.playback import play
+from saathi.audio.playback import PlaybackHandle, play
 from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve_language
 
 _PERSONA_PATH = Path(__file__).parent.parent / "persona_stub.txt"
@@ -114,16 +134,32 @@ class CascadeSession:
         self._client = client
         self._voice_loader = voice_loader
         self._voices: dict[str, PiperVoice] = {}
+        self._voices_lock = threading.Lock()
         self._sink_id = sink_id
         self._persona = _PERSONA_PATH.read_text().strip()
         self._chunks: list[bytes] = []
         self._last_language = DEFAULT_LANGUAGE
+        self._playback_lock = threading.Lock()
+        self._current_playback: PlaybackHandle | None = None
+        self._interrupt_requested = False
 
     def _voice_for(self, language: str) -> PiperVoice:
-        if language not in self._voices:
-            onnx_path = _ensure_voice_model(SUPPORTED_LANGUAGES[language])
-            self._voices[language] = self._voice_loader(str(onnx_path))
-        return self._voices[language]
+        with self._voices_lock:
+            if language not in self._voices:
+                onnx_path = _ensure_voice_model(SUPPORTED_LANGUAGES[language])
+                self._voices[language] = self._voice_loader(str(onnx_path))
+            return self._voices[language]
+
+    def _preload_voice_in_background(self, language: str) -> None:
+        # A real fix, not a speed hack: loading a Piper voice the first
+        # time takes seconds (measured against real hardware; see
+        # check_barge_in's first run), and end_turn()'s STT/LLM round
+        # trip to Groq is otherwise dead time for the audio side of this
+        # session. Loading during that wait, instead of lazily on the
+        # first say(), is what turned a barge-in that missed entirely
+        # (interrupt landed mid-*load*) into one bounded by synthesis
+        # time alone.
+        threading.Thread(target=self._voice_for, args=(language,), daemon=True).start()
 
     def start(self) -> None:
         self._chunks = []
@@ -135,6 +171,13 @@ class CascadeSession:
         pcm = b"".join(self._chunks)
         self._chunks = []
         wav_bytes = _pcm_to_wav_bytes(pcm)
+
+        # Betting on last turn's language for this turn's voice while
+        # the real answer (this turn's detection, a few lines down) is
+        # still in flight. Wrong on a language switch — falls back to
+        # the ordinary lazy load in _speak(), just not warmed early that
+        # one time.
+        self._preload_voice_in_background(self._last_language)
 
         transcription = self._client.audio.transcriptions.create(
             model=_STT_MODEL,
@@ -156,17 +199,27 @@ class CascadeSession:
         return completion.choices[0].message.content.strip()
 
     def _speak(self, text: str) -> None:
+        with self._playback_lock:
+            self._interrupt_requested = False
+
         voice = self._voice_for(self._last_language)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
             tmp_path = Path(tmp_file.name)
         try:
             with wave.open(str(tmp_path), "wb") as wav_file:
-                voice.synthesize_wav(text, wav_file)
-            play(self._sink_id, tmp_path).wait()
+                voice.synthesize_wav(text, wav_file)  # can take 700ms+ — see docstring
+
+            with self._playback_lock:
+                if self._interrupt_requested:
+                    return  # interrupted during synthesis: never start playback
+                handle = play(self._sink_id, tmp_path)
+                self._current_playback = handle
+            handle.wait()
         finally:
+            with self._playback_lock:
+                self._current_playback = None
             tmp_path.unlink(missing_ok=True)
 
-    # Declared by VoiceSession, not used this hour.
     def say(self, text: str) -> None:
         self._speak(text)
 
@@ -177,4 +230,12 @@ class CascadeSession:
         raise NotImplementedError("tool-call intents aren't wired into a turn yet")
 
     def interrupt(self) -> None:
-        raise NotImplementedError("barge-in is deliberately not built this hour")
+        """Barge-in's hook. If playback has already started, stops it
+        right now, in whatever thread `say()` is blocked in. If `say()`
+        is still inside `synthesize_wav()`, there's nothing to stop yet —
+        instead this sets a flag `_speak()` checks the moment synthesis
+        finishes, so playback never starts at all."""
+        with self._playback_lock:
+            self._interrupt_requested = True
+            if self._current_playback is not None:
+                self._current_playback.stop()

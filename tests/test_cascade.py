@@ -5,6 +5,8 @@ fakes, and `_ensure_voice_model`/`play` are monkeypatched at the module
 level cascade.py calls them from.
 """
 
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ import pytest
 
 import saathi.voice.engine.cascade as cascade_module
 from saathi.voice.engine.cascade import CascadeSession
+from saathi.voice.language import SUPPORTED_LANGUAGES
 
 
 class FakeTranscriptionsAPI:
@@ -148,9 +151,14 @@ def test_say_speaks_with_the_voice_for_the_current_language(no_real_io):
 
     session.say("你好")
 
-    assert len(voices) == 1
-    fake_voice = next(iter(voices.values()))
-    assert fake_voice.synthesized == ["你好"]
+    # Not asserting len(voices) == 1 here: end_turn() also preloads
+    # whatever language was current *before* this turn (English, the
+    # default) in the background, betting on it not having changed —
+    # see test_end_turn_preloads_last_turns_language_in_the_background.
+    # That bet is wrong on this exact language switch, on purpose, and
+    # loads a second, unused voice; it doesn't change what's spoken.
+    zh_voice_path = f"/fake/{SUPPORTED_LANGUAGES['chinese']}.onnx"
+    assert voices[zh_voice_path].synthesized == ["你好"]
 
 
 def test_voice_is_cached_across_turns_in_the_same_language(no_real_io):
@@ -162,6 +170,25 @@ def test_voice_is_cached_across_turns_in_the_same_language(no_real_io):
     session.say("second")
 
     assert len(voices) == 1  # one voice loaded, reused, not reloaded
+
+
+def test_end_turn_preloads_last_turns_language_in_the_background(no_real_io):
+    # The fix for a real bug (see cascade.py's docstring): loading a
+    # Piper voice for the first time is slow enough that, unwarmed, an
+    # interrupt can land *during* that load with nothing yet to stop.
+    # end_turn() bets on the language not changing and starts loading it
+    # while Groq's STT/LLM round trip is otherwise dead time for the
+    # audio side of the session.
+    client = FakeClient(detected_language="English")
+    session, voices = _session(client)
+    session.start()
+    session.end_turn()
+
+    en_voice_path = f"/fake/{SUPPORTED_LANGUAGES['english']}.onnx"
+    deadline = time.monotonic() + 1.0
+    while en_voice_path not in voices and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert en_voice_path in voices
 
 
 def test_missing_groq_api_key_raises(monkeypatch):
@@ -176,5 +203,47 @@ def test_unbuilt_interface_methods_raise_not_implemented(no_real_io):
         session.on_audio(lambda *_args: None)
     with pytest.raises(NotImplementedError):
         session.on_intent(lambda *_args: None)
-    with pytest.raises(NotImplementedError):
-        session.interrupt()
+
+
+def test_interrupt_with_nothing_playing_is_a_quiet_no_op(no_real_io):
+    session, _voices = _session(FakeClient())
+    session.interrupt()  # must not raise
+
+
+class _SlowFakeProc:
+    """Stands in for the real `subprocess.Popen` `play()` wraps: only
+    returns from `.wait()` / unblocks once `.terminate()` is called,
+    exactly like a real paplay process reacting to SIGTERM."""
+
+    def __init__(self) -> None:
+        self._stopped = threading.Event()
+
+    def poll(self):
+        return 0 if self._stopped.is_set() else None
+
+    def wait(self, timeout=None) -> None:
+        self._stopped.wait(timeout=timeout)
+
+    def terminate(self) -> None:
+        self._stopped.set()
+
+
+def test_interrupt_stops_a_blocking_say_call(monkeypatch):
+    from saathi.audio.playback import PlaybackHandle
+
+    monkeypatch.setattr(
+        cascade_module, "_ensure_voice_model", lambda name: Path(f"/fake/{name}.onnx")
+    )
+    slow_proc = _SlowFakeProc()
+    monkeypatch.setattr(cascade_module, "play", lambda sink_id, path: PlaybackHandle(slow_proc))
+
+    session, _voices = _session(FakeClient(detected_language="English"))
+
+    say_thread = threading.Thread(target=session.say, args=("a long reply",))
+    say_thread.start()
+    time.sleep(0.05)  # let _speak() reach handle.wait()
+    assert say_thread.is_alive()
+
+    session.interrupt()
+    say_thread.join(timeout=1.0)
+    assert not say_thread.is_alive()

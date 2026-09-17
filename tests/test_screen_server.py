@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -12,6 +13,7 @@ class FakeSession:
 
     def __init__(self) -> None:
         self.start_calls = 0
+        self.interrupt_calls = 0
 
     def start(self) -> None:
         self.start_calls += 1
@@ -24,6 +26,9 @@ class FakeSession:
 
     def say(self, text: str) -> None:
         pass
+
+    def interrupt(self) -> None:
+        self.interrupt_calls += 1
 
 
 class FakeCapture:
@@ -84,11 +89,11 @@ async def test_a_second_client_sees_the_same_state_change():
             assert await second_ws.receive_json() == {"type": "state", "state": "listening"}
 
 
-async def test_press_while_speaking_starts_no_second_capture(monkeypatch):
-    # The exact bug found live during the one-hour spike: pressing space
-    # while Saathi is still speaking must not start a second capture —
-    # `press` has no transition out of SPEAKING, so core.py correctly
-    # no-ops it, and the server must act on that, not on the press alone.
+async def test_press_while_speaking_is_barge_in(monkeypatch):
+    # Checkpoint 2: press during SPEAKING is now a real transition
+    # (core.py) — this is what it must actually do: stop the current
+    # reply and start listening, the same as any other press. Was a
+    # no-op through the one-hour spike; see core.py's module docstring.
     monkeypatch.setattr(server_module, "Capture", FakeCapture)
     FakeCapture.instances.clear()
 
@@ -102,11 +107,66 @@ async def test_press_while_speaking_starts_no_second_capture(monkeypatch):
             assert first == {"type": "state", "state": "speaking"}
 
             await ws.send_json({"type": "input", "event": "press"})
-            await asyncio.sleep(0.05)  # let the (silent, no-broadcast) no-op land
+            listening = await ws.receive_json()
+            assert listening == {"type": "state", "state": "listening"}
 
-    assert core.state == State.SPEAKING
-    assert session.start_calls == 0
-    assert FakeCapture.instances == []
+    assert core.state == State.LISTENING
+    assert session.interrupt_calls == 1
+    assert session.start_calls == 1
+    assert len(FakeCapture.instances) == 1
+    assert FakeCapture.instances[0].started is True
+
+
+async def test_barge_in_supersedes_the_interrupted_turns_stale_completion(monkeypatch):
+    # The race the turn-generation counter exists for: a turn that's
+    # still unwinding (blocked in say(), in its own executor thread) when
+    # a barge-in press arrives must not fire `done` once it finally
+    # returns — core.py already moved on from that press, not from this
+    # turn's tail end.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+
+    say_blocked = threading.Event()
+    say_may_return = threading.Event()
+
+    class SlowSession(FakeSession):
+        def say(self, text: str) -> None:
+            say_blocked.set()
+            say_may_return.wait(timeout=2.0)
+
+        def interrupt(self) -> None:
+            super().interrupt()
+            say_may_return.set()  # a real interrupt() kills what say() was blocked on
+
+    core = Core()
+    session = SlowSession()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source")
+
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            assert await ws.receive_json() == {"type": "state", "state": "sleeping"}
+
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+
+            # Don't barge in until the turn is actually blocked in say(),
+            # or this test doesn't exercise the race it's named for.
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, say_blocked.wait, 2.0)
+
+            await ws.send_json({"type": "input", "event": "press"})
+            listening_again = await ws.receive_json()
+            assert listening_again == {"type": "state", "state": "listening"}
+
+            # Give the superseded turn's executor thread time to actually
+            # return from say() and attempt (and fail) to fire `done`.
+            await asyncio.sleep(0.2)
+
+    assert core.state == State.LISTENING  # not IDLE — the stale `done` must not land
+    assert session.interrupt_calls == 1
 
 
 async def test_a_real_turn_walks_thinking_speaking_idle_and_captures_audio(monkeypatch):

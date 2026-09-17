@@ -26,6 +26,21 @@ executor thread since Groq calls and Piper synthesis block; `core.handle()`
 is still only ever called from this event loop thread, same invariant as
 before, just reached via `run_in_executor`'s callback rather than
 directly inline.
+
+Barge-in (checkpoint 2): a `press` while `SPEAKING` is now a real
+transition (`core.py`), and this module is what makes it *mean*
+something — `session.interrupt()` stops the audio, and a fresh capture
+starts, same as any other press. The turn still running in its executor
+thread (blocked in `session.say()` a moment ago, now unblocked because
+`interrupt()` just killed what it was waiting on) must not then fire
+`done` on its way out — `core.py` already moved to `LISTENING` from the
+press itself, and a stale `done` arriving after that would be exactly
+the kind of "screen decides something core didn't" bug core.py's
+docstring already tells the story of once. `_turn_generation` is how a
+turn recognizes it's been superseded: every real turn start (a press
+that begins listening, or a barge-in) bumps it, and a turn only acts on
+its own tail end — `response_ready`, `done` — if the counter still
+matches what it captured at the start.
 """
 
 from __future__ import annotations
@@ -38,7 +53,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from saathi.audio.capture import Capture
-from saathi.core import Core, Event
+from saathi.core import Core, Event, State
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _CAPTURE_CHUNK_BYTES = 3200  # 100ms of 16kHz mono 16-bit PCM
@@ -50,25 +65,35 @@ def _make_on_chunk(session):
     return lambda chunk: session.send_audio(chunk)
 
 
-async def _run_turn(session, core: Core) -> None:
+async def _run_turn(session, core: Core, generation: int, turn_generation: dict) -> None:
     """THINKING -> SPEAKING -> IDLE for one real turn. Runs the blocking
     STT/LLM/TTS work in an executor thread; every `core.handle()` call
     here still happens back on this event loop thread, in the `await`'s
-    continuation, not inside the executor thread itself."""
+    continuation, not inside the executor thread itself.
+
+    `generation` is this turn's stamp, taken from `turn_generation` when
+    it started. If a barge-in has since bumped the counter, this turn has
+    been superseded and must not touch state on its way out — the press
+    that superseded it already did."""
     loop = asyncio.get_running_loop()
     try:
         reply_text = await loop.run_in_executor(None, session.end_turn)
     except Exception:
         logger.exception("turn failed")
-        core.handle(Event("no_response"))
+        if turn_generation["value"] == generation:
+            core.handle(Event("no_response"))
         return
     logger.info("reply: %s", reply_text)
 
+    if turn_generation["value"] != generation:
+        return
     core.handle(Event("response_ready"))
     try:
         await loop.run_in_executor(None, session.say, reply_text)
     except Exception:
         logger.exception("speaking the reply failed")
+    if turn_generation["value"] != generation:
+        return
     core.handle(Event("done"))
 
 
@@ -76,6 +101,7 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
     live_capture: dict[str, Capture | None] = {"capture": None}
+    turn_generation = {"value": 0}
 
     def broadcast_state(state, _event: Event) -> None:
         message = json.dumps({"type": "state", "state": state.value})
@@ -107,12 +133,21 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
                 kind = payload.get("event")
                 if kind == "press":
                     # Only act if core.py actually transitioned — e.g. a
-                    # press while SPEAKING has no transition (barge-in
-                    # isn't built yet) and must not start a second capture
-                    # on top of a turn that's still speaking. See core.py's
-                    # module docstring for how this bug was found.
+                    # press while IDLE/SLEEPING/SPEAKING with no session
+                    # configured has no transition and must not start a
+                    # capture. See core.py's module docstring for the bug
+                    # that taught us this the first time.
+                    was_speaking = core.state == State.SPEAKING
                     transitioned = core.handle(Event("press"))
                     if transitioned and session is not None and capture_source_id is not None:
+                        if was_speaking:
+                            # Barge-in: this press just superseded whatever
+                            # turn was still speaking. Bump the generation
+                            # *before* interrupting it, so its tail end
+                            # (still unwinding in another thread) sees it's
+                            # been superseded the moment it checks.
+                            turn_generation["value"] += 1
+                            session.interrupt()
                         session.start()
                         capture = Capture(
                             capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
@@ -127,7 +162,11 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
                             capture = live_capture.pop("capture", None)
                             if capture is not None:
                                 capture.stop()
-                            asyncio.get_running_loop().create_task(_run_turn(session, core))
+                            turn_generation["value"] += 1
+                            generation = turn_generation["value"]
+                            asyncio.get_running_loop().create_task(
+                                _run_turn(session, core, generation, turn_generation)
+                            )
         finally:
             websockets.discard(ws)
         return ws
