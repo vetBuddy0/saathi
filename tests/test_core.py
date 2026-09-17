@@ -21,6 +21,16 @@ def test_release_then_fake_no_response_returns_to_idle():
     assert core.handle(Event("no_response")) == State.IDLE
 
 
+def test_barge_in_during_speaking_goes_straight_to_listening():
+    core = Core(initial=State.SPEAKING)
+    assert core.handle(Event("barge_in")) == State.LISTENING
+
+
+def test_barge_in_is_a_no_op_outside_speaking():
+    core = Core(initial=State.IDLE)
+    assert core.handle(Event("barge_in")) == State.IDLE
+
+
 def test_full_table_is_reachable_with_fake_events():
     core = Core(initial=State.SLEEPING)
     assert core.handle(Event("press")) == State.LISTENING

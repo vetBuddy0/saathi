@@ -26,6 +26,16 @@ Contested decision: an event with no matching transition for the current
 state is a no-op, not an error. A device meant to sit in someone's home
 should not crash because a stray key or a race delivered an event out of
 order; tests can still assert on the exact table below.
+
+Checkpoint 2 adds `(SPEAKING, "barge_in") -> LISTENING`: if she starts
+talking while Saathi is speaking, that is not "wait for the sentence to
+finish, then listen" — it is a new turn, immediately. `THINKING`'s "no_response"
+still gets there via `IDLE`, unchanged; barge-in only shortcuts `SPEAKING`,
+because that is the one state where staying in it after she has started
+talking is actively rude, not just slow. The audio-side half of this —
+noticing she started talking, stopping playback — lives in
+`audio/vad.py` and `audio/playback.py`; `core.py` only owns what happens
+to the state once that event arrives, same as every other event here.
 """
 
 from __future__ import annotations
@@ -70,6 +80,7 @@ _TRANSITIONS: dict[tuple[State | None, str], State] = {
     (State.THINKING, "response_ready"): State.SPEAKING,
     (State.THINKING, "no_response"): State.IDLE,
     (State.SPEAKING, "done"): State.IDLE,
+    (State.SPEAKING, "barge_in"): State.LISTENING,
     (State.HANDOFF, "resolved"): State.THINKING,
     (_ANY, "idle_timeout"): State.SLEEPING,
     (_ANY, "handoff"): State.HANDOFF,
