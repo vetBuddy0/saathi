@@ -5,21 +5,34 @@ One-hour spike (2026-09-17), built to close the loop end to end, not to
 be the real engine: `GROQ_API_KEY` from the environment only, never
 committed. The persona is `persona_stub.txt` next door — one hardcoded
 paragraph, explicitly *not* the real identity file, which is being
-written separately. Piper over Kokoro: Kokoro pulls torch unconditionally
-and Piper installed and synthesized in under ten seconds with real
-aarch64/CPU support, so the time budget picked it rather than a trial
-that risked blowing the hour.
+written separately.
+
+Piper over Kokoro, still: Kokoro pulls `torch` unconditionally, and that
+is not just a "would have blown the 15-minute trial window" problem —
+it's a real problem for the Raspberry Pi this is meant to run on, where a
+multi-hundred-MB unconditional dependency is expensive on both disk and
+first-boot time. Piper installed and synthesized in under ten seconds
+with plain CPU support and no such cost. Anyone retrying Kokoro later
+should know that going in, not rediscover it.
 
 The brief asked for Kimi K2. The key this was tested with doesn't have
 it (`GET /v1/models` doesn't list either `moonshotai/kimi-k2-instruct` or
 `-0905`) — substituted `openai/gpt-oss-120b`, the strongest chat model
-that account does have, flagged rather than swapped quietly. Swapping it
+that account does have. Kimi K2 is still the intended model; swapping
 back is a one-line constant change once access exists.
 
-Ships without tests on purpose — this is debt, on the record: checkpoint
-2 is not done until barge-in, memory, cost logging, retrieval, and
-reflection are back in, and until this file has tests. Nothing here
-should be mistaken for "finished."
+Language: detection and the voice table share one source of truth,
+`voice/language.py` — read that module first. `end_turn()` asks Groq
+Whisper for its detected language (`response_format="verbose_json"`) and
+resolves it through `resolve_language()` before doing anything with it;
+the LLM is told which language to answer in explicitly rather than left
+to infer it from the transcript alone, and `_speak()` picks its Piper
+voice from that same resolved value — never from the raw detection.
+
+Ships without tests on purpose in its first commit — that was debt, on
+the record. Tests landed the same session; see `tests/test_cascade.py`.
+Still not done: barge-in wired into a real turn boundary, memory,
+cost logging, retrieval, reflection.
 """
 
 from __future__ import annotations
@@ -30,14 +43,15 @@ import subprocess
 import tempfile
 import wave
 from pathlib import Path
+from typing import Callable
 
 from groq import Groq
 from piper import PiperVoice
 
 from saathi.audio.playback import play
+from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve_language
 
 _PERSONA_PATH = Path(__file__).parent.parent / "persona_stub.txt"
-_VOICE_NAME = "en_US-amy-medium"
 _VOICE_DIR = Path.home() / ".saathi" / "tts-voices"
 _STT_MODEL = "whisper-large-v3-turbo"
 # Kimi K2 (moonshotai/kimi-k2-instruct, -0905) is not available on the
@@ -48,9 +62,11 @@ _STT_MODEL = "whisper-large-v3-turbo"
 _LLM_MODEL = "openai/gpt-oss-120b"
 _SAMPLE_RATE = 16000
 
+VoiceLoader = Callable[[str], PiperVoice]
 
-def _ensure_voice_model() -> Path:
-    onnx_path = _VOICE_DIR / f"{_VOICE_NAME}.onnx"
+
+def _ensure_voice_model(voice_name: str) -> Path:
+    onnx_path = _VOICE_DIR / f"{voice_name}.onnx"
     if onnx_path.exists():
         return onnx_path
     _VOICE_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,7 +75,7 @@ def _ensure_voice_model() -> Path:
             "python3",
             "-m",
             "piper.download_voices",
-            _VOICE_NAME,
+            voice_name,
             "--download-dir",
             str(_VOICE_DIR),
         ],
@@ -78,16 +94,36 @@ def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
     return buffer.getvalue()
 
 
+def _load_piper_voice(onnx_path: str) -> PiperVoice:
+    return PiperVoice.load(onnx_path)
+
+
 class CascadeSession:
-    def __init__(self, sink_id: str) -> None:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY is not set in the environment")
-        self._client = Groq(api_key=api_key)
-        self._voice = PiperVoice.load(str(_ensure_voice_model()))
+    def __init__(
+        self,
+        sink_id: str,
+        *,
+        client: Groq | None = None,
+        voice_loader: VoiceLoader = _load_piper_voice,
+    ) -> None:
+        if client is None:
+            api_key = os.environ.get("GROQ_API_KEY")
+            if not api_key:
+                raise RuntimeError("GROQ_API_KEY is not set in the environment")
+            client = Groq(api_key=api_key)
+        self._client = client
+        self._voice_loader = voice_loader
+        self._voices: dict[str, PiperVoice] = {}
         self._sink_id = sink_id
         self._persona = _PERSONA_PATH.read_text().strip()
         self._chunks: list[bytes] = []
+        self._last_language = DEFAULT_LANGUAGE
+
+    def _voice_for(self, language: str) -> PiperVoice:
+        if language not in self._voices:
+            onnx_path = _ensure_voice_model(SUPPORTED_LANGUAGES[language])
+            self._voices[language] = self._voice_loader(str(onnx_path))
+        return self._voices[language]
 
     def start(self) -> None:
         self._chunks = []
@@ -103,24 +139,29 @@ class CascadeSession:
         transcription = self._client.audio.transcriptions.create(
             model=_STT_MODEL,
             file=("turn.wav", wav_bytes),
+            response_format="verbose_json",
         )
         heard = transcription.text.strip()
+        detected = (transcription.language or "").lower()
+        self._last_language = resolve_language(detected, self._last_language)
 
         completion = self._client.chat.completions.create(
             model=_LLM_MODEL,
             messages=[
                 {"role": "system", "content": self._persona},
+                {"role": "system", "content": f"Reply in {self._last_language}."},
                 {"role": "user", "content": heard},
             ],
         )
         return completion.choices[0].message.content.strip()
 
     def _speak(self, text: str) -> None:
+        voice = self._voice_for(self._last_language)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
             tmp_path = Path(tmp_file.name)
         try:
             with wave.open(str(tmp_path), "wb") as wav_file:
-                self._voice.synthesize_wav(text, wav_file)
+                voice.synthesize_wav(text, wav_file)
             play(self._sink_id, tmp_path).wait()
         finally:
             tmp_path.unlink(missing_ok=True)

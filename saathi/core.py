@@ -36,6 +36,19 @@ talking is actively rude, not just slow. The audio-side half of this —
 noticing she started talking, stopping playback — lives in
 `audio/vad.py` and `audio/playback.py`; `core.py` only owns what happens
 to the state once that event arrives, same as every other event here.
+
+`handle()` returns whether the event actually caused a transition, not
+the resulting state (read `.state` for that). Found missing during the
+one-hour cascade spike: `screen/server.py` was starting mic capture on
+every `press` message unconditionally, including while `SPEAKING` — where
+`press` has no transition and `core.py` correctly no-ops it, but the
+server had no way to know that, so it started capturing anyway. That is
+`core.py` deciding one thing and the screen acting on another — the exact
+failure CLAUDE.md's "reaching through one [interface] ... silently
+removes the architecture" describes — and it produced overlapping turns
+and doubled audio, live, in testing. The fix is this return value, not a
+flag in `screen/server.py`: the server was never wrong to want to know
+whether to act, it just had no way to ask.
 """
 
 from __future__ import annotations
@@ -113,16 +126,19 @@ class Core:
 
         return unsubscribe
 
-    def handle(self, event: Event) -> State:
-        """Apply `event` to the current state. Returns the resulting state,
-        whether or not it changed."""
+    def handle(self, event: Event) -> bool:
+        """Apply `event` to the current state. Returns whether it actually
+        caused a transition — callers that need the resulting state read
+        `.state` afterward. This return value is how a caller like
+        `screen/server.py` finds out "did core.py decide anything" without
+        it having to duplicate the transition table to guess."""
         new_state = _TRANSITIONS.get((self._state, event.kind))
         if new_state is None:
             new_state = _TRANSITIONS.get((_ANY, event.kind))
         if new_state is None or new_state == self._state:
-            return self._state
+            return False
 
         self._state = new_state
         for observer in list(self._observers):
             observer(new_state, event)
-        return self._state
+        return True

@@ -106,8 +106,13 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
                     continue
                 kind = payload.get("event")
                 if kind == "press":
-                    core.handle(Event("press"))
-                    if session is not None and capture_source_id is not None:
+                    # Only act if core.py actually transitioned — e.g. a
+                    # press while SPEAKING has no transition (barge-in
+                    # isn't built yet) and must not start a second capture
+                    # on top of a turn that's still speaking. See core.py's
+                    # module docstring for how this bug was found.
+                    transitioned = core.handle(Event("press"))
+                    if transitioned and session is not None and capture_source_id is not None:
                         session.start()
                         capture = Capture(
                             capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
@@ -115,14 +120,14 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
                         capture.start()
                         live_capture["capture"] = capture
                 elif kind == "release":
-                    core.handle(Event("release"))
-                    if session is None:
-                        core.handle(Event("no_response"))  # fake: no AI at checkpoint 1
-                    else:
-                        capture = live_capture.pop("capture", None)
-                        if capture is not None:
-                            capture.stop()
-                        asyncio.get_running_loop().create_task(_run_turn(session, core))
+                    if core.handle(Event("release")):
+                        if session is None:
+                            core.handle(Event("no_response"))  # fake: no AI at checkpoint 1
+                        else:
+                            capture = live_capture.pop("capture", None)
+                            if capture is not None:
+                                capture.stop()
+                            asyncio.get_running_loop().create_task(_run_turn(session, core))
         finally:
             websockets.discard(ws)
         return ws
