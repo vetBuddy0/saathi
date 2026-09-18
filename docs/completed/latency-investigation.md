@@ -194,8 +194,22 @@ left for it to remove.
 
 **What would actually move the "Voice starts" number** is unchanged
 from item 3's original list: a faster/streaming first-sentence
-synthesis path (a smaller local Piper voice, or Google's real streaming
-API — still untested, no GCP credentials) is what the remaining ~400–
-600ms of first-sentence Piper synthesis needs, not pipelining. Re-run on
-real Pi hardware is still the most important unverified step; nothing
-in this follow-up touched that gap either.
+synthesis path is what the remaining ~400–600ms of first-sentence Piper
+synthesis needs, not pipelining. Re-run on real Pi hardware is still the
+most important unverified step; nothing in this follow-up touched that
+gap either.
+
+## 6. Decision (2026-09-19) — stop optimizing Piper here
+
+1213ms against a 1200ms budget is noise at this point, not a gap worth
+closing with more Piper-specific tuning (a smaller/faster local voice,
+etc.) — that work would be thrown away the moment Google's streaming
+TTS is unblocked (GCP credentials, still not configured — see
+`docs/completed/README.md`), which is architecturally the real fix for
+first-chunk latency (audio starts before the whole sentence even
+finishes rendering, not just synthesized faster on the same blocking
+path). Pipelining and the startup warm-up were kept: they help *any*
+backend, Piper or Google, so they weren't wasted effort regardless of
+which TTS backend eventually wins. **The budget test stays red, reported
+honestly, until Google's streaming path is actually tried** — no further
+Piper-latency work planned unless that path turns out not to help.

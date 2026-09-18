@@ -211,3 +211,35 @@ context; adding one artificially into the week's own narrative would
 have meant inventing an implausible scenario (a reminder due at 2am) to
 force it — a direct call on the same real candidate, real code, is more
 honest than bending the synthetic week to manufacture a result.
+
+**2026-09-19 — Scoring: a due reminder always outranks a "noticed"
+candidate (`score = inf`); among "noticed" candidates, `reflect.py`'s
+own `confidence` breaks ties.** Medication over a comment about her
+mood is the obvious priority ordering and needed no new number invented
+for it; confidence already existed and measures exactly "how grounded
+is this," the right axis for ranking insights against each other.
+
+**2026-09-19 — A candidate is "resolved" (stops being re-proposed by
+`scheduler.py`) only if it fired or expired — every other suppression
+reason (gated, capped, cooled down, outscored) is retried next tick.**
+This is the literal mechanism "the rest stay as candidates, not a queue
+to be drained" required: without it, a losing candidate would either
+never be reconsidered (the old, buggy behavior) or need a separate
+"pending" table this schema has no room for.
+
+**2026-09-19 — The daily cap blocks reminders too, exactly as
+instructed ("whatever the score"), with no invented exemption.** A real
+tension (a medication reminder could get capped by three unrelated
+"noticed" utterances earlier the same day) is flagged plainly in
+`docs/initiative-dry-run.md` rather than silently carved out — the
+instruction gave reminders one specific exemption (cooldown), not a
+blanket one, and adding a second on my own judgment would be deciding
+"what changes what she hears" without being asked.
+
+**2026-09-19 — Stopped tuning Piper's latency; the 1213ms-vs-1200ms
+budget stays red, reported honestly, until Google's streaming TTS is
+unblocked.** Explicit instruction: further Piper-specific work would be
+thrown away the moment Google's credentials land, since that's the
+architectural fix (audio starts before the sentence finishes rendering,
+not just synthesized faster on the same blocking path). Pipelining and
+the startup warm-up were kept — they help any backend, not just Piper.

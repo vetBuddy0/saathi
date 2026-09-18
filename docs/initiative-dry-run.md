@@ -1,4 +1,4 @@
-# Initiative dry run — 2026-09-19
+# Initiative dry run — 2026-09-19 (updated: clustering fix, before/after)
 
 **Nothing here was spoken.** This runs the real `initiative/scheduler.py`
 + `initiative/policy.py` pipeline against a real `IdentityStore` and
@@ -22,133 +22,163 @@ is fictional. The mechanism producing them is real.
 Three separate steps, on purpose:
 
 1. **Reflection** (`identity/reflect.py`) — a real Groq call, run once
-   over the whole seeded week, offline. This is *not* part of a
-   scheduler tick; it's a separate maintenance pass that turns episodes
-   into rules ahead of time, the same as it would run periodically on a
-   real device.
+   over the whole seeded week, offline. Not part of a scheduler tick;
+   a separate maintenance pass that turns episodes into rules ahead of
+   time.
 2. **The scheduler tick itself** (`scheduler.propose_candidates()` +
    `policy.evaluate()`) — **pure local SQL, verified with a test that
    makes `groq.Groq` explode if it's ever touched**
-   (`tests/test_initiative_no_model_calls.py`). No model call happens
-   here, structurally — neither module even imports `groq`.
+   (`tests/test_initiative_no_model_calls.py`). Neither module imports
+   `groq`.
 3. **Phrasing** — only for a candidate `policy.py` has *already*
-   allowed, one more real Groq call turns its bare `reason` (e.g.
-   `"Reminder due: take your evening tablets"`) into something a person
-   would actually say out loud. A suppressed candidate never reaches
-   this step at all.
+   allowed, one more real Groq call turns its bare `reason` into
+   something a person would actually say. A suppressed (or, now,
+   held-back) candidate never reaches this step.
 
-## Methodology
+## What the first version of this file exposed
 
-Two simulated ticks per day (~09:00 and ~21:00) across an 8-day
-seeded window, `PolicyContext(presence=True, quiet_hours=False,
-busy=False)` for every tick — this dry run is about what the scheduler
-*proposes* and *phrases*, not a presence-simulation exercise (no real
-presence sensor exists yet — `scheduler.event_candidates()`'s own honest
-limitation).
+The first run of this dry run — seeded week, real `reflect()`, real
+scheduler + policy, `PolicyContext(presence=True)` for every tick —
+surfaced **five "noticed" candidates in the same 09:00 tick**, all
+allowed at once, because reflecting once over the whole seeded week
+produced five rules simultaneously and the policy gate at the time had
+no concept of "how many, how close together." That's exactly the
+"device that comments on everything" failure SPEC.md's `policy.py`
+section warns against, just concentrated into one moment instead of
+spread across a session. Flagged as a real finding, not fixed then;
+fixed now, four rules deep in `initiative/policy.py`:
 
-**A known artifact of this simulation, not the scheduler itself:**
-reflection ran once, after the whole seeded week, so every "noticed"
-rule already exists by the very first tick — all of them surface
-together on day 1 rather than spread across the week the way they would
-on a real device reflecting incrementally as episodes actually happen.
-Real dedup logic (`scheduler.py`'s `_already_proposed_source_episodes`)
-is genuinely exercised regardless: none of these five rules repeat on
-any later tick.
+1. **One utterance per tick.** Highest-scoring candidate wins; the rest
+   are logged `"lost to a higher-scoring candidate this tick"` and
+   compete again next tick — not a queue, not dropped.
+2. **Cooldown**, 90 minutes by default (`PolicyConfig.cooldown_minutes`),
+   between any two fired utterances — except a due reminder, which is
+   exempt (a pill reminder shouldn't wait on a cooldown built for
+   conversational restraint).
+3. **Daily cap**, 3 by default (`PolicyConfig.daily_cap`). Once hit,
+   nothing more fires that day, "whatever the score" — deliberately
+   including reminders; there is no cap exemption for them, only a
+   cooldown one. See "A real tension worth deciding," below.
+4. **Expiry.** A "noticed" candidate more than `PolicyConfig.noticed_expiry_days`
+   (default 2) past its source episode's timestamp is dropped —
+   `suppressed_by` starts with `"expired:"`, the one other terminal
+   state besides firing. Asking about Thursday's scan is kind on Friday
+   and strange on Sunday; there's no date-parsing (that would need a
+   model call), just how long ago it was *observed*.
 
-## What the scheduler proposed and policy allowed
+## Before / after, same seeded week, side by side
 
-**2026-09-14 09:00 — scheduled**
-> Reminder due: take your morning blood pressure tablet
+**Before** (first version of this file — presence=True every tick, no
+scoring, no cooldown, no cap, no expiry):
 
-Would say: *"Good morning! Just a gentle nudge that it's time to take
-your morning blood pressure tablet."*
+| Time | Kind | Result |
+|---|---|---|
+| 09/14 09:00 | scheduled | ALLOWED — morning tablet |
+| 09/14 09:00 | noticed | **ALLOWED** — Priya's support |
+| 09/14 09:00 | noticed | **ALLOWED** — knee pain + scan anxiety |
+| 09/14 09:00 | noticed | **ALLOWED** — scan investigating knee |
+| 09/14 09:00 | noticed | **ALLOWED** — sweets/mood |
+| 09/14 21:00 | scheduled | ALLOWED — evening tablets |
+| 09/15 09:00 | scheduled | ALLOWED — leave-in-time reminder |
+| *(rest of the week)* | — | nothing (all sources exhausted at once) |
 
-**2026-09-14 09:00 — noticed**
-> She is relying on social support from her daughter, Priya, to help
-> manage her anxiety, which is evidenced by Priya's visit, their
-> extended conversation, and the sharing of treats.
+**Five things said in the same breath, then silence for six days.**
 
-Would say: *"It was lovely to see you two enjoying that time together
-and the treats last week. How are you feeling today?"*
+**After** (this run, same seeded week, real output):
 
-**2026-09-14 09:00 — noticed**
-> Her physical discomfort, specifically knee pain, is impacting her
-> routine and sleep, adding to her emotional strain while waiting for
-> the scan results.
+| Time | Kind | Result |
+|---|---|---|
+| 09/14 09:00 | scheduled | ALLOWED — morning tablet |
+| 09/14 09:00 | noticed | lost to the reminder this tick |
+| 09/14 09:00 | noticed | lost to the reminder this tick |
+| 09/14 21:00 | scheduled | ALLOWED — evening tablets |
+| 09/14 21:00 | noticed | lost to the reminder this tick |
+| 09/14 21:00 | noticed | lost to the reminder this tick |
+| 09/15 09:00 | scheduled | ALLOWED — leave-in-time reminder |
+| 09/15 09:00 | noticed | lost to the reminder this tick |
+| 09/15 09:00 | noticed | lost to the reminder this tick |
+| 09/15 21:00 | noticed | **ALLOWED** — scan anxiety (no reminder competing this tick) |
+| 09/15 21:00 | noticed | lost to the scan-anxiety candidate this tick |
+| 09/16 09:00 | noticed | **ALLOWED** — Priya/family support (its turn, finally) |
 
-Would say: *"I've heard your knee hurting at night, and I want you to
-know I'm thinking of you while you wait for those scan results. You've
-been so brave dealing with this pain, and I hope you find some gentle
-relief soon."*
+**One thing per tick, reminders always taking priority when they
+compete, the two noticed insights spaced a full tick apart instead of
+landing together.** (This run's `reflect()` call happened to produce
+two rules rather than the first run's five — real LLM variance between
+runs, not a change in method — but the fix is what matters here: however
+many "noticed" candidates exist, at most one fires per tick, and losers
+retry rather than vanish.)
 
-**2026-09-14 09:00 — noticed**
-> The user has a medical scan scheduled to investigate her knee pain,
-> suggesting the physical symptoms are the reason for the appointment.
+Full phrased utterances for the "after" run:
 
-Would say: *"Good morning, I just wanted to remind you that your knee
-scan is coming up soon. I hope it brings you some peace of mind and
-helps us get to the bottom of that discomfort."*
+- *(09/14 09:00)* "Good morning. It's time for your morning blood
+  pressure tablet."
+- *(09/14 21:00)* "It's about time for your evening tablets. Shall I
+  come over to watch you take them?"
+- *(09/15 09:00)* "Good afternoon, just a gentle nudge to remember you
+  have that scan on Thursday. Try to get yourself ready to leave on
+  time so you aren't rushed!"
+- *(09/15 21:00)* "I heard the weather is turning a bit messy, so why
+  don't I call a friend to drive you to the scan? I'll stay right here
+  with you while you take it slow, so you don't have to worry about a
+  thing."
+- *(09/16 09:00)* "It will be lovely to sit down and share a meal with
+  your daughter soon. We can take our time and just enjoy the chat
+  together."
 
-**2026-09-14 09:00 — noticed**
-> Sharing food, specifically sweets, and extended conversation during
-> visits significantly boosts her mood, as evidenced by her reporting
-> feeling "much better" after a visit where Priya brought sweets and
-> they talked for hours.
+**A real limitation of this simulation, not the fix:** ticks here are
+twice daily (~09:00, ~21:00), 12 hours apart — comfortably past the
+90-minute cooldown every time, so the seeded week's own timeline never
+actually shows cooldown *binding* anything. What it does show clearly
+is rule 1 (one per tick, reminders first) doing real work. Cooldown,
+cap, and expiry are demonstrated directly below instead, against the
+same real code.
 
-Would say: *"You looked so happy after Priya left today. Just remember,
-whenever you want to brighten your day, treating yourself to some
-sweets and a nice chat really does the trick."*
+## Cooldown, cap, and expiry — direct demonstration
 
-**2026-09-14 21:00 — scheduled**
-> Reminder due: take your evening tablets
+Same real `policy.evaluate()`, controlled scenarios, real output:
 
-Would say: *"It's time for your evening tablets. Would you like me to
-put a glass of water over for you?"*
+**Cooldown (default 90 minutes):**
 
-**2026-09-15 09:00 — scheduled**
-> Reminder due: leave in time for Thursday's scan appointment
-> check-in
+| When | Candidate | Result |
+|---|---|---|
+| t = 0 | a "noticed" candidate | fires |
+| t = +30 min | a second "noticed" candidate | held back — *"cooldown (90 min between utterances; 30 min since the last one)"* |
+| t = +35 min | a due reminder | fires anyway — exempt |
+| t = +91 min | the second "noticed" candidate again | **still held back** — *"56 min since the last one"* |
 
-Would say: *"Good morning, dearest. Just a gentle reminder to make sure
-you set off with plenty of time to spare for your scan appointment on
-Thursday. I have it noted down for you, so there is no need to worry
-about the details."*
+The last row is the subtle, correct part: the reminder at t=+35 wasn't
+*blocked* by cooldown, but firing it still reset the clock for what
+comes after it — 91−35=56 minutes, still under 90. A reminder is exempt
+from *waiting on* cooldown; it doesn't stop *starting* one for whatever
+comes next.
 
-**2026-09-15 21:00 through 2026-09-21 21:00 (13 further ticks):
-nothing proposed.** All three seeded reminders and all five reflected
-rules were already proposed once — the real dedup logic held for the
-rest of the week, which is the intended behavior (SPEC.md: restraint,
-not commenting on the same thing every tick), not an empty result.
+**Daily cap (default 3):**
 
-**A real, worth-noting finding:** five "noticed" candidates (four rules
-plus context) all landed in the *same* 09:00 tick, because reflection
-ran once and produced them all at once. On a real device, reflecting
-incrementally, this clustering is less likely — but the scheduler
-itself has no pacing logic to stagger multiple simultaneous "noticed"
-proposals into separate turns even if it *did* happen. Five things
-noticed at once is arguably exactly the "device that comments on
-everything" failure mode SPEC.md's `policy.py` section warns against,
-just concentrated in one moment instead of spread across a session.
-Worth deciding before this is ever wired to actually speak: should
-`policy.py` (or a v2 of it) cap how many "noticed" candidates it allows
-per tick, or per day?
-
-## What restraint actually looks like — direct demonstration
-
-None of the ticks above happened to land during quiet hours or while
-something else was going on, so the seeded week alone doesn't show
-suppression. Run directly against `policy.should_speak()`, same real
-code, same candidate (the evening-tablets reminder), four different
-contexts:
-
-| Context | Result |
+| Utterance | Result |
 |---|---|
-| `presence=True` | **Speaks** — `"Reminder due: take your evening tablets..."` |
-| `presence=True, quiet_hours=True` | Suppressed — `"quiet hours"` |
-| `presence=None` (unconfirmed, the default) | Suppressed — `"presence not confirmed — no confirmed reason she's there to hear it"` |
-| `presence=True, busy=True` | Suppressed — `"something else is already happening"` |
+| 1st (of the day) | fires |
+| 2nd | fires |
+| 3rd | fires |
+| 4th, highest confidence of all four | **"daily cap reached (3/day)"** |
+| A reminder, same day | **"daily cap reached (3/day)"** — no exemption |
 
-The default-context result is the one that matters most: with *nothing*
-confirmed one way or the other, `policy.py` suppresses. That's SPEC.md's
-"a reason to speak, not the absence of a reason to stay quiet," directly
-verified, not just asserted in a docstring.
+**Expiry (default 2 days):**
+
+| Candidate | Result |
+|---|---|
+| Observed 6 hours ago | fires |
+| Observed 3 days ago (e.g. "Thursday's scan," now Sunday) | **"expired: missed its useful window (3 days since observed, limit 2)"** |
+
+## A real tension worth deciding
+
+The daily cap blocks reminders too, "whatever the score" — as
+instructed, no exemption invented beyond the one explicitly given
+(cooldown). But a medication reminder that can't fire because three
+*other* things already used up today's cap is a real, concerning
+outcome for a device some of whose users depend on it for that reminder,
+not a hypothetical. Implemented exactly as specified, not overridden —
+flagging it here rather than silently adding an unrequested carve-out.
+Worth an explicit decision either way: cap the reminders as designed
+(they'll wait until tomorrow's reset), or exempt reminders from the cap
+the same way they're exempt from cooldown.

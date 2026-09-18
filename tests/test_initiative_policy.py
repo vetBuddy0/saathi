@@ -73,13 +73,18 @@ def test_evaluate_logs_a_suppressed_candidate_with_its_reason(store):
 
 
 def test_evaluate_logs_every_candidate_even_a_mix_of_allowed_and_suppressed(store):
+    # A "scheduled" candidate always outscores a "noticed" one (see
+    # test_initiative_policy_rules.py's dedicated scoring tests), so of
+    # this pair only the reminder fires this tick -- the other is
+    # logged too, not dropped, just not the winner.
     allowed = InitiativeCandidate(kind="scheduled", reason="a reminder is due")
-    suppressed_context = PolicyContext(busy=True)
     rows = evaluate(store, [allowed, CANDIDATE], PolicyContext(presence=True), now=NOW)
     assert len(rows) == 2
-    assert all(r["suppressed_by"] is None for r in rows)
+    fired = [r for r in rows if r["suppressed_by"] is None]
+    assert len(fired) == 1
+    assert fired[0]["kind"] == "scheduled"
 
-    rows_suppressed = evaluate(store, [allowed], suppressed_context, now=NOW)
+    rows_suppressed = evaluate(store, [allowed], PolicyContext(busy=True), now=NOW)
     assert rows_suppressed[0]["suppressed_by"] is not None
 
 
