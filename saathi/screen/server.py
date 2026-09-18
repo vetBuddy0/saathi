@@ -58,6 +58,16 @@ from saathi.core import Core, Event, State
 _STATIC_DIR = Path(__file__).parent / "static"
 _CAPTURE_CHUNK_BYTES = 3200  # 100ms of 16kHz mono 16-bit PCM
 
+# Robustness pass (checkpoint 2): a 401/429/timeout/connection-reset from
+# Groq used to be an uncaught exception with nowhere good to land — the
+# turn's own try/except caught it and went straight to IDLE, silently.
+# SPEC.md already has the answer for "thinking exceeds ~1.5s": say
+# something short, out loud, rather than leave her looking at nothing.
+# The same rule applies here. Never technical (no "401", no "rate
+# limited") — she doesn't need the HTTP status, journalctl has it
+# (logger.exception below keeps the real exception type and message).
+_FALLBACK_REPLY_TEXT = "I didn't quite catch that. Let's try again in a moment."
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,19 +89,30 @@ async def _run_turn(session, core: Core, generation: int, turn_generation: dict)
     try:
         reply_text = await loop.run_in_executor(None, session.end_turn)
     except Exception:
-        logger.exception("turn failed")
-        if turn_generation["value"] == generation:
-            core.handle(Event("no_response"))
+        logger.exception("turn failed (STT or LLM)")
+        await _speak_and_finish(session, core, generation, turn_generation, _FALLBACK_REPLY_TEXT)
         return
     logger.info("reply: %s", reply_text)
 
+    await _speak_and_finish(session, core, generation, turn_generation, reply_text)
+
+
+async def _speak_and_finish(
+    session, core: Core, generation: int, turn_generation: dict, text: str
+) -> None:
+    """THINKING/already-SPEAKING -> SPEAKING -> IDLE. Shared by the real
+    reply and the fallback: both are "say this, then go back to IDLE",
+    and a failure speaking the *fallback* (Piper is local — TTS itself
+    doesn't depend on whatever just failed) still must not crash the
+    turn or leave the state machine stuck."""
+    loop = asyncio.get_running_loop()
     if turn_generation["value"] != generation:
         return
     core.handle(Event("response_ready"))
     try:
-        await loop.run_in_executor(None, session.say, reply_text)
+        await loop.run_in_executor(None, session.say, text)
     except Exception:
-        logger.exception("speaking the reply failed")
+        logger.exception("speaking failed")
     if turn_generation["value"] != generation:
         return
     core.handle(Event("done"))

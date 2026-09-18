@@ -29,6 +29,7 @@ and stops rather than pretending to have run it.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -38,7 +39,7 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -76,13 +77,46 @@ def _report(kind: str, devices: list[Device]) -> bool:
     return True
 
 
+def _report_groq_key(
+    api_key: str | None = None, client_factory: Callable[[str], object] | None = None
+) -> bool:
+    """One cheap authenticated call — list models, no tokens spent —
+    to catch a bad `GROQ_API_KEY` here instead of live: unwrapped, a bad
+    key presents as the face reaching THINKING and sitting there
+    forever, which reads exactly like a broken audio pipeline and cost
+    an hour to tell apart from one. No key at all is not a failure —
+    it just means this machine isn't running the voice engine."""
+    api_key = api_key if api_key is not None else os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        print("GROQ_API_KEY not set — voice engine will not start.")
+        return True
+
+    from groq import Groq
+
+    client = (client_factory or Groq)(api_key=api_key)
+    try:
+        client.models.list()
+    except Exception as exc:
+        print(f"GROQ_API_KEY was rejected: {exc}")
+        print(
+            "  Unwrapped, this presents as the face reaching THINKING and never "
+            "leaving it — indistinguishable from a broken audio pipeline. Fix "
+            "the key (or 'systemctl restart saathi-engine' after editing "
+            "/etc/saathi/env) before deploying."
+        )
+        return False
+    print("GROQ_API_KEY accepted.")
+    return True
+
+
 def main(argv: Sequence[str] | None = None, manager: DeviceManager | None = None) -> int:
     # `manager` is injectable so tests exercise the reporting/exit-code
     # logic against a FakeBackend, without a real PulseAudio server.
     manager = manager or DeviceManager(PulseAudioBackend())
     inputs_ok = _report("microphone", manager.enumerate("input"))
     outputs_ok = _report("speaker", manager.enumerate("output"))
-    return 0 if inputs_ok and outputs_ok else 1
+    key_ok = _report_groq_key()
+    return 0 if inputs_ok and outputs_ok and key_ok else 1
 
 
 # -- hardware-in-the-loop AEC check ------------------------------------------

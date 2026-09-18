@@ -288,8 +288,22 @@ install_piper_voices() {
 
 # -- secrets ------------------------------------------------------------
 
+# Leak audit (checked, not assumed, after a real install): `read -s`
+# suppresses terminal echo of what's typed/pasted at the TTY level, below
+# where a `| tee` on this script's own stdout/stderr could ever see it —
+# there is nothing for tee to capture. Neither `prompt_secret` nor
+# anything it calls ever passes `$value` to `log`, `die`, or any other
+# print path; the one validation message below that could have been
+# tempted to show the pasted value shows its *length* instead. No `set
+# -x` anywhere in this file, which is the other way a variable's value
+# can end up on stderr uninvited (xtrace prints expanded commands).
+#
+# A real paste on a real install once produced a 174-character value
+# from a 56-character key (see below) — root cause not reproducible
+# without that exact terminal/remote-console setup, so this validates
+# defensively instead of trying to fix the paste path itself.
 prompt_secret() {
-    local var_name="$1" prompt_text="$2"
+    local var_name="$1" prompt_text="$2" validate_regex="${3:-}"
     mkdir -p "$(dirname "$ENV_FILE")"
     touch "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
@@ -312,10 +326,26 @@ prompt_secret() {
     fi
 
     local value=""
-    while [ -z "$value" ]; do
+    while :; do
         read -r -s -p "${prompt_text}: " value
         echo
-        [ -z "$value" ] && echo "  (empty — try again)"
+        # A mangled paste has shown up as stray whitespace/control
+        # characters (embedded carriage returns in particular — bash's
+        # `read` only terminates on a bare newline, so a paste using \r
+        # as its line ending reads as one unbroken, wrong-length string)
+        # rather than the clean value that was actually copied. Strip
+        # what a normal single paste would never contain.
+        value="$(printf '%s' "$value" | tr -d '[:space:]')"
+        if [ -z "$value" ]; then
+            echo "  (empty — try again)"
+            continue
+        fi
+        if [ -n "$validate_regex" ] && ! [[ "$value" =~ $validate_regex ]]; then
+            echo "  That doesn't look right (got ${#value} characters after trimming whitespace)."
+            echo "  If you pasted it, check the paste landed once, not doubled or tripled."
+            continue
+        fi
+        break
     done
     printf '%s=%s\n' "$var_name" "$value" >> "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
@@ -410,6 +440,10 @@ Type=simple
 User=$SAATHI_USER
 WorkingDirectory=$REPO_ROOT
 Environment=XDG_RUNTIME_DIR=/run/user/$SAATHI_UID
+# Read once, at process start, not on every access. Editing this file
+# (e.g. rotating GROQ_API_KEY) needs 'systemctl restart saathi-engine'
+# to actually take effect -- it will keep running with the old
+# environment otherwise, silently.
 EnvironmentFile=$ENV_FILE
 ExecStart=$UV_BIN run saathi run
 Restart=always
@@ -494,6 +528,13 @@ Logs:
   journalctl -u saathi-engine -f
   journalctl -u saathi-face -f
 
+Editing $ENV_FILE by hand (e.g. to rotate GROQ_API_KEY) takes
+effect only on the engine's next start — systemd reads an
+EnvironmentFile once, at process start, not on every access. Run:
+  sudo systemctl restart saathi-engine
+after any edit, or the engine keeps using whatever was in the
+environment when it last started.
+
 Re-running this script is safe. It will not duplicate packages, the
 system user, or the secret in $ENV_FILE, and it will rewrite the
 systemd units and restart both services — so re-running after a
@@ -515,7 +556,11 @@ main() {
     enable_linger_and_wait_for_pulseaudio
     run_smoke_check  # fail fast on hardware, before voices/secrets/kiosk setup
     install_piper_voices
-    prompt_secret GROQ_API_KEY "Groq API key (console.groq.com)"
+    # Confirmed against a real key: gsk_ + 52 chars = 56 total. Some
+    # slack either side (44-64) in case key length varies by account
+    # tier or a future rotation — this is a sanity check against a
+    # mangled paste, not a checksum, so it doesn't need to be exact.
+    prompt_secret GROQ_API_KEY "Groq API key (console.groq.com)" '^gsk_[A-Za-z0-9]{40,60}$'
     disable_console_blanking
     claim_tty1_for_the_face
     write_systemd_units

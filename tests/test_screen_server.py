@@ -14,6 +14,7 @@ class FakeSession:
     def __init__(self) -> None:
         self.start_calls = 0
         self.interrupt_calls = 0
+        self.spoken: list[str] = []
 
     def start(self) -> None:
         self.start_calls += 1
@@ -25,7 +26,7 @@ class FakeSession:
         return "reply"
 
     def say(self, text: str) -> None:
-        pass
+        self.spoken.append(text)
 
     def interrupt(self) -> None:
         self.interrupt_calls += 1
@@ -196,7 +197,12 @@ async def test_a_real_turn_walks_thinking_speaking_idle_and_captures_audio(monke
     assert FakeCapture.instances[0].stopped is True
 
 
-async def test_a_turn_that_raises_goes_to_idle_via_no_response(monkeypatch):
+async def test_a_failed_turn_speaks_a_short_fallback_then_goes_idle(monkeypatch):
+    # Robustness pass: an upstream failure (401/429/timeout/connection
+    # reset from Groq, simulated here as any exception from end_turn())
+    # used to go straight from THINKING to IDLE via no_response, silent —
+    # exactly the "say something short out loud" gap SPEC.md already
+    # calls out for slow turns, just not previously wired for failed ones.
     monkeypatch.setattr(server_module, "Capture", FakeCapture)
     FakeCapture.instances.clear()
 
@@ -217,6 +223,42 @@ async def test_a_turn_that_raises_goes_to_idle_via_no_response(monkeypatch):
 
             await ws.send_json({"type": "input", "event": "release"})
             assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
             assert await ws.receive_json() == {"type": "state", "state": "idle"}
+
+    assert core.state == State.IDLE
+    assert len(session.spoken) == 1
+    assert session.spoken[0]  # something was said, not silence
+
+
+async def test_a_turn_that_also_fails_to_speak_the_fallback_still_reaches_idle(monkeypatch):
+    # Piper is local and doesn't depend on whatever just failed, but the
+    # state machine must not get stuck even if speaking the fallback
+    # itself somehow raises too.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+
+    class DoublyFailingSession(FakeSession):
+        def end_turn(self) -> str:
+            raise RuntimeError("Groq is down")
+
+        def say(self, text: str) -> None:
+            raise RuntimeError("Piper is down too")
+
+    core = Core()
+    session = DoublyFailingSession()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source")
+
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            assert await ws.receive_json() == {"type": "state", "state": "sleeping"}
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+
+    assert core.state == State.IDLE
 
     assert core.state == State.IDLE
