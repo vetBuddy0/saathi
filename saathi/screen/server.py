@@ -64,7 +64,6 @@ from saathi.core import Core, Event, State
 from saathi.identity.preferences import (
     LANGUAGE_KEY,
     TTS_BACKEND_KEY,
-    PreferenceLocked,
     read_preference,
     write_preference,
 )
@@ -94,33 +93,28 @@ def _make_on_chunk(session):
 def _log_turn(store, session, eou_ms: int | None) -> None:
     """Item E: one row per turn that actually completed (superseded/
     interrupted turns never reach here — see `_speak_and_finish` below).
-    Uses the `turns` schema exactly as SPEC.md already has it today: no
-    schema change, so nothing here is blocked on the more granular
-    per-stage columns proposed as a follow-up SPEC.md diff (see
-    `cascade.py`'s `TurnTimings` docstring). `engine_ms`/`first_audio_ms`
-    are only as good as `session.pop_last_turn_timings()` — absent for a
-    fake session in a test, or for a real one that never got past
-    `end_turn()` some other way (e.g. `smoke.py`'s barge-in check calls
-    `say()` directly and correctly produces no timings — see cascade.py).
-    A logging failure must never take the turn down with it, hence the
-    broad except."""
+    `turns`'s per-stage columns (2026-09-18 schema) are only as good as
+    `session.pop_last_turn_timings()` — absent for a fake session in a
+    test, or for a real one that never got past `end_turn()` some other
+    way (e.g. `smoke.py`'s barge-in check calls `say()` directly and
+    correctly produces no timings — see cascade.py). A logging failure
+    must never take the turn down with it, hence the broad except."""
     if store is None:
         return
     pop_timings = getattr(session, "pop_last_turn_timings", None)
     timings = pop_timings() if pop_timings is not None else None
-    engine_ms = None
-    first_audio_ms = None
-    if timings is not None:
-        engine_ms = timings.stt_ms + timings.llm_ms
-        first_audio_ms = engine_ms + timings.first_tts_chunk_ms
     try:
         store.append(
             "turns",
             ts=datetime.now(timezone.utc).isoformat(),
             mode="voice",  # the only mode this device has today (SPEC.md names no others)
             eou_ms=eou_ms,
-            engine_ms=engine_ms,
-            first_audio_ms=first_audio_ms,
+            stt_ms=timings.stt_ms if timings else None,
+            first_token_ms=timings.first_token_ms if timings else None,
+            first_tts_chunk_ms=timings.first_tts_chunk_ms if timings else None,
+            prompt_tokens=timings.prompt_tokens if timings else None,
+            completion_tokens=timings.completion_tokens if timings else None,
+            cost_usd=timings.cost_usd if timings else None,
             handoff=0,
             engine="cascade",
         )
@@ -272,20 +266,7 @@ def build_app(
                             )
                         )
                         continue
-                    try:
-                        write_preference(store, key, value)
-                    except PreferenceLocked as exc:
-                        await ws.send_str(
-                            json.dumps(
-                                {
-                                    "type": "preference_result",
-                                    "key": key,
-                                    "ok": False,
-                                    "reason": str(exc),
-                                }
-                            )
-                        )
-                        continue
+                    write_preference(store, key, value)
                     await ws.send_str(
                         json.dumps(
                             {"type": "preference_result", "key": key, "ok": True, "reason": ""}

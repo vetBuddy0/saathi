@@ -353,13 +353,11 @@ async def test_set_preference_with_a_store_succeeds_and_broadcasts_new_settings(
     store.close()
 
 
-async def test_set_preference_twice_for_the_same_key_is_a_named_failure_not_a_crash():
-    # Documents the real limitation raised in chat: preferences.key is a
-    # PRIMARY KEY under the current schema, so append() (IdentityStore's
-    # only write primitive) succeeds once per key and raises after that.
-    # write_preference() turns that into PreferenceLocked rather than
-    # letting an unhandled IntegrityError take the websocket down -- see
-    # saathi/identity/preferences.py's docstring for the proposed fix.
+async def test_set_preference_twice_for_the_same_key_both_succeed():
+    # preferences is an append-only log (2026-09-18 schema) -- a second
+    # write to the same key used to raise (PreferenceLocked, via a
+    # PRIMARY KEY on preferences.key), found live to break exactly this:
+    # changing a language or backend preference a second time.
     store = _tmp_store()
     app = build_app(Core(), store=store)
 
@@ -370,12 +368,16 @@ async def test_set_preference_twice_for_the_same_key_is_a_named_failure_not_a_cr
             await ws.send_json({"type": "set_preference", "key": "language", "value": "chinese"})
             first_result = await ws.receive_json()
             assert first_result["ok"] is True
-            await ws.receive_json()  # the settings broadcast that follows
+            first_settings = await ws.receive_json()
+            assert first_settings["current_language"] == "chinese"
 
             await ws.send_json({"type": "set_preference", "key": "language", "value": "hindi"})
             second_result = await ws.receive_json()
-            assert second_result["ok"] is False
-            assert "language" in second_result["reason"]
+            assert second_result["ok"] is True
+            second_settings = await ws.receive_json()
+            assert second_settings["current_language"] == "hindi"
+
+    store.close()
 
     store.close()
 
@@ -421,10 +423,21 @@ class TimedFakeSession(FakeSession):
 
 
 class _Timings:
-    def __init__(self, stt_ms, llm_ms, first_tts_chunk_ms):
+    def __init__(
+        self,
+        stt_ms,
+        first_token_ms,
+        first_tts_chunk_ms,
+        prompt_tokens=None,
+        completion_tokens=None,
+        cost_usd=None,
+    ):
         self.stt_ms = stt_ms
-        self.llm_ms = llm_ms
+        self.first_token_ms = first_token_ms
         self.first_tts_chunk_ms = first_tts_chunk_ms
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.cost_usd = cost_usd
 
 
 async def _run_one_full_turn(ws, capture_ms=0):
@@ -443,7 +456,16 @@ async def test_a_completed_turn_is_logged_with_real_timings(monkeypatch):
     FakeCapture.instances.clear()
 
     store = _tmp_store()
-    session = TimedFakeSession(_Timings(stt_ms=100, llm_ms=200, first_tts_chunk_ms=50))
+    session = TimedFakeSession(
+        _Timings(
+            stt_ms=100,
+            first_token_ms=200,
+            first_tts_chunk_ms=50,
+            prompt_tokens=120,
+            completion_tokens=30,
+            cost_usd=0.00021,
+        )
+    )
     app = build_app(Core(), session=session, capture_source_id="fake-aec-source", store=store)
 
     async with TestClient(TestServer(app)) as client:
@@ -457,8 +479,12 @@ async def test_a_completed_turn_is_logged_with_real_timings(monkeypatch):
     row = rows[0]
     assert row["mode"] == "voice"
     assert row["engine"] == "cascade"
-    assert row["engine_ms"] == 300  # stt_ms + llm_ms
-    assert row["first_audio_ms"] == 350  # engine_ms + first_tts_chunk_ms
+    assert row["stt_ms"] == 100
+    assert row["first_token_ms"] == 200
+    assert row["first_tts_chunk_ms"] == 50
+    assert row["prompt_tokens"] == 120
+    assert row["completion_tokens"] == 30
+    assert row["cost_usd"] == 0.00021
     assert row["eou_ms"] is not None and row["eou_ms"] >= 20
     assert row["handoff"] == 0
 
@@ -467,7 +493,7 @@ async def test_a_turn_with_no_store_does_not_crash(monkeypatch):
     monkeypatch.setattr(server_module, "Capture", FakeCapture)
     FakeCapture.instances.clear()
 
-    session = TimedFakeSession(_Timings(stt_ms=10, llm_ms=10, first_tts_chunk_ms=10))
+    session = TimedFakeSession(_Timings(stt_ms=10, first_token_ms=10, first_tts_chunk_ms=10))
     app = build_app(Core(), session=session, capture_source_id="fake-aec-source")  # store=None
 
     async with TestClient(TestServer(app)) as client:
@@ -480,7 +506,7 @@ async def test_a_session_without_pop_last_turn_timings_logs_eou_only(monkeypatch
     # Plain FakeSession has no pop_last_turn_timings -- the real gap a
     # fake or a future VoiceSession implementation without granular
     # instrumentation would leave; the turn is still logged, just
-    # without engine_ms/first_audio_ms, rather than not logged at all.
+    # without the per-stage columns, rather than not logged at all.
     monkeypatch.setattr(server_module, "Capture", FakeCapture)
     FakeCapture.instances.clear()
 
@@ -496,8 +522,9 @@ async def test_a_session_without_pop_last_turn_timings_logs_eou_only(monkeypatch
     rows = store.read("turns")
     store.close()
     assert len(rows) == 1
-    assert rows[0]["engine_ms"] is None
-    assert rows[0]["first_audio_ms"] is None
+    assert rows[0]["stt_ms"] is None
+    assert rows[0]["first_token_ms"] is None
+    assert rows[0]["first_tts_chunk_ms"] is None
     assert rows[0]["eou_ms"] is not None
 
 

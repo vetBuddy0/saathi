@@ -123,11 +123,29 @@ entities(id, kind, name, notes, created_at)
 edges(src, dst, relation, since, until)          -- graph, via recursive CTE
 episodes(id, ts, entity_id, text, importance, embedding)
 rules(id, text, confidence, learned_at, source_episode, active)
-preferences(key, value, updated_at)
+preferences(id, key, value, updated_at)          -- append-only log; latest row per key wins
 reminders(id, due_at, text, recurrence, active)
-turns(id, ts, mode, eou_ms, engine_ms, first_audio_ms, handoff, engine)
+turns(id, ts, mode, eou_ms, stt_ms, first_token_ms, first_tts_chunk_ms,
+      prompt_tokens, completion_tokens, cost_usd, handoff, engine)
 initiatives(id, ts, kind, reason, source_episode, spoken, suppressed_by)
 ```
+
+`preferences.key` is deliberately not unique. `append()`-only writes
+(`IdentityStore`'s whole interface) can't express "update the row for
+this key" — a `PRIMARY KEY` on `key` made the *first* write to a key
+succeed and every write after that raise. Reads take the row with the
+latest `updated_at` for a given key; every earlier row for that key is
+history, not garbage — nothing prunes it.
+
+`turns.engine_ms` split into `stt_ms` and `first_token_ms` so a slow
+turn can be traced to whichever stage caused it, not just flagged as
+slow overall. `first_token_ms` is only real once the engine streams its
+chat completion — until then it holds the same value a whole,
+non-streamed completion call took, which is not "time to the first
+token" so much as "time to the only token boundary this architecture
+can currently see." `prompt_tokens`/`completion_tokens`/`cost_usd` make
+per-turn cost real, logged data instead of something estimated after
+the fact from journalctl.
 
 Vector search via `sqlite-vec`. At a few thousand episodes, brute-force cosine
 in numpy is also fine.

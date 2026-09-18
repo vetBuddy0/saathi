@@ -48,16 +48,16 @@ def test_set_language_rejects_an_unsupported_language_without_writing_anything(s
     assert read_preference(store, LANGUAGE_KEY) is None
 
 
-def test_set_language_reports_preference_locked_instead_of_raising(store):
-    # The real, current limitation from identity/preferences.py: a
-    # second write to the same key fails under today's schema. The tool
-    # must surface that as an ordinary result the model can apologize
-    # about, not an exception that takes the turn down.
+def test_set_language_can_be_called_more_than_once(store):
+    # preferences is an append-only log (2026-09-18 schema) -- calling
+    # set_language a second time (e.g. she changes her mind, or the
+    # panel and the spoken path both get used) must actually change the
+    # stored preference, not raise the old PreferenceLocked.
     write_preference(store, LANGUAGE_KEY, "english")
     tool = make_set_language_tool(store)
     result = tool.handler(language="chinese")
-    assert result["status"] == "locked"
-    assert read_preference(store, LANGUAGE_KEY) == "english"  # unchanged
+    assert result["status"] == "ok"
+    assert read_preference(store, LANGUAGE_KEY) == "chinese"
 
 
 def test_set_language_goes_through_the_real_permission_check(store):

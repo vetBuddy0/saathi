@@ -11,23 +11,20 @@ interfaces — extending its surface is a conversation, not something this
 module should do on its own. Everything here is built entirely on top of
 `append`/`read`.
 
-That said: `preferences.key` is currently declared `PRIMARY KEY` in
-SPEC.md's schema, and `append()` is a plain `INSERT` — the *first* write
-to a given key succeeds, and every write after that raises
-`sqlite3.IntegrityError`, because SQLite enforces the uniqueness `append`
-itself doesn't know anything about. `write_preference()` below does not
-paper over that: it lets the error surface as `PreferenceLocked`, with a
-message pointing at the fix (drop the `PRIMARY KEY` on `key`, read
-"latest row wins" — proposed as a SPEC.md diff, not applied here). A
-preference that can be set once, ever, is not what either C's settings
-panel or G's spoken "speak to me in Mandarin" path asked for — showing
-that honestly as a real, named exception beats quietly discarding the
-second write or crashing the request handler.
+`preferences.key` used to be a `PRIMARY KEY`, which made the *first*
+write to a key succeed and every write after that raise
+`sqlite3.IntegrityError` — found live, breaking both C's settings panel
+and G's spoken "speak to me in Mandarin" path the moment either
+preference was changed a second time. Fixed directly in the schema
+(SPEC.md and `identity/store.py`, 2026-09-18, with existing rows
+migrated in place — see `identity/store.py`'s `_migrate_preferences`):
+`preferences` is a plain append-only log now, same as every other table
+`IdentityStore` holds, and `write_preference()` is a bare `append()`
+with nothing to catch.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 
 from saathi.identity.store import IdentityStore
@@ -36,46 +33,27 @@ LANGUAGE_KEY = "language"
 TTS_BACKEND_KEY = "tts_backend"
 
 
-class PreferenceLocked(RuntimeError):
-    """Raised by `write_preference()` when this key already has a row and
-    the current schema's `PRIMARY KEY` on `preferences.key` refuses a
-    second one. See this module's docstring for the proposed fix."""
-
-    def __init__(self, key: str) -> None:
-        super().__init__(
-            f"preference {key!r} was already set once and the current schema "
-            "can't record a change to it (preferences.key is a PRIMARY KEY; "
-            "see saathi/identity/preferences.py's docstring for the proposed "
-            "SPEC.md diff that fixes this without changing IdentityStore)."
-        )
-        self.key = key
-
-
 def read_preference(store: IdentityStore, key: str, default: str | None = None) -> str | None:
     """The most recent value written for `key`, or `default` if it was
     never set — an empty store is an ordinary, expected state (a fresh
     install, or a family that hasn't opened the settings panel yet), not
-    an error."""
+    an error. Ties on `updated_at` (two writes landing in the same
+    microsecond — plausible in a tight loop, e.g. tests) break on `id`,
+    which is monotonic with insertion order and never ties, rather than
+    on `max()`'s undefined-in-practice "first row seen" tiebreak."""
     rows = store.read("preferences", key=key)
     if not rows:
         return default
-    # Only ever one row per key under the current schema (see module
-    # docstring) — `max` by `updated_at` is future-proofing for the day
-    # the PRIMARY KEY is dropped and this legitimately becomes a log,
-    # not a guess about today's behavior.
-    latest = max(rows, key=lambda row: row["updated_at"])
+    latest = max(rows, key=lambda row: (row["updated_at"], row["id"]))
     return latest["value"]
 
 
 def write_preference(store: IdentityStore, key: str, value: str) -> None:
     """Effective on the next read — nothing here pushes the new value
-    into a running session directly. `CascadeSession` (and, once G wires
-    it up, the tool registry's spoken-language handler) reads through
-    `read_preference()` fresh each turn for exactly this reason: "next
-    turn, no restart" falls out of reading late rather than caching
-    early."""
+    into a running session directly. `CascadeSession` (via
+    `language_preference`/`backend_preference`) and the `set_language`
+    tool both read through `read_preference()` fresh each turn for
+    exactly this reason: "next turn, no restart" falls out of reading
+    late rather than caching early."""
     now = datetime.now(timezone.utc).isoformat()
-    try:
-        store.append("preferences", key=key, value=value, updated_at=now)
-    except sqlite3.IntegrityError as exc:
-        raise PreferenceLocked(key) from exc
+    store.append("preferences", key=key, value=value, updated_at=now)

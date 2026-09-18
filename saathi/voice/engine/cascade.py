@@ -19,13 +19,13 @@ exactly (`persona_stub.txt`, read once, never refreshed) — every
 existing caller that doesn't know about `IdentityStore` yet, including
 several tests, still works unchanged.
 
-The brief asked for Kimi K2. The key this was tested with doesn't have
-it (`GET /v1/models` doesn't list either `moonshotai/kimi-k2-instruct` or
-`-0905`) — substituted `openai/gpt-oss-120b`, the strongest chat model
-that account does have. Kimi K2 is still the intended model; swapping
-back is a one-line constant change once access exists. (Retrying Kimi
-K2 access is now explicitly item D's job — "not listed" may be a tier
-issue, not permanent.)
+The brief asked for Kimi K2. Retried per item D's instruction — still
+not on this account, and neither is llama-3.3-70b-versatile or
+qwen/qwen3-32b, the other two originally requested models (all
+confirmed live against `GET /v1/models`, 2026-09-18). `_LLM_MODEL` is
+now `qwen/qwen3.8-27b`, decided after a real head-to-head bake-off
+against the four models actually available — see that constant's own
+comment and `docs/completed/D-model-bakeoff.md` for the reasoning.
 
 Language: detection and the voice table share one source of truth,
 `voice/language.py` — read that module first. `end_turn()` asks Groq
@@ -37,7 +37,9 @@ voice from that same resolved value — never from the raw detection.
 
 Ships without tests on purpose in its first commit — that was debt, on
 the record. Tests landed the same session; see `tests/test_cascade.py`.
-Still not done: memory, cost logging, retrieval, reflection.
+Memory, retrieval and cost logging landed in items F/E — see
+`identity/compile.py` and `TurnTimings` below. Reflection
+(`identity/reflect.py`) is checkpoint 3 scope, not this file's.
 
 `interrupt()` is real now, not a stub: it calls `.stop()` on whatever
 `PlaybackHandle` `_speak()` is currently blocked on `.wait()`-ing for, in
@@ -90,13 +92,35 @@ from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
 _PERSONA_PATH = Path(__file__).parent.parent / "persona_stub.txt"
 _STT_MODEL = "whisper-large-v3-turbo"
-# Kimi K2 (moonshotai/kimi-k2-instruct, -0905) is not available on the
-# GROQ_API_KEY this was tested with -- confirmed via GET /v1/models,
-# neither id is in that account's list. Substituted the strongest general
-# chat model that IS on the key so the loop could close inside the hour.
-# Flagged, not silently swapped: revisit once Kimi K2 access exists.
-_LLM_MODEL = "openai/gpt-oss-120b"
+# Item D's bake-off (2026-09-18), decided: none of the originally
+# requested models (llama-3.3-70b-versatile, qwen/qwen3-32b, Kimi K2)
+# exist on this Groq account anymore -- confirmed live against
+# GET /v1/models. Of the four real, available alternatives tested head
+# to head on the same four prompts, qwen/qwen3.8-27b was the only one
+# that didn't fabricate either a memory or weather data, was the
+# fastest, and its token usage tracks what it actually says rather than
+# hiding a reasoning-token cost multiplier -- gpt-oss-20b, previously
+# the runner-up candidate, invented a fake memory about a daughter's
+# visit, which is disqualifying for a device talking to someone with
+# memory problems. See DECISIONS.md and docs/completed/D-model-bakeoff.md.
+_LLM_MODEL = "qwen/qwen3.8-27b"
+# Checked against console.groq.com/docs/models on 2026-09-18. LLM-only:
+# does not include Whisper STT or TTS backend cost, which are priced in
+# different units (audio-seconds, characters) and tracked separately --
+# see voice/tts/*_backend.py's cost_per_million_chars_usd() for TTS.
+_LLM_PRICE_PER_MILLION_USD = {"input": 0.80, "output": 4.00}
 _SAMPLE_RATE = 16000
+
+
+def _estimate_llm_cost_usd(
+    prompt_tokens: int | None, completion_tokens: int | None
+) -> float | None:
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    return (
+        prompt_tokens * _LLM_PRICE_PER_MILLION_USD["input"] / 1_000_000
+        + completion_tokens * _LLM_PRICE_PER_MILLION_USD["output"] / 1_000_000
+    )
 
 BackendPreference = Callable[[], str]
 LanguagePreference = Callable[[], "str | None"]
@@ -105,13 +129,15 @@ LanguagePreference = Callable[[], "str | None"]
 @dataclass(frozen=True)
 class TurnTimings:
     """Item E's per-stage instrumentation, as much of it as this
-    *non-streaming* cascade can honestly measure. `llm_ms` is the whole
-    chat completion call, not "time to first token" — this architecture
-    has no first token to time separately from the last one; a true
-    streaming measurement needs `end_turn()` itself to stream, which is
-    a `VoiceSession` contract change (one of CLAUDE.md's five protected
-    interfaces) and not something to decide by renaming a field. Labeled
-    honestly rather than as something it isn't.
+    *non-streaming* cascade can honestly measure. `first_token_ms` is
+    named to match `turns.first_token_ms` (SPEC.md), but it's really the
+    whole chat completion call's duration, not a true first-token
+    measurement — this architecture has no first token to time
+    separately from the last one; a true streaming measurement needs
+    `end_turn()` itself to stream, which is a `VoiceSession` contract
+    change (one of CLAUDE.md's five protected interfaces) and not
+    something to decide by renaming a field. Documented honestly rather
+    than pretending the column name alone makes it real.
 
     Not part of the `VoiceSession` Protocol — an additive capability
     `screen/server.py` reads via `getattr(session, "pop_last_turn_timings",
@@ -121,10 +147,11 @@ class TurnTimings:
     what it can measure from the outside."""
 
     stt_ms: int
-    llm_ms: int
+    first_token_ms: int
     first_tts_chunk_ms: int
     prompt_tokens: int | None
     completion_tokens: int | None
+    cost_usd: float | None
 
 
 def _no_language_preference() -> str | None:
@@ -193,7 +220,7 @@ class CascadeSession:
         self._current_playback: PlaybackHandle | None = None
         self._interrupt_requested = False
         self._pending_stt_ms: int | None = None
-        self._pending_llm_ms: int | None = None
+        self._pending_first_token_ms: int | None = None
         self._pending_prompt_tokens: int | None = None
         self._pending_completion_tokens: int | None = None
         self._last_turn_timings: TurnTimings | None = None
@@ -368,7 +395,7 @@ class CascadeSession:
         else:
             reply_text = (message.content or "").strip()
 
-        self._pending_llm_ms = round((time.monotonic() - llm_started_at) * 1000)
+        self._pending_first_token_ms = round((time.monotonic() - llm_started_at) * 1000)
         self._pending_prompt_tokens = prompt_tokens
         self._pending_completion_tokens = completion_tokens
         return reply_text
@@ -471,17 +498,20 @@ class CascadeSession:
         # directly with no end_turn() before it (e.g. smoke.py's
         # check_barge_in, which isn't a real conversational turn), and
         # that must not log a turn with fabricated stt/llm numbers.
-        if self._pending_stt_ms is None or self._pending_llm_ms is None:
+        if self._pending_stt_ms is None or self._pending_first_token_ms is None:
             return
         self._last_turn_timings = TurnTimings(
             stt_ms=self._pending_stt_ms,
-            llm_ms=self._pending_llm_ms,
+            first_token_ms=self._pending_first_token_ms,
             first_tts_chunk_ms=first_tts_chunk_ms,
             prompt_tokens=self._pending_prompt_tokens,
             completion_tokens=self._pending_completion_tokens,
+            cost_usd=_estimate_llm_cost_usd(
+                self._pending_prompt_tokens, self._pending_completion_tokens
+            ),
         )
         self._pending_stt_ms = None
-        self._pending_llm_ms = None
+        self._pending_first_token_ms = None
         self._pending_prompt_tokens = None
         self._pending_completion_tokens = None
 

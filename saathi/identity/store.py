@@ -63,9 +63,22 @@ _SCHEMA: dict[str, str] = {
             active INTEGER NOT NULL DEFAULT 1
         )
     """,
+    # id + no UNIQUE/PRIMARY KEY on `key`: an append-only log, not a
+    # key-value table -- append() (IdentityStore's only write primitive)
+    # can't express "update the row for this key", and a PRIMARY KEY on
+    # `key` made the *first* write to a key succeed and every write
+    # after that raise sqlite3.IntegrityError (found live: it broke the
+    # Ctrl+L panel and the spoken "speak to me in Mandarin" tool the
+    # moment either preference was changed a second time). Readers
+    # (`identity/preferences.py`) take the row with the latest
+    # `updated_at` for a given key; earlier rows are history, not
+    # garbage -- nothing here prunes them. Migrated from the old
+    # single-row-per-key shape by `_migrate_preferences` below, not
+    # dropped and recreated.
     "preferences": """
         CREATE TABLE IF NOT EXISTS preferences (
-            key TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
+            key TEXT NOT NULL,
             value TEXT,
             updated_at TEXT NOT NULL
         )
@@ -79,14 +92,25 @@ _SCHEMA: dict[str, str] = {
             active INTEGER NOT NULL DEFAULT 1
         )
     """,
+    # engine_ms/first_audio_ms split into per-stage columns (item E) so
+    # a slow turn can be traced to the stage that caused it. Migrated
+    # from the old shape by `_migrate_turns` below: old rows keep their
+    # id/ts/mode/eou_ms/handoff/engine values, with the new granular
+    # columns left NULL (a real "we don't have this breakdown for turns
+    # logged before this schema existed", not a fabricated split of the
+    # old combined engine_ms).
     "turns": """
         CREATE TABLE IF NOT EXISTS turns (
             id INTEGER PRIMARY KEY,
             ts TEXT NOT NULL,
             mode TEXT,
             eou_ms INTEGER,
-            engine_ms INTEGER,
-            first_audio_ms INTEGER,
+            stt_ms INTEGER,
+            first_token_ms INTEGER,
+            first_tts_chunk_ms INTEGER,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            cost_usd REAL,
             handoff INTEGER,
             engine TEXT
         )
@@ -112,6 +136,55 @@ class UnknownTable(ValueError):
     query nothing or open an injection seam."""
 
 
+def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate_preferences(conn: sqlite3.Connection) -> None:
+    """Old shape: `preferences(key PRIMARY KEY, value, updated_at)`. New:
+    `preferences(id, key, value, updated_at)`, no uniqueness on `key`.
+    A no-op if the table doesn't exist yet (a fresh install — `create()`'s
+    own `CREATE TABLE IF NOT EXISTS` handles that) or already has the new
+    shape (`id` present). Renames the old table aside, creates the new
+    one, copies every row across by name (nothing is dropped or
+    reinterpreted), then drops the renamed original."""
+    columns = _existing_columns(conn, "preferences")
+    if not columns or "id" in columns:
+        return
+    conn.execute("ALTER TABLE preferences RENAME TO preferences_pre_migration")
+    conn.execute(_SCHEMA["preferences"])
+    conn.execute(
+        "INSERT INTO preferences (key, value, updated_at) "
+        "SELECT key, value, updated_at FROM preferences_pre_migration"
+    )
+    conn.execute("DROP TABLE preferences_pre_migration")
+
+
+def _migrate_turns(conn: sqlite3.Connection) -> None:
+    """Old shape: `turns(id, ts, mode, eou_ms, engine_ms, first_audio_ms,
+    handoff, engine)`. New: `engine_ms`/`first_audio_ms` split into
+    per-stage columns (item E). A no-op if the table doesn't exist yet or
+    already has the new shape (`stt_ms` present). Old rows keep every
+    column that still has a direct equivalent (id, ts, mode, eou_ms,
+    handoff, engine) — `stt_ms`/`first_token_ms`/`first_tts_chunk_ms`/
+    `prompt_tokens`/`completion_tokens`/`cost_usd` are left `NULL` for
+    migrated rows rather than guessed at by splitting the old combined
+    `engine_ms` some arbitrary way; `latency_budget.py` already excludes
+    `NULL` timing values from its percentiles rather than treating them
+    as zero, so this degrades the same way an under-instrumented session
+    already does today."""
+    columns = _existing_columns(conn, "turns")
+    if not columns or "stt_ms" in columns:
+        return
+    conn.execute("ALTER TABLE turns RENAME TO turns_pre_migration")
+    conn.execute(_SCHEMA["turns"])
+    conn.execute(
+        "INSERT INTO turns (id, ts, mode, eou_ms, handoff, engine) "
+        "SELECT id, ts, mode, eou_ms, handoff, engine FROM turns_pre_migration"
+    )
+    conn.execute("DROP TABLE turns_pre_migration")
+
+
 class IdentityStore:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
@@ -135,8 +208,14 @@ class IdentityStore:
         return self._path
 
     def create(self) -> None:
-        """Create the schema. Idempotent — safe to call on every startup."""
+        """Create the schema. Idempotent — safe to call on every startup.
+        Also migrates `preferences`/`turns` from their pre-2026-09-18
+        shapes in place, so an existing device's history survives a
+        code update rather than starting over — see
+        `_migrate_preferences`/`_migrate_turns`."""
         with self._conn:
+            _migrate_preferences(self._conn)
+            _migrate_turns(self._conn)
             for statement in _SCHEMA.values():
                 self._conn.execute(statement)
 

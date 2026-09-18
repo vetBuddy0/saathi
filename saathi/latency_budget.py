@@ -1,19 +1,19 @@
 """SPEC.md's Budgets section, made into an actual gate: "A test reads
 the `turns` table and fails the build when a turn exceeds budget... It
 asserts on the 95th percentile, not the mean — a companion device's bad
-turns are the ones a person notices, and a mean hides exactly those."
+turns are the ones a person notices, and a mean hides exactly those.
 
 This module is the read-and-assert half; `screen/server.py`'s `_log_turn`
-(item E) is the write half. Deliberately reads `turns` with the schema
-exactly as it stands today (`eou_ms, engine_ms, first_audio_ms`) — no
-dependency on the more granular per-stage columns proposed as a follow-up
-SPEC.md diff (see `voice/engine/cascade.py`'s `TurnTimings` docstring).
-`engine_ms` is SPEC's "Brain finishes" budget; `first_audio_ms` is
-"Voice starts". Both are `NULL` on any row a session couldn't produce
-granular timings for (see `_log_turn`) and are excluded from the
-percentile, not treated as zero or dropped-whole-row — a partially
-instrumented turn still says something about EOU even if it can't speak
-to the rest.
+(item E) is the write half. "Voice starts" (SPEC.md's Budgets) is the
+whole path from end-of-utterance to the first sound she hears back —
+`stt_ms + first_token_ms + first_tts_chunk_ms` per row, not any single
+column alone (the 2026-09-18 schema split what used to be one combined
+`engine_ms`/`first_audio_ms` pair into these three). "Brain finishes" is
+`stt_ms + first_token_ms`, the STT+LLM portion, excluding TTS. A row
+missing any component needed for one of these sums is excluded from
+that sum's percentile entirely, not treated as zero or padded with a
+guess — a partially instrumented turn still says something about EOU
+even if it can't speak to the rest.
 
 Deliberately a pure function over rows, not a CI job that reads a real
 device's `identity.sqlite3` — there is no such file in CI (this device
@@ -44,7 +44,7 @@ VOICE_STARTS_BUDGET_MS: dict[str, int] = {
 BRAIN_FINISHES_BUDGET_MS = 3000
 
 
-def percentile_95(values: list[int]) -> float:
+def percentile_95(values: list[float]) -> float:
     """Nearest-rank 95th percentile — SPEC.md is explicit this must be
     the 95th percentile, not the mean, so a handful of bad turns can't
     hide inside an average. Raises on an empty list rather than
@@ -68,6 +68,18 @@ class BudgetResult:
     note: str = ""
 
 
+def _voice_starts_ms(row: dict) -> float | None:
+    if row["stt_ms"] is None or row["first_token_ms"] is None or row["first_tts_chunk_ms"] is None:
+        return None
+    return row["stt_ms"] + row["first_token_ms"] + row["first_tts_chunk_ms"]
+
+
+def _brain_finishes_ms(row: dict) -> float | None:
+    if row["stt_ms"] is None or row["first_token_ms"] is None:
+        return None
+    return row["stt_ms"] + row["first_token_ms"]
+
+
 def check_latency_budget(store: IdentityStore, engine: str = "cascade") -> BudgetResult:
     """Reads every logged `turns` row for `engine` and checks both of
     SPEC.md's Budgets against their 95th percentile. `passed` is `True`
@@ -88,8 +100,8 @@ def check_latency_budget(store: IdentityStore, engine: str = "cascade") -> Budge
             note=f"no turns logged yet for engine={engine!r}",
         )
 
-    voice_starts_values = [r["first_audio_ms"] for r in rows if r["first_audio_ms"] is not None]
-    brain_finishes_values = [r["engine_ms"] for r in rows if r["engine_ms"] is not None]
+    voice_starts_values = [v for v in (_voice_starts_ms(r) for r in rows) if v is not None]
+    brain_finishes_values = [v for v in (_brain_finishes_ms(r) for r in rows) if v is not None]
 
     voice_starts_p95 = percentile_95(voice_starts_values) if voice_starts_values else None
     brain_finishes_p95 = percentile_95(brain_finishes_values) if brain_finishes_values else None
@@ -104,9 +116,9 @@ def check_latency_budget(store: IdentityStore, engine: str = "cascade") -> Budge
 
     notes = []
     if not voice_starts_values:
-        notes.append("no turns had first_audio_ms")
+        notes.append("no turns had all of stt_ms/first_token_ms/first_tts_chunk_ms")
     if not brain_finishes_values:
-        notes.append("no turns had engine_ms")
+        notes.append("no turns had both stt_ms and first_token_ms")
     if voice_starts_budget is None:
         notes.append(f"no Voice-starts budget known for engine={engine!r}")
 

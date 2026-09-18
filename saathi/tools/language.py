@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from saathi.identity.preferences import LANGUAGE_KEY, PreferenceLocked, write_preference
+from saathi.identity.preferences import LANGUAGE_KEY, write_preference
 from saathi.identity.store import IdentityStore
 from saathi.tools.registry import Tool
 from saathi.voice.language import SUPPORTED_LANGUAGES
@@ -46,14 +46,7 @@ def make_set_language_tool(store: IdentityStore) -> Tool:
                 "language": language,
                 "supported": sorted(SUPPORTED_LANGUAGES),
             }
-        try:
-            write_preference(store, LANGUAGE_KEY, language)
-        except PreferenceLocked as exc:
-            # Real, current limitation -- see identity/preferences.py's
-            # docstring. Reported back to the model as a normal tool
-            # result, not an exception that takes the turn down, so it
-            # can apologize honestly instead of the reply just vanishing.
-            return {"status": "locked", "language": language, "reason": str(exc)}
+        write_preference(store, LANGUAGE_KEY, language)
         return {
             "status": "ok",
             "language": language,

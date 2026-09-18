@@ -237,10 +237,11 @@ def test_a_full_turn_produces_timings_with_tokens(no_real_playback):
     timings = session.pop_last_turn_timings()
     assert timings is not None
     assert timings.stt_ms >= 0
-    assert timings.llm_ms >= 0
+    assert timings.first_token_ms >= 0
     assert timings.first_tts_chunk_ms >= 0
     assert timings.prompt_tokens == 42
     assert timings.completion_tokens == 7
+    assert timings.cost_usd == pytest.approx(42 * 0.80 / 1e6 + 7 * 4.00 / 1e6)
 
 
 def test_pop_last_turn_timings_is_consumed_once(no_real_playback):
@@ -255,7 +256,7 @@ def test_pop_last_turn_timings_is_consumed_once(no_real_playback):
 def test_say_called_directly_without_end_turn_produces_no_timings(no_real_playback):
     # smoke.py's check_barge_in calls say() directly, skipping end_turn()
     # entirely (see cascade.py's module docstring) -- that must not
-    # fabricate stt_ms/llm_ms out of nothing.
+    # fabricate stt_ms/first_token_ms out of nothing.
     session, _backend = _session(FakeClient())
     session.say("Hello there.")
     assert session.pop_last_turn_timings() is None
