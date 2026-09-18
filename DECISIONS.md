@@ -169,3 +169,45 @@ SPEC.md and `IdentityStore`, migrating existing rows.** Explicit
 instruction, reversing the general "propose, don't apply" rule for these
 two specific diffs only; checkpoint 3's own schema questions are still
 proposed-only, per the same instruction.
+
+**2026-09-19 — Added an Autonomy section to CLAUDE.md.** Explicit
+instruction, exact text given this time — the first request had no
+section text after the colon, flagged and left alone rather than
+invented (see the CLAUDE.md commit message for the earlier gap).
+
+**2026-09-19 — TTS pipelining uses a daemon `threading.Thread` + a
+one-item `Queue`, not a `ThreadPoolExecutor`.** An executor used as a
+context manager blocks on `shutdown(wait=True)` for in-flight work when
+the `with` block exits — exactly wrong for an abandoned prefetch after
+an interrupt, which needs `_speak()` to return immediately, not wait for
+a discarded Piper call to finish. A plain daemon thread is simply
+abandoned instead, costing nothing.
+
+**2026-09-19 — Pipelining prefetches at most one sentence ahead, never
+more.** The next prefetch only starts once the current one is consumed
+from its queue, which an interrupted turn never reaches — bounds
+wasted/speculative synthesis to one sentence, matching the existing
+barge-in tolerance ("at most one already-in-flight sentence plays out")
+instead of introducing a new, larger slack.
+
+**2026-09-19 — `CascadeSession.__init__` warms the voice unconditionally
+at construction, regardless of whether an `identity_store` was given.**
+The cold-start cost this fixes (a fresh process's first reply) exists
+whether or not memory is wired in; tying it to `identity_store` would
+have made the fix depend on an unrelated feature flag.
+
+**2026-09-19 — The initiative dry run simulates two ticks per day
+(~09:00, ~21:00), not one.** A single daily tick made reminders due
+later the same day only get caught the *next* day's tick (a simulation
+artifact, not a scheduler bug) — twice-daily ticks catch same-day
+reminders realistically without needing to simulate the much higher
+real tick frequency a live scheduler would actually run at.
+
+**2026-09-19 — The dry run's restraint demonstration (quiet hours /
+unconfirmed presence / busy) is a direct, supplementary call to
+`policy.should_speak()`, not woven into the seeded week's own timeline.**
+None of the seeded week's ticks happened to land during a suppressed
+context; adding one artificially into the week's own narrative would
+have meant inventing an implausible scenario (a reminder due at 2am) to
+force it — a direct call on the same real candidate, real code, is more
+honest than bending the synthetic week to manufacture a result.
