@@ -141,8 +141,61 @@ hardware.
    at the cost of the PyAV/ffmpeg dependency — marginal next to the TTS
    number above; not recommended unless the Pi numbers change this math.
 
-Shipped now, real and tested: FLAC upload (`cascade.py`,
-`_pcm_to_flac_bytes`), `qwen/qwen3.8-27b` as the default model (item D).
-Not shipped: any TTS-latency fix — that's a real, undecided tradeoff
-(voice quality vs. speed, or a Google credential-setup dependency),
-not something to pick without you hearing the options.
+Shipped at the time: FLAC upload (`cascade.py`, `_pcm_to_flac_bytes`),
+`qwen/qwen3.8-27b` as the default model (item D). Not shipped: any
+TTS-latency fix — that's a real, undecided tradeoff (voice quality vs.
+speed, or a Google credential-setup dependency), not something to pick
+without you hearing the options.
+
+## 5. Follow-up (2026-09-19) — TTS pipelining + startup warm
+
+Two real, shipped fixes, re-measured properly, not estimated:
+
+- **Pipelined synthesis.** `_speak()` used to synthesize sentence N+1
+  only *after* sentence N finished playing — fully sequential.
+  `_prefetch_next_chunk()` now starts N+1's synthesis the moment N is
+  pulled off the pipeline, so it runs concurrently with N's playback.
+  Real, controlled, same-hardware comparison (real Piper, real sink,
+  same 3-sentence text, back to back): **old sequential 4732ms → new
+  pipelined 4378ms — 354ms / 7% faster** for the whole reply.
+- **Startup warm.** `CascadeSession.__init__` now calls
+  `_preload_voice_in_background()` immediately at construction, not
+  only during `end_turn()`'s STT/LLM wait — the fix for the 775ms
+  cold-start number that triggered item 3 in the first place, which
+  only benefited turn 2 onward before this. Confirmed working: across
+  10 fresh real trials on a freshly constructed session, trial 1's
+  `tts_first_chunk_ms` (550ms) sat inside the normal 401–670ms range
+  the other 9 trials showed — no cold-start spike on the very first
+  turn anymore.
+
+**Real p95, both fixes in place, one long-lived session across 10 real
+turns (matching how `cli.py` actually uses `CascadeSession` — not a
+fresh object per turn):**
+
+| | after item 3's fixes | after pipelining + warm start |
+|---|---|---|
+| Voice-starts p95 | 1237ms | **1213ms** |
+| Voice-starts budget | 1200ms | 1200ms |
+| Result | FAIL, by 37ms | **FAIL, by 13ms** |
+| Brain-finishes p95 | 767ms | 652ms |
+
+**Still not passing — honestly reported, budget untouched, as
+instructed.** Closer, not there. The reason this moved so little:
+**pipelining and startup-warm both target costs *after* or *around* the
+first chunk — neither touches the first sentence's own synthesis time**,
+which is exactly what `voice_starts`/the 1200ms budget measures (time
+to the *first* audio). Pipelining's real win (the 7% figure above) shows
+up in *total reply duration* for multi-sentence replies, not in
+"Voice starts." Startup-warm's real win is eliminating a one-time,
+first-turn-of-a-process spike, not the steady-state number — and this
+device's turns were already steady-state warm in every measurement
+that fed the original 1237ms figure, so there was little cold-start
+left for it to remove.
+
+**What would actually move the "Voice starts" number** is unchanged
+from item 3's original list: a faster/streaming first-sentence
+synthesis path (a smaller local Piper voice, or Google's real streaming
+API — still untested, no GCP credentials) is what the remaining ~400–
+600ms of first-sentence Piper synthesis needs, not pipelining. Re-run on
+real Pi hardware is still the most important unverified step; nothing
+in this follow-up touched that gap either.

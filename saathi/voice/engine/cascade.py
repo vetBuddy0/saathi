@@ -60,12 +60,26 @@ report of this file called it "occasional debt." The fix is
 `TTSBackend.synthesize_stream()` (`voice/tts/__init__.py`): text is
 split into sentences and each sentence is synthesized and played
 separately, with `_interrupt_requested` checked under `_playback_lock`
-both before asking for the next sentence's audio and before starting its
+both before waiting on the next sentence's audio and before starting its
 playback. That bounds the un-interruptible window to roughly one
 sentence's synthesis time, for every backend, including ones (Piper,
 Kokoro) with no streaming of their own. Verified against a real
 long-reply barge-in after this landed; see `tests/test_cascade.py` and
 the C report for the re-measured numbers.
+
+Pipelined since 2026-09-19: `_prefetch_next_chunk()` starts sentence
+N+1's synthesis the moment sentence N is pulled off the pipeline, so it
+overlaps with N's *playback* instead of starting only after N is done
+playing — this is what actually cuts inter-sentence silence, not just
+first-sentence latency. Responsiveness is unaffected: an interrupt still
+stops playback and returns from `_speak()` immediately, never waiting
+on an abandoned prefetch (see that function's docstring for why a
+daemon thread, not a `ThreadPoolExecutor`). What *does* change slightly:
+synthesis may now run up to one sentence ahead of what's playing even
+after an interrupt lands, since that prefetch was already kicked off
+before the interrupt could be seen. Never two sentences ahead — the
+next prefetch after that one only starts once the current one is
+actually consumed, which an interrupted turn never reaches.
 """
 
 from __future__ import annotations
@@ -73,6 +87,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -179,6 +194,39 @@ def _pcm_to_flac_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
     return buffer.getvalue()
 
 
+_STREAM_DONE = object()
+
+
+def _prefetch_next_chunk(stream) -> "queue.Queue":
+    """Kicks off synthesis of the *next* sentence in a daemon thread,
+    right now, and returns a one-item `Queue` that will hold its result
+    (or `_STREAM_DONE`). `_speak()` calls this immediately after pulling
+    a chunk off the previous prefetch, so sentence N+1's synthesis runs
+    while sentence N is still playing — that overlap is the whole point
+    (pipelining, not read-ahead-and-buffer: at most one sentence is ever
+    being synthesized ahead of what's currently playing, since the next
+    prefetch isn't started until the previous one has already been
+    consumed).
+
+    A daemon `threading.Thread`, not a `ThreadPoolExecutor` used as a
+    context manager: an executor's `__exit__` calls `shutdown(wait=True)`,
+    which blocks until in-flight work finishes — exactly the wrong thing
+    when `_speak()` returns early on interrupt with a prefetch still
+    running. This way an abandoned prefetch (interrupted before its
+    chunk was ever needed) is simply discarded; `_speak()` returns
+    immediately, not after Piper finishes a synthesis call nobody is
+    going to play. Only ever one `next(stream)` call in flight at a
+    time — safe to call on a plain generator, which isn't otherwise
+    thread-safe to access concurrently."""
+    result: queue.Queue = queue.Queue(maxsize=1)
+
+    def _run() -> None:
+        result.put(next(stream, _STREAM_DONE))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return result
+
+
 def _default_backend_preference() -> str:
     # Placeholder until item C/G's Ctrl+L panel writes a real preference
     # through IdentityStore -- see that work's tracking. Piper always
@@ -233,6 +281,12 @@ class CascadeSession:
         self._last_turn_timings: TurnTimings | None = None
         self._tool_schemas = tool_schemas
         self._intent_callback = None
+        # Warm the current backend's voice right now, not on the first
+        # end_turn() -- see this module's docstring on cold starts.
+        # Without this, only the *second* reply onward benefited from a
+        # warm voice; the very first turn of a fresh process ate the
+        # full cold-load cost on top of its own synthesis.
+        self._preload_voice_in_background(self._last_language)
 
     def pop_last_turn_timings(self) -> TurnTimings | None:
         """The previous turn's granular timings, consumed once — a
@@ -465,14 +519,25 @@ class CascadeSession:
         speak_started_at = time.monotonic()
         first_chunk = True
 
+        # Pipelined: sentence 1's synthesis starts here, before the loop;
+        # every following sentence's synthesis is kicked off the moment
+        # the previous one is pulled off the queue, so it runs
+        # concurrently with that previous sentence's playback below
+        # instead of after it. See _prefetch_next_chunk()'s docstring
+        # for why a daemon thread + Queue, not a ThreadPoolExecutor.
+        pending = _prefetch_next_chunk(stream)
+
         while True:
             with self._playback_lock:
                 if self._interrupt_requested:
-                    return  # interrupted since the last sentence: don't synthesize the next
-            try:
-                wav_bytes = next(stream)
-            except StopIteration:
+                    return  # interrupted since the last sentence: don't wait on the next
+            wav_bytes = pending.get()
+            if wav_bytes is _STREAM_DONE:
                 return
+            # Kick off the *next* sentence's synthesis now, before this
+            # one starts playing -- the overlap this whole thing exists
+            # for.
+            pending = _prefetch_next_chunk(stream)
 
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
                 tmp_path = Path(tmp_file.name)

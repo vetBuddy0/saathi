@@ -388,14 +388,17 @@ def test_interrupt_stops_a_blocking_say_call(monkeypatch):
     assert not say_thread.is_alive()
 
 
-def test_interrupt_during_first_sentence_playback_stops_the_second_sentence_from_ever_synthesizing(
+def test_interrupt_during_first_sentence_playback_stops_the_third_sentence_from_ever_synthesizing(
     monkeypatch,
 ):
-    """The corrected barge-in fix, under direct test: an interrupt that
-    lands while one sentence is still playing must stop *before* the
-    next sentence is synthesized, not just before it's played. This is
-    what bounds the un-interruptible window to one sentence instead of
-    the whole reply."""
+    """The corrected barge-in fix, updated for pipelining: sentence N+1
+    synthesizes *while* N plays now, deliberately (see _speak()'s
+    docstring) -- so an interrupt during "One."'s playback can no longer
+    promise "Two." was never touched, only that synthesis never runs
+    more than one sentence ahead of what's playing. "Three." -- two
+    sentences ahead -- must still never be requested: its prefetch only
+    starts once "Two." is pulled off the pipeline, which never happens
+    because the interrupt is caught before that."""
     from saathi.audio.playback import PlaybackHandle
 
     slow_proc = _SlowFakeProc()
@@ -406,17 +409,73 @@ def test_interrupt_during_first_sentence_playback_stops_the_second_sentence_from
 
     say_thread = threading.Thread(target=session.say, args=("One. Two. Three.",))
     say_thread.start()
-    time.sleep(0.05)  # let _speak() synthesize + start playing "One."
-    assert backend.synthesized == ["One."]
+    time.sleep(0.05)  # let _speak() reach "One."'s playback (and "Two."'s prefetch)
 
     session.interrupt()
     say_thread.join(timeout=1.0)
     assert not say_thread.is_alive()
 
-    # "Two." and "Three." must never have been requested from the
-    # backend -- that's the whole point of checking the interrupt flag
-    # before each next(stream) call, not just before each play().
-    assert backend.synthesized == ["One."]
+    # At most one sentence of pipelined-ahead synthesis, never two.
+    assert "One." in backend.synthesized
+    assert "Three." not in backend.synthesized
+
+
+class _TimedFakeProc:
+    """Like _SlowFakeProc, but completes on its own after a fixed
+    duration instead of only on terminate() -- stands in for a real
+    paplay process actually finishing a real clip, so a test can measure
+    genuine playback duration instead of blocking indefinitely."""
+
+    def __init__(self, duration_s: float) -> None:
+        self._stopped = threading.Event()
+        self._duration_s = duration_s
+
+    def poll(self):
+        return 0 if self._stopped.is_set() else None
+
+    def wait(self, timeout=None) -> None:
+        self._stopped.wait(timeout=self._duration_s if timeout is None else timeout)
+
+    def terminate(self) -> None:
+        self._stopped.set()
+
+
+def test_pipelining_overlaps_synthesis_with_the_previous_sentences_playback(monkeypatch):
+    # Real, timing-based proof that sentence N+1 synthesizes *during*
+    # sentence N's playback, not only after it -- the actual thing item
+    # 3's pipelining request asked for, not just "no interrupt
+    # regression". Generous margins throughout: this asserts a clear,
+    # qualitative speedup over sequential, not a tight bound that would
+    # make this test flaky under normal CI scheduling jitter.
+    from saathi.audio.playback import PlaybackHandle
+
+    synth_delay_s = 0.05
+    play_duration_s = 0.15
+    num_sentences = 3
+
+    def on_sentence(_sentence: str) -> None:
+        time.sleep(synth_delay_s)
+
+    monkeypatch.setattr(
+        cascade_module,
+        "play",
+        lambda sink_id, path: PlaybackHandle(_TimedFakeProc(play_duration_s)),
+    )
+
+    backend = FakeTTSBackend(on_sentence=on_sentence)
+    session, _backend = _session(FakeClient(), backend=backend)
+
+    text = " ".join(f"Sentence {i}." for i in range(num_sentences))
+    started_at = time.monotonic()
+    session.say(text)
+    elapsed_s = time.monotonic() - started_at
+
+    sequential_s = num_sentences * (synth_delay_s + play_duration_s)
+    # Comfortably below fully-sequential timing (proves real overlap
+    # happened) but not asserting a specific tight pipelined number
+    # (which would be sensitive to scheduling jitter on a loaded CI box).
+    assert elapsed_s < sequential_s - synth_delay_s
+    assert backend.synthesized == [f"Sentence {i}." for i in range(num_sentences)]
 
 
 def test_end_turn_applies_a_stored_language_preference_when_detection_is_unsupported(
@@ -494,6 +553,26 @@ def test_end_turn_ignores_an_unsupported_stored_language_preference(no_real_play
     assert session._last_language == "hindi"
 
 
+def test_construction_preloads_the_backends_voice_immediately():
+    # Kills the cold-start cost on the *first* reply, not just the
+    # second one onward: without this, only end_turn() (below) warmed
+    # anything, so a fresh process's first turn always paid the full
+    # cold-load cost on top of its own synthesis.
+    preload_calls: list[str] = []
+
+    class PreloadingFakeBackend(FakeTTSBackend):
+        def preload(self, language: str) -> None:
+            preload_calls.append(language)
+
+    CascadeSession(
+        "fake-sink",
+        client=FakeClient(),
+        backends={"fake": PreloadingFakeBackend()},
+        backend_preference=lambda: "fake",
+    )
+    assert preload_calls == ["english"]  # DEFAULT_LANGUAGE
+
+
 def test_end_turn_preloads_the_current_backends_voice(no_real_playback):
     # A backend without a model to warm (e.g. Google) simply has no
     # preload() attribute -- see cascade.py's _preload_voice_in_background
@@ -506,6 +585,7 @@ def test_end_turn_preloads_the_current_backends_voice(no_real_playback):
 
     client = FakeClient(detected_language="English")
     session, _backend = _session(client, backend=PreloadingFakeBackend())
+    preload_calls.clear()  # construction itself already preloaded once -- see the test above
     session.start()
     session.end_turn()
 
