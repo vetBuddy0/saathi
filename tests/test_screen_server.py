@@ -400,3 +400,145 @@ async def test_set_preference_rejects_an_unknown_key_or_non_string_value():
             assert result["ok"] is True
 
     store.close()
+
+
+# -- turn logging (item E) -----------------------------------------------
+
+
+class TimedFakeSession(FakeSession):
+    """A FakeSession that also offers the additive
+    `pop_last_turn_timings()` capability real CascadeSession has (see
+    cascade.py's `TurnTimings`) -- server.py reads it via getattr, same
+    pattern as `preload()`, so a fake exercising it needs nothing beyond
+    just having the method."""
+
+    def __init__(self, timings) -> None:
+        super().__init__()
+        self._timings = timings
+
+    def pop_last_turn_timings(self):
+        return self._timings
+
+
+class _Timings:
+    def __init__(self, stt_ms, llm_ms, first_tts_chunk_ms):
+        self.stt_ms = stt_ms
+        self.llm_ms = llm_ms
+        self.first_tts_chunk_ms = first_tts_chunk_ms
+
+
+async def _run_one_full_turn(ws, capture_ms=0):
+    await ws.send_json({"type": "input", "event": "press"})
+    assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    if capture_ms:
+        await asyncio.sleep(capture_ms / 1000)
+    await ws.send_json({"type": "input", "event": "release"})
+    assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+    assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+    assert await ws.receive_json() == {"type": "state", "state": "idle"}
+
+
+async def test_a_completed_turn_is_logged_with_real_timings(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+
+    store = _tmp_store()
+    session = TimedFakeSession(_Timings(stt_ms=100, llm_ms=200, first_tts_chunk_ms=50))
+    app = build_app(Core(), session=session, capture_source_id="fake-aec-source", store=store)
+
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _run_one_full_turn(ws, capture_ms=20)
+
+    rows = store.read("turns")
+    store.close()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["mode"] == "voice"
+    assert row["engine"] == "cascade"
+    assert row["engine_ms"] == 300  # stt_ms + llm_ms
+    assert row["first_audio_ms"] == 350  # engine_ms + first_tts_chunk_ms
+    assert row["eou_ms"] is not None and row["eou_ms"] >= 20
+    assert row["handoff"] == 0
+
+
+async def test_a_turn_with_no_store_does_not_crash(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+
+    session = TimedFakeSession(_Timings(stt_ms=10, llm_ms=10, first_tts_chunk_ms=10))
+    app = build_app(Core(), session=session, capture_source_id="fake-aec-source")  # store=None
+
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _run_one_full_turn(ws)  # must not raise
+
+
+async def test_a_session_without_pop_last_turn_timings_logs_eou_only(monkeypatch):
+    # Plain FakeSession has no pop_last_turn_timings -- the real gap a
+    # fake or a future VoiceSession implementation without granular
+    # instrumentation would leave; the turn is still logged, just
+    # without engine_ms/first_audio_ms, rather than not logged at all.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+
+    store = _tmp_store()
+    session = FakeSession()
+    app = build_app(Core(), session=session, capture_source_id="fake-aec-source", store=store)
+
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _run_one_full_turn(ws)
+
+    rows = store.read("turns")
+    store.close()
+    assert len(rows) == 1
+    assert rows[0]["engine_ms"] is None
+    assert rows[0]["first_audio_ms"] is None
+    assert rows[0]["eou_ms"] is not None
+
+
+async def test_a_superseded_barge_in_turn_is_not_logged():
+    # The turn that got barged into never reaches core.handle(Event("done"))
+    # (see _speak_and_finish) -- and _log_turn is called right there, so a
+    # superseded turn correctly produces no row at all, not a row with
+    # wrong or partial numbers.
+    store = _tmp_store()
+    say_blocked = threading.Event()
+    say_may_return = threading.Event()
+
+    class SlowSession(FakeSession):
+        def say(self, text: str) -> None:
+            say_blocked.set()
+            say_may_return.wait(timeout=2.0)
+
+        def interrupt(self) -> None:
+            super().interrupt()
+            say_may_return.set()
+
+    core = Core()
+    session = SlowSession()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source", store=store)
+
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, say_blocked.wait, 2.0)
+
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await asyncio.sleep(0.2)  # give the superseded turn time to unwind
+
+    rows = store.read("turns")
+    store.close()
+    assert rows == []

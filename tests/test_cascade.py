@@ -37,14 +37,17 @@ class FakeTranscriptionsAPI:
 
 
 class FakeChatCompletionsAPI:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, prompt_tokens: int = 42, completion_tokens: int = 7) -> None:
         self.content = content
         self.calls: list[dict] = []
+        self._usage = SimpleNamespace(
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+        )
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
         message = SimpleNamespace(content=self.content)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=self._usage)
 
 
 class FakeClient:
@@ -192,6 +195,40 @@ def test_say_synthesizes_one_sentence_at_a_time_via_the_selected_backend(no_real
 
     assert backend.synthesized == ["First sentence.", "Second sentence."]
     assert backend.languages_asked[-1] == "chinese"
+
+
+def test_a_full_turn_produces_timings_with_tokens(no_real_playback):
+    client = FakeClient(reply="First sentence. Second sentence.")
+    session, _backend = _session(client)
+    session.start()
+    reply = session.end_turn()
+    session.say(reply)
+
+    timings = session.pop_last_turn_timings()
+    assert timings is not None
+    assert timings.stt_ms >= 0
+    assert timings.llm_ms >= 0
+    assert timings.first_tts_chunk_ms >= 0
+    assert timings.prompt_tokens == 42
+    assert timings.completion_tokens == 7
+
+
+def test_pop_last_turn_timings_is_consumed_once(no_real_playback):
+    session, _backend = _session(FakeClient())
+    session.start()
+    session.say(session.end_turn())
+
+    assert session.pop_last_turn_timings() is not None
+    assert session.pop_last_turn_timings() is None
+
+
+def test_say_called_directly_without_end_turn_produces_no_timings(no_real_playback):
+    # smoke.py's check_barge_in calls say() directly, skipping end_turn()
+    # entirely (see cascade.py's module docstring) -- that must not
+    # fabricate stt_ms/llm_ms out of nothing.
+    session, _backend = _session(FakeClient())
+    session.say("Hello there.")
+    assert session.pop_last_turn_timings() is None
 
 
 def test_say_with_empty_text_synthesizes_nothing(no_real_playback):

@@ -60,7 +60,9 @@ import io
 import os
 import tempfile
 import threading
+import time
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -83,6 +85,31 @@ _SAMPLE_RATE = 16000
 
 BackendPreference = Callable[[], str]
 LanguagePreference = Callable[[], "str | None"]
+
+
+@dataclass(frozen=True)
+class TurnTimings:
+    """Item E's per-stage instrumentation, as much of it as this
+    *non-streaming* cascade can honestly measure. `llm_ms` is the whole
+    chat completion call, not "time to first token" — this architecture
+    has no first token to time separately from the last one; a true
+    streaming measurement needs `end_turn()` itself to stream, which is
+    a `VoiceSession` contract change (one of CLAUDE.md's five protected
+    interfaces) and not something to decide by renaming a field. Labeled
+    honestly rather than as something it isn't.
+
+    Not part of the `VoiceSession` Protocol — an additive capability
+    `screen/server.py` reads via `getattr(session, "pop_last_turn_timings",
+    None)`, the same pattern already used for `preload()`. A session that
+    doesn't offer it (a fake in a test, a future realtime engine) simply
+    doesn't contribute granular numbers; server.py degrades to logging
+    what it can measure from the outside."""
+
+    stt_ms: int
+    llm_ms: int
+    first_tts_chunk_ms: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
 
 
 def _no_language_preference() -> str | None:
@@ -139,6 +166,21 @@ class CascadeSession:
         self._playback_lock = threading.Lock()
         self._current_playback: PlaybackHandle | None = None
         self._interrupt_requested = False
+        self._pending_stt_ms: int | None = None
+        self._pending_llm_ms: int | None = None
+        self._pending_prompt_tokens: int | None = None
+        self._pending_completion_tokens: int | None = None
+        self._last_turn_timings: TurnTimings | None = None
+
+    def pop_last_turn_timings(self) -> TurnTimings | None:
+        """The previous turn's granular timings, consumed once — a
+        second call before the next turn returns `None` rather than
+        stale data from a turn that's already been logged. See
+        `TurnTimings`'s docstring for why this exists outside the
+        `VoiceSession` Protocol."""
+        timings = self._last_turn_timings
+        self._last_turn_timings = None
+        return timings
 
     def _current_backend(self) -> TTSBackend:
         # Read fresh every call, not cached at construction -- this is
@@ -208,15 +250,18 @@ class CascadeSession:
         # load in _speak(), just not warmed early that one time.
         self._preload_voice_in_background(self._last_language)
 
+        stt_started_at = time.monotonic()
         transcription = self._client.audio.transcriptions.create(
             model=_STT_MODEL,
             file=("turn.wav", wav_bytes),
             response_format="verbose_json",
         )
+        self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
         heard = transcription.text.strip()
         detected = (transcription.language or "").lower()
         self._last_language = resolve_language(detected, self._last_language)
 
+        llm_started_at = time.monotonic()
         completion = self._client.chat.completions.create(
             model=_LLM_MODEL,
             messages=[
@@ -225,6 +270,10 @@ class CascadeSession:
                 {"role": "user", "content": heard},
             ],
         )
+        self._pending_llm_ms = round((time.monotonic() - llm_started_at) * 1000)
+        usage = getattr(completion, "usage", None)
+        self._pending_prompt_tokens = getattr(usage, "prompt_tokens", None)
+        self._pending_completion_tokens = getattr(usage, "completion_tokens", None)
         return completion.choices[0].message.content.strip()
 
     def _speak(self, text: str) -> None:
@@ -237,6 +286,8 @@ class CascadeSession:
 
         backend = self._current_backend()
         stream = backend.synthesize_stream(self._last_language, sentences)
+        speak_started_at = time.monotonic()
+        first_chunk = True
 
         while True:
             with self._playback_lock:
@@ -254,6 +305,16 @@ class CascadeSession:
                 with self._playback_lock:
                     if self._interrupt_requested:
                         return  # interrupted during this sentence's synthesis
+                    if first_chunk:
+                        # Item E: real time-to-first-audio, not a whole-reply
+                        # total — this is exactly what chunked synthesis
+                        # (see voice/tts/__init__.py) makes measurable at
+                        # all, since before it there was only ever one
+                        # chunk covering the whole reply.
+                        self._finalize_turn_timings(
+                            first_tts_chunk_ms=round((time.monotonic() - speak_started_at) * 1000)
+                        )
+                        first_chunk = False
                     handle = play(self._sink_id, tmp_path)
                     self._current_playback = handle
                 handle.wait()
@@ -261,6 +322,26 @@ class CascadeSession:
                 with self._playback_lock:
                     self._current_playback = None
                 tmp_path.unlink(missing_ok=True)
+
+    def _finalize_turn_timings(self, first_tts_chunk_ms: int) -> None:
+        # Only produces a result when end_turn() actually preceded this
+        # say() call and set both pending values -- say() can be called
+        # directly with no end_turn() before it (e.g. smoke.py's
+        # check_barge_in, which isn't a real conversational turn), and
+        # that must not log a turn with fabricated stt/llm numbers.
+        if self._pending_stt_ms is None or self._pending_llm_ms is None:
+            return
+        self._last_turn_timings = TurnTimings(
+            stt_ms=self._pending_stt_ms,
+            llm_ms=self._pending_llm_ms,
+            first_tts_chunk_ms=first_tts_chunk_ms,
+            prompt_tokens=self._pending_prompt_tokens,
+            completion_tokens=self._pending_completion_tokens,
+        )
+        self._pending_stt_ms = None
+        self._pending_llm_ms = None
+        self._pending_prompt_tokens = None
+        self._pending_completion_tokens = None
 
     def say(self, text: str) -> None:
         self._speak(text)

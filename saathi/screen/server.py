@@ -53,6 +53,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from aiohttp import WSMsgType, web
@@ -89,7 +91,46 @@ def _make_on_chunk(session):
     return lambda chunk: session.send_audio(chunk)
 
 
-async def _run_turn(session, core: Core, generation: int, turn_generation: dict) -> None:
+def _log_turn(store, session, eou_ms: int | None) -> None:
+    """Item E: one row per turn that actually completed (superseded/
+    interrupted turns never reach here — see `_speak_and_finish` below).
+    Uses the `turns` schema exactly as SPEC.md already has it today: no
+    schema change, so nothing here is blocked on the more granular
+    per-stage columns proposed as a follow-up SPEC.md diff (see
+    `cascade.py`'s `TurnTimings` docstring). `engine_ms`/`first_audio_ms`
+    are only as good as `session.pop_last_turn_timings()` — absent for a
+    fake session in a test, or for a real one that never got past
+    `end_turn()` some other way (e.g. `smoke.py`'s barge-in check calls
+    `say()` directly and correctly produces no timings — see cascade.py).
+    A logging failure must never take the turn down with it, hence the
+    broad except."""
+    if store is None:
+        return
+    pop_timings = getattr(session, "pop_last_turn_timings", None)
+    timings = pop_timings() if pop_timings is not None else None
+    engine_ms = None
+    first_audio_ms = None
+    if timings is not None:
+        engine_ms = timings.stt_ms + timings.llm_ms
+        first_audio_ms = engine_ms + timings.first_tts_chunk_ms
+    try:
+        store.append(
+            "turns",
+            ts=datetime.now(timezone.utc).isoformat(),
+            mode="voice",  # the only mode this device has today (SPEC.md names no others)
+            eou_ms=eou_ms,
+            engine_ms=engine_ms,
+            first_audio_ms=first_audio_ms,
+            handoff=0,
+            engine="cascade",
+        )
+    except Exception:
+        logger.exception("failed to log turn")
+
+
+async def _run_turn(
+    session, core: Core, generation: int, turn_generation: dict, store, eou_ms: int | None
+) -> None:
     """THINKING -> SPEAKING -> IDLE for one real turn. Runs the blocking
     STT/LLM/TTS work in an executor thread; every `core.handle()` call
     here still happens back on this event loop thread, in the `await`'s
@@ -104,15 +145,25 @@ async def _run_turn(session, core: Core, generation: int, turn_generation: dict)
         reply_text = await loop.run_in_executor(None, session.end_turn)
     except Exception:
         logger.exception("turn failed (STT or LLM)")
-        await _speak_and_finish(session, core, generation, turn_generation, _FALLBACK_REPLY_TEXT)
+        await _speak_and_finish(
+            session, core, generation, turn_generation, _FALLBACK_REPLY_TEXT, store, eou_ms
+        )
         return
     logger.info("reply: %s", reply_text)
 
-    await _speak_and_finish(session, core, generation, turn_generation, reply_text)
+    await _speak_and_finish(
+        session, core, generation, turn_generation, reply_text, store, eou_ms
+    )
 
 
 async def _speak_and_finish(
-    session, core: Core, generation: int, turn_generation: dict, text: str
+    session,
+    core: Core,
+    generation: int,
+    turn_generation: dict,
+    text: str,
+    store=None,
+    eou_ms: int | None = None,
 ) -> None:
     """THINKING/already-SPEAKING -> SPEAKING -> IDLE. Shared by the real
     reply and the fallback: both are "say this, then go back to IDLE",
@@ -130,6 +181,7 @@ async def _speak_and_finish(
     if turn_generation["value"] != generation:
         return
     core.handle(Event("done"))
+    _log_turn(store, session, eou_ms)
 
 
 def _settings_message(store) -> str:
@@ -174,6 +226,7 @@ def build_app(
     websockets: set[web.WebSocketResponse] = set()
     live_capture: dict[str, Capture | None] = {"capture": None}
     turn_generation = {"value": 0}
+    turn_started_at: dict[str, float | None] = {"value": None}
 
     def broadcast_state(state, _event: Event) -> None:
         message = json.dumps({"type": "state", "state": state.value})
@@ -264,6 +317,7 @@ def build_app(
                             turn_generation["value"] += 1
                             session.interrupt()
                         session.start()
+                        turn_started_at["value"] = time.monotonic()
                         capture = Capture(
                             capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
                         )
@@ -277,10 +331,16 @@ def build_app(
                             capture = live_capture.pop("capture", None)
                             if capture is not None:
                                 capture.stop()
+                            eou_ms = None
+                            started_at = turn_started_at["value"]
+                            if started_at is not None:
+                                eou_ms = round((time.monotonic() - started_at) * 1000)
                             turn_generation["value"] += 1
                             generation = turn_generation["value"]
                             asyncio.get_running_loop().create_task(
-                                _run_turn(session, core, generation, turn_generation)
+                                _run_turn(
+                                    session, core, generation, turn_generation, store, eou_ms
+                                )
                             )
         finally:
             websockets.discard(ws)
