@@ -12,6 +12,12 @@ dependencies = [
     "pysilero-vad>=3.4.0",
     "pyudev>=0.24; sys_platform == 'linux'",
     "pywebrtc-audio>=0.2.0",
+    # cascade.py's STT upload: FLAC instead of raw WAV. Real, small
+    # aarch64 wheel (1.2MB, wraps libsndfile) -- measured live against
+    # the real Whisper endpoint, ~11% faster median time-to-response
+    # than WAV for the same audio, from a smaller upload. See
+    # docs/completed/latency-investigation.md for the numbers.
+    "soundfile>=0.14.0",
 ]
 
 [project.scripts]

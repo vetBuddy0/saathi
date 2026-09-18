@@ -155,6 +155,42 @@ def _session(client: FakeClient, backend: FakeTTSBackend | None = None):
     return session, backend
 
 
+def test_pcm_to_flac_bytes_round_trips_real_audio():
+    # Item 3's latency investigation: cascade.py uploads FLAC now, not
+    # WAV -- a real encode/decode round trip through soundfile, not a
+    # mocked one, since a bug here would silently corrupt every real
+    # turn's audio.
+    import io
+
+    import numpy as np
+    import soundfile as sf
+
+    from saathi.voice.engine.cascade import _pcm_to_flac_bytes
+
+    original = (np.sin(np.linspace(0, 40 * np.pi, 16000)) * 10000).astype("<i2")
+    flac_bytes = _pcm_to_flac_bytes(original.tobytes(), sample_rate=16000)
+
+    assert flac_bytes[:4] == b"fLaC"  # a real FLAC file, not just any bytes
+    decoded, sample_rate = sf.read(io.BytesIO(flac_bytes), dtype="int16")
+    assert sample_rate == 16000
+    assert len(decoded) == len(original)
+    # FLAC is lossless -- the decoded samples must match exactly, not
+    # approximately.
+    assert (decoded == original).all()
+
+
+def test_end_turn_uploads_flac_not_wav(no_real_playback):
+    client = FakeClient()
+    session, _backend = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    filename, audio_bytes = client.audio.transcriptions.calls[0]["file"]
+    assert filename.endswith(".flac")
+    assert audio_bytes[:4] == b"fLaC"
+
+
 def test_end_turn_transcribes_and_replies(no_real_playback):
     client = FakeClient(heard="what time is it", reply="It's teatime, dear.")
     session, _backend = _session(client)

@@ -76,11 +76,12 @@ import os
 import tempfile
 import threading
 import time
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+import soundfile as sf
 from groq import Groq
 
 from saathi.audio.playback import PlaybackHandle, play
@@ -162,13 +163,19 @@ def _no_language_preference() -> str | None:
     return None
 
 
-def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
+def _pcm_to_flac_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
+    """What `end_turn()` uploads to Whisper. Used to be a raw WAV built
+    with the stdlib `wave` module; real, live measurement against the
+    Whisper endpoint (2026-09-18, a ~3.9s clip) found FLAC's smaller
+    upload measurably faster: median 282ms for WAV vs. 251ms for FLAC
+    (~46% smaller, same lossless audio) — see
+    docs/completed/latency-investigation.md. Opus was faster still
+    (234ms) but needs PyAV/ffmpeg, a much heavier dependency than
+    `soundfile`/libsndfile for a further ~17ms; not worth it as the
+    default."""
+    samples = np.frombuffer(pcm, dtype="<i2")
     buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm)
+    sf.write(buffer, samples, sample_rate, format="FLAC", subtype="PCM_16")
     return buffer.getvalue()
 
 
@@ -305,7 +312,7 @@ class CascadeSession:
     def end_turn(self) -> str:
         pcm = b"".join(self._chunks)
         self._chunks = []
-        wav_bytes = _pcm_to_wav_bytes(pcm)
+        flac_bytes = _pcm_to_flac_bytes(pcm)
 
         # A stored preference (Ctrl+L panel, or the spoken "speak to me
         # in Mandarin" tool path — item G) is read here, at the start of
@@ -347,7 +354,7 @@ class CascadeSession:
         stt_started_at = time.monotonic()
         transcription = self._client.audio.transcriptions.create(
             model=_STT_MODEL,
-            file=("turn.wav", wav_bytes),
+            file=("turn.flac", flac_bytes),
             response_format="verbose_json",
         )
         self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
