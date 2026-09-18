@@ -4,3 +4,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.sqlite3
+
+# GCP service account key for saathi/voice/tts/google_backend.py. The
+# real one lives at /etc/saathi/gcp.json on the device (outside the
+# repo entirely) -- this only guards against a local dev copy dropped
+# in here for testing.
+gcp.json
+*.gcp.json

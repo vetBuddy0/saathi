@@ -1,20 +1,28 @@
-"""cascade.py's own tests — the debt flagged when it first shipped,
-paid the same session. No real Groq calls, no real Piper model download,
-no real PulseAudio playback: `client` and `voice_loader` are injected
-fakes, and `_ensure_voice_model`/`play` are monkeypatched at the module
-level cascade.py calls them from.
+"""cascade.py's own tests. No real Groq calls, no real TTS backend, no
+real PulseAudio playback: `client` and the TTS backend are injected
+fakes, and `play` is monkeypatched at the module level `_speak()` calls
+it from.
+
+`_speak()` used to synthesize a whole reply in one blocking call and
+these tests used to exercise that directly (a `FakeVoice` with
+`synthesize_wav`). It now goes through `TTSBackend.synthesize_stream()`,
+sentence by sentence, specifically so a press can interrupt *between*
+sentences on Pi-class hardware where one sentence's synthesis can itself
+take a while — see cascade.py's docstring for why that distinction
+matters and isn't debt. `FakeTTSBackend` below stands in for whatever
+real backend is selected.
 """
 
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 
 import saathi.voice.engine.cascade as cascade_module
 from saathi.voice.engine.cascade import CascadeSession
-from saathi.voice.language import SUPPORTED_LANGUAGES
+from saathi.voice.tts import TTSBackend
 
 
 class FakeTranscriptionsAPI:
@@ -47,45 +55,76 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=FakeChatCompletionsAPI(reply))
 
 
-class FakeVoice:
-    def __init__(self) -> None:
-        self.synthesized: list[str] = []
+class FakeTTSBackend(TTSBackend):
+    """A `TTSBackend` that never touches real audio: each sentence
+    becomes a one-element bytes object recording that it was asked for.
+    `on_sentence`, if given, runs synchronously before yielding each
+    sentence's "audio" — tests use it to synchronize with a synthesis
+    call in progress, the same way a slow real backend would occupy that
+    window."""
 
-    def synthesize_wav(self, text, wav_file) -> None:
-        self.synthesized.append(text)
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(16000)
-        wav_file.writeframes(b"\x00\x00" * 100)
+    id = "fake"
+    display_name = "Fake"
+    license = "n/a"
+    local = True
+
+    def __init__(self, on_sentence=None) -> None:
+        self.synthesized: list[str] = []
+        self.languages_asked: list[str] = []
+        self._on_sentence = on_sentence
+
+    def available(self) -> tuple[bool, str]:
+        return True, ""
+
+    def synthesize_stream(self, language: str, sentences: list[str]) -> Iterator[bytes]:
+        self.languages_asked.append(language)
+        for sentence in sentences:
+            if self._on_sentence is not None:
+                self._on_sentence(sentence)
+            self.synthesized.append(sentence)
+            yield b"\x00\x00" * 10
+
+    def cost_per_million_chars_usd(self) -> float:
+        return 0.0
+
+
+class UnavailableFakeBackend(TTSBackend):
+    id = "unavailable"
+    display_name = "Unavailable"
+    license = "n/a"
+    local = False
+
+    def available(self) -> tuple[bool, str]:
+        return False, "no credentials"
+
+    def synthesize_stream(self, language: str, sentences: list[str]) -> Iterator[bytes]:
+        raise AssertionError("must never be called: available() is False")
+
+    def cost_per_million_chars_usd(self) -> float:
+        return 1.0
 
 
 @pytest.fixture
-def no_real_io(monkeypatch):
-    """cascade.py's own I/O — downloading/loading a Piper model, playing
-    through PulseAudio — never touches the real thing in tests."""
-    monkeypatch.setattr(
-        cascade_module, "_ensure_voice_model", lambda name: Path(f"/fake/{name}.onnx")
-    )
+def no_real_playback(monkeypatch):
     monkeypatch.setattr(
         cascade_module, "play", lambda sink_id, path: SimpleNamespace(wait=lambda: None)
     )
 
 
-def _session(client: FakeClient) -> tuple[CascadeSession, dict[str, FakeVoice]]:
-    voices: dict[str, FakeVoice] = {}
+def _session(client: FakeClient, backend: FakeTTSBackend | None = None):
+    backend = backend or FakeTTSBackend()
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": backend},
+        backend_preference=lambda: "fake",
+    )
+    return session, backend
 
-    def voice_loader(path: str) -> FakeVoice:
-        voice = FakeVoice()
-        voices[path] = voice
-        return voice
 
-    session = CascadeSession("fake-sink", client=client, voice_loader=voice_loader)
-    return session, voices
-
-
-def test_end_turn_transcribes_and_replies(no_real_io):
+def test_end_turn_transcribes_and_replies(no_real_playback):
     client = FakeClient(heard="what time is it", reply="It's teatime, dear.")
-    session, _voices = _session(client)
+    session, _backend = _session(client)
     session.start()
     session.send_audio(b"\x00\x00" * 100)
 
@@ -96,9 +135,9 @@ def test_end_turn_transcribes_and_replies(no_real_io):
     assert client.chat.completions.calls[0]["messages"][-1]["content"] == "what time is it"
 
 
-def test_send_audio_chunks_are_joined_for_transcription(no_real_io):
+def test_send_audio_chunks_are_joined_for_transcription(no_real_playback):
     client = FakeClient()
-    session, _voices = _session(client)
+    session, _backend = _session(client)
     session.start()
     session.send_audio(b"AAAA")
     session.send_audio(b"BBBB")
@@ -113,28 +152,28 @@ def test_send_audio_chunks_are_joined_for_transcription(no_real_io):
     assert len(client.audio.transcriptions.calls) == 2
 
 
-def test_end_turn_resolves_a_supported_detected_language(no_real_io):
+def test_end_turn_resolves_a_supported_detected_language(no_real_playback):
     client = FakeClient(detected_language="Chinese")
-    session, _voices = _session(client)
+    session, _backend = _session(client)
     session.start()
     session.end_turn()
     assert session._last_language == "chinese"
 
 
-def test_end_turn_falls_back_when_detected_language_is_unsupported(no_real_io):
+def test_end_turn_falls_back_when_detected_language_is_unsupported(no_real_playback):
     # The Portuguese-reply bug, reproduced: a detection outside the
     # supported set must not change what language Saathi replies in.
     client = FakeClient(detected_language="Portuguese")
-    session, _voices = _session(client)
+    session, _backend = _session(client)
     session._last_language = "hindi"
     session.start()
     session.end_turn()
     assert session._last_language == "hindi"
 
 
-def test_end_turn_tells_the_llm_which_language_to_reply_in(no_real_io):
+def test_end_turn_tells_the_llm_which_language_to_reply_in(no_real_playback):
     client = FakeClient(detected_language="Hindi")
-    session, _voices = _session(client)
+    session, _backend = _session(client)
     session.start()
     session.end_turn()
 
@@ -143,52 +182,22 @@ def test_end_turn_tells_the_llm_which_language_to_reply_in(no_real_io):
     assert any("hindi" in content for content in system_messages)
 
 
-def test_say_speaks_with_the_voice_for_the_current_language(no_real_io):
+def test_say_synthesizes_one_sentence_at_a_time_via_the_selected_backend(no_real_playback):
     client = FakeClient(detected_language="Chinese")
-    session, voices = _session(client)
+    session, backend = _session(client)
     session.start()
     session.end_turn()  # resolves _last_language to "chinese"
 
-    session.say("你好")
+    session.say("First sentence. Second sentence.")
 
-    # Not asserting len(voices) == 1 here: end_turn() also preloads
-    # whatever language was current *before* this turn (English, the
-    # default) in the background, betting on it not having changed —
-    # see test_end_turn_preloads_last_turns_language_in_the_background.
-    # That bet is wrong on this exact language switch, on purpose, and
-    # loads a second, unused voice; it doesn't change what's spoken.
-    zh_voice_path = f"/fake/{SUPPORTED_LANGUAGES['chinese']}.onnx"
-    assert voices[zh_voice_path].synthesized == ["你好"]
+    assert backend.synthesized == ["First sentence.", "Second sentence."]
+    assert backend.languages_asked[-1] == "chinese"
 
 
-def test_voice_is_cached_across_turns_in_the_same_language(no_real_io):
-    client = FakeClient(detected_language="English")
-    session, voices = _session(client)
-    session.start()
-    session.end_turn()
-    session.say("first")
-    session.say("second")
-
-    assert len(voices) == 1  # one voice loaded, reused, not reloaded
-
-
-def test_end_turn_preloads_last_turns_language_in_the_background(no_real_io):
-    # The fix for a real bug (see cascade.py's docstring): loading a
-    # Piper voice for the first time is slow enough that, unwarmed, an
-    # interrupt can land *during* that load with nothing yet to stop.
-    # end_turn() bets on the language not changing and starts loading it
-    # while Groq's STT/LLM round trip is otherwise dead time for the
-    # audio side of the session.
-    client = FakeClient(detected_language="English")
-    session, voices = _session(client)
-    session.start()
-    session.end_turn()
-
-    en_voice_path = f"/fake/{SUPPORTED_LANGUAGES['english']}.onnx"
-    deadline = time.monotonic() + 1.0
-    while en_voice_path not in voices and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert en_voice_path in voices
+def test_say_with_empty_text_synthesizes_nothing(no_real_playback):
+    session, backend = _session(FakeClient())
+    session.say("")
+    assert backend.synthesized == []
 
 
 def test_missing_groq_api_key_raises(monkeypatch):
@@ -197,17 +206,41 @@ def test_missing_groq_api_key_raises(monkeypatch):
         CascadeSession("fake-sink")
 
 
-def test_unbuilt_interface_methods_raise_not_implemented(no_real_io):
-    session, _voices = _session(FakeClient())
+def test_unbuilt_interface_methods_raise_not_implemented(no_real_playback):
+    session, _backend = _session(FakeClient())
     with pytest.raises(NotImplementedError):
         session.on_audio(lambda *_args: None)
     with pytest.raises(NotImplementedError):
         session.on_intent(lambda *_args: None)
 
 
-def test_interrupt_with_nothing_playing_is_a_quiet_no_op(no_real_io):
-    session, _voices = _session(FakeClient())
+def test_interrupt_with_nothing_playing_is_a_quiet_no_op(no_real_playback):
+    session, _backend = _session(FakeClient())
     session.interrupt()  # must not raise
+
+
+def test_current_backend_falls_back_to_piper_when_preferred_is_unavailable(no_real_playback):
+    piper_stand_in = FakeTTSBackend()
+    piper_stand_in.id = "piper"
+    session = CascadeSession(
+        "fake-sink",
+        client=FakeClient(),
+        backends={"piper": piper_stand_in, "unavailable": UnavailableFakeBackend()},
+        backend_preference=lambda: "unavailable",
+    )
+    assert session._current_backend() is piper_stand_in
+
+
+def test_current_backend_falls_back_to_piper_for_an_unknown_preference(no_real_playback):
+    piper_stand_in = FakeTTSBackend()
+    piper_stand_in.id = "piper"
+    session = CascadeSession(
+        "fake-sink",
+        client=FakeClient(),
+        backends={"piper": piper_stand_in},
+        backend_preference=lambda: "some-backend-that-was-removed",
+    )
+    assert session._current_backend() is piper_stand_in
 
 
 class _SlowFakeProc:
@@ -231,13 +264,10 @@ class _SlowFakeProc:
 def test_interrupt_stops_a_blocking_say_call(monkeypatch):
     from saathi.audio.playback import PlaybackHandle
 
-    monkeypatch.setattr(
-        cascade_module, "_ensure_voice_model", lambda name: Path(f"/fake/{name}.onnx")
-    )
     slow_proc = _SlowFakeProc()
     monkeypatch.setattr(cascade_module, "play", lambda sink_id, path: PlaybackHandle(slow_proc))
 
-    session, _voices = _session(FakeClient(detected_language="English"))
+    session, _backend = _session(FakeClient(), backend=FakeTTSBackend())
 
     say_thread = threading.Thread(target=session.say, args=("a long reply",))
     say_thread.start()
@@ -247,3 +277,61 @@ def test_interrupt_stops_a_blocking_say_call(monkeypatch):
     session.interrupt()
     say_thread.join(timeout=1.0)
     assert not say_thread.is_alive()
+
+
+def test_interrupt_during_first_sentence_playback_stops_the_second_sentence_from_ever_synthesizing(
+    monkeypatch,
+):
+    """The corrected barge-in fix, under direct test: an interrupt that
+    lands while one sentence is still playing must stop *before* the
+    next sentence is synthesized, not just before it's played. This is
+    what bounds the un-interruptible window to one sentence instead of
+    the whole reply."""
+    from saathi.audio.playback import PlaybackHandle
+
+    slow_proc = _SlowFakeProc()
+    monkeypatch.setattr(cascade_module, "play", lambda sink_id, path: PlaybackHandle(slow_proc))
+
+    backend = FakeTTSBackend()
+    session, _backend = _session(FakeClient(), backend=backend)
+
+    say_thread = threading.Thread(target=session.say, args=("One. Two. Three.",))
+    say_thread.start()
+    time.sleep(0.05)  # let _speak() synthesize + start playing "One."
+    assert backend.synthesized == ["One."]
+
+    session.interrupt()
+    say_thread.join(timeout=1.0)
+    assert not say_thread.is_alive()
+
+    # "Two." and "Three." must never have been requested from the
+    # backend -- that's the whole point of checking the interrupt flag
+    # before each next(stream) call, not just before each play().
+    assert backend.synthesized == ["One."]
+
+
+def test_end_turn_preloads_the_current_backends_voice(no_real_playback):
+    # A backend without a model to warm (e.g. Google) simply has no
+    # preload() attribute -- see cascade.py's _preload_voice_in_background
+    # docstring -- so this only exercises backends that define one.
+    preload_calls: list[str] = []
+
+    class PreloadingFakeBackend(FakeTTSBackend):
+        def preload(self, language: str) -> None:
+            preload_calls.append(language)
+
+    client = FakeClient(detected_language="English")
+    session, _backend = _session(client, backend=PreloadingFakeBackend())
+    session.start()
+    session.end_turn()
+
+    assert preload_calls == ["english"]
+
+
+def test_interrupt_requested_flag_is_reset_at_the_start_of_each_say_call(no_real_playback):
+    session, backend = _session(FakeClient())
+    session.interrupt()  # nothing playing yet, but sets the flag
+    session.say("Hello there.")
+    # A stale flag from a previous (or no-op) interrupt must not silently
+    # swallow the next turn's speech.
+    assert backend.synthesized == ["Hello there."]

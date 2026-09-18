@@ -29,6 +29,20 @@ dev = [
 hardware = [
     "faster-whisper>=1.0",
 ]
+# saathi/voice/tts/kokoro_backend.py. Not installed by default or in CI:
+# torch is an unconditional dependency (a real aarch64 wheel exists, but
+# it's 454MB -- see that module's docstring). KokoroBackend.available()
+# reports its absence as an ordinary unavailable-backend reason.
+kokoro = [
+    "kokoro>=0.9.4",
+]
+# saathi/voice/tts/google_backend.py. Not installed by default or in CI:
+# needs real GCP credentials to do anything, which CI doesn't have.
+# GoogleNeural2WaveNetBackend/GoogleChirp3HDBackend.available() report
+# its absence the same way.
+google-tts = [
+    "google-cloud-texttospeech>=2.16",
+]
 
 [build-system]
 requires = ["hatchling"]

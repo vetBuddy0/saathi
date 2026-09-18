@@ -1,5 +1,5 @@
-"""The cascade `VoiceSession`: mic -> Groq Whisper -> Groq chat -> Piper
--> speaker.
+"""The cascade `VoiceSession`: mic -> Groq Whisper -> Groq chat -> a
+`TTSBackend` (`voice/tts/`) -> speaker.
 
 One-hour spike (2026-09-17), built to close the loop end to end, not to
 be the real engine: `GROQ_API_KEY` from the environment only, never
@@ -7,26 +7,20 @@ committed. The persona is `persona_stub.txt` next door — one hardcoded
 paragraph, explicitly *not* the real identity file, which is being
 written separately.
 
-Piper over Kokoro, still: Kokoro pulls `torch` unconditionally, and that
-is not just a "would have blown the 15-minute trial window" problem —
-it's a real problem for the Raspberry Pi this is meant to run on, where a
-multi-hundred-MB unconditional dependency is expensive on both disk and
-first-boot time. Piper installed and synthesized in under ten seconds
-with plain CPU support and no such cost. Anyone retrying Kokoro later
-should know that going in, not rediscover it.
-
 The brief asked for Kimi K2. The key this was tested with doesn't have
 it (`GET /v1/models` doesn't list either `moonshotai/kimi-k2-instruct` or
 `-0905`) — substituted `openai/gpt-oss-120b`, the strongest chat model
 that account does have. Kimi K2 is still the intended model; swapping
-back is a one-line constant change once access exists.
+back is a one-line constant change once access exists. (Retrying Kimi
+K2 access is now explicitly item D's job — "not listed" may be a tier
+issue, not permanent.)
 
 Language: detection and the voice table share one source of truth,
 `voice/language.py` — read that module first. `end_turn()` asks Groq
 Whisper for its detected language (`response_format="verbose_json"`) and
 resolves it through `resolve_language()` before doing anything with it;
 the LLM is told which language to answer in explicitly rather than left
-to infer it from the transcript alone, and `_speak()` picks its Piper
+to infer it from the transcript alone, and `_speak()` picks its TTS
 voice from that same resolved value — never from the raw detection.
 
 Ships without tests on purpose in its first commit — that was debt, on
@@ -40,25 +34,30 @@ whatever thread called `say()` (always a different thread than
 so the event loop stays responsive, and calls `interrupt()` from the
 event loop thread while that executor thread is still blocked).
 
-`_interrupt_requested` exists because of a real, not theoretical, race:
-`synthesize_wav()` for a two-sentence reply routinely takes 700ms+ on
-this machine — longer than the 500ms `saathi smoke --barge-in` interrupts
-at — so `interrupt()` regularly lands *before* `_current_playback` is
-set, with nothing yet to `.stop()`. The first version of this file
-shipped without that flag and documented the gap instead of closing
-it; `saathi smoke --barge-in`'s first real run turned "narrow window,
-rarely hit" into "hit on the very first try," which is the difference
-between a caveat and a bug. `_speak()` now checks the flag once
-synthesis finishes and skips starting playback at all if it's set,
-under the same lock — an interrupt during synthesis now means "never
-play this," not "stop nothing, then play anyway."
+`_speak()` no longer synthesizes a whole reply in one blocking call. It
+used to (single `synthesize_wav()` call for the entire text), and that
+was a real bug, not filed debt: Piper's synthesis of a two-sentence
+reply routinely takes 700ms+ on this laptop and several times longer on
+a Raspberry Pi, and there was no way to abort it mid-call. That meant
+the window where a press couldn't interrupt her was most of the reply on
+Pi-class hardware, not a rare edge case at the start of a long one — a
+correction the person building this made explicitly after the first
+report of this file called it "occasional debt." The fix is
+`TTSBackend.synthesize_stream()` (`voice/tts/__init__.py`): text is
+split into sentences and each sentence is synthesized and played
+separately, with `_interrupt_requested` checked under `_playback_lock`
+both before asking for the next sentence's audio and before starting its
+playback. That bounds the un-interruptible window to roughly one
+sentence's synthesis time, for every backend, including ones (Piper,
+Kokoro) with no streaming of their own. Verified against a real
+long-reply barge-in after this landed; see `tests/test_cascade.py` and
+the C report for the re-measured numbers.
 """
 
 from __future__ import annotations
 
 import io
 import os
-import subprocess
 import tempfile
 import threading
 import wave
@@ -66,13 +65,13 @@ from pathlib import Path
 from typing import Callable
 
 from groq import Groq
-from piper import PiperVoice
 
 from saathi.audio.playback import PlaybackHandle, play
-from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve_language
+from saathi.voice.language import DEFAULT_LANGUAGE, resolve_language
+from saathi.voice.tts import TTSBackend, split_into_sentences
+from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
 _PERSONA_PATH = Path(__file__).parent.parent / "persona_stub.txt"
-_VOICE_DIR = Path.home() / ".saathi" / "tts-voices"
 _STT_MODEL = "whisper-large-v3-turbo"
 # Kimi K2 (moonshotai/kimi-k2-instruct, -0905) is not available on the
 # GROQ_API_KEY this was tested with -- confirmed via GET /v1/models,
@@ -82,26 +81,7 @@ _STT_MODEL = "whisper-large-v3-turbo"
 _LLM_MODEL = "openai/gpt-oss-120b"
 _SAMPLE_RATE = 16000
 
-VoiceLoader = Callable[[str], PiperVoice]
-
-
-def _ensure_voice_model(voice_name: str) -> Path:
-    onnx_path = _VOICE_DIR / f"{voice_name}.onnx"
-    if onnx_path.exists():
-        return onnx_path
-    _VOICE_DIR.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "python3",
-            "-m",
-            "piper.download_voices",
-            voice_name,
-            "--download-dir",
-            str(_VOICE_DIR),
-        ],
-        check=True,
-    )
-    return onnx_path
+BackendPreference = Callable[[], str]
 
 
 def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
@@ -114,8 +94,14 @@ def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
     return buffer.getvalue()
 
 
-def _load_piper_voice(onnx_path: str) -> PiperVoice:
-    return PiperVoice.load(onnx_path)
+def _default_backend_preference() -> str:
+    # Placeholder until item C/G's Ctrl+L panel writes a real preference
+    # through IdentityStore -- see that work's tracking. Piper always
+    # being the answer here is intentional, not a stub left dangling:
+    # it's also the documented last-resort fallback, so "no preference
+    # configured yet" and "fall back to the always-available backend"
+    # are the same code path on purpose.
+    return DEFAULT_BACKEND_ID
 
 
 class CascadeSession:
@@ -124,7 +110,8 @@ class CascadeSession:
         sink_id: str,
         *,
         client: Groq | None = None,
-        voice_loader: VoiceLoader = _load_piper_voice,
+        backends: dict[str, TTSBackend] | None = None,
+        backend_preference: BackendPreference = _default_backend_preference,
     ) -> None:
         if client is None:
             api_key = os.environ.get("GROQ_API_KEY")
@@ -132,9 +119,8 @@ class CascadeSession:
                 raise RuntimeError("GROQ_API_KEY is not set in the environment")
             client = Groq(api_key=api_key)
         self._client = client
-        self._voice_loader = voice_loader
-        self._voices: dict[str, PiperVoice] = {}
-        self._voices_lock = threading.Lock()
+        self._backends = backends if backends is not None else default_backends()
+        self._backend_preference = backend_preference
         self._sink_id = sink_id
         self._persona = _PERSONA_PATH.read_text().strip()
         self._chunks: list[bytes] = []
@@ -143,23 +129,39 @@ class CascadeSession:
         self._current_playback: PlaybackHandle | None = None
         self._interrupt_requested = False
 
-    def _voice_for(self, language: str) -> PiperVoice:
-        with self._voices_lock:
-            if language not in self._voices:
-                onnx_path = _ensure_voice_model(SUPPORTED_LANGUAGES[language])
-                self._voices[language] = self._voice_loader(str(onnx_path))
-            return self._voices[language]
+    def _current_backend(self) -> TTSBackend:
+        # Read fresh every call, not cached at construction -- this is
+        # what makes a preference written through IdentityStore "take
+        # effect on the next turn" for free, with no restart and no
+        # explicit reload step.
+        preferred_id = self._backend_preference()
+        backend = self._backends.get(preferred_id)
+        if backend is not None:
+            available, _reason = backend.available()
+            if available:
+                return backend
+        # Preferred backend missing, unknown, or unavailable right now:
+        # fall back to Piper, which is always available (see
+        # PiperBackend.available()) rather than raising and losing the
+        # turn's reply entirely.
+        return self._backends[DEFAULT_BACKEND_ID]
 
     def _preload_voice_in_background(self, language: str) -> None:
-        # A real fix, not a speed hack: loading a Piper voice the first
-        # time takes seconds (measured against real hardware; see
-        # check_barge_in's first run), and end_turn()'s STT/LLM round
-        # trip to Groq is otherwise dead time for the audio side of this
-        # session. Loading during that wait, instead of lazily on the
-        # first say(), is what turned a barge-in that missed entirely
-        # (interrupt landed mid-*load*) into one bounded by synthesis
-        # time alone.
-        threading.Thread(target=self._voice_for, args=(language,), daemon=True).start()
+        # A real fix, not a speed hack: loading a local backend's voice
+        # the first time can take seconds (measured against real
+        # hardware; see check_barge_in's first run and
+        # voice/tts/kokoro_backend.py's docstring), and end_turn()'s
+        # STT/LLM round trip to Groq is otherwise dead time for the
+        # audio side of this session. Loading during that wait, instead
+        # of lazily on the first say(), is what turned a barge-in that
+        # missed entirely (interrupt landed mid-*load*) into one bounded
+        # by synthesis time alone. Not every backend has a model to
+        # preload (Google has none), hence the getattr instead of a
+        # required TTSBackend method.
+        backend = self._current_backend()
+        preload = getattr(backend, "preload", None)
+        if preload is not None:
+            preload(language)
 
     def start(self) -> None:
         self._chunks = []
@@ -202,23 +204,36 @@ class CascadeSession:
         with self._playback_lock:
             self._interrupt_requested = False
 
-        voice = self._voice_for(self._last_language)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-            tmp_path = Path(tmp_file.name)
-        try:
-            with wave.open(str(tmp_path), "wb") as wav_file:
-                voice.synthesize_wav(text, wav_file)  # can take 700ms+ — see docstring
+        sentences = split_into_sentences(text)
+        if not sentences:
+            return
 
+        backend = self._current_backend()
+        stream = backend.synthesize_stream(self._last_language, sentences)
+
+        while True:
             with self._playback_lock:
                 if self._interrupt_requested:
-                    return  # interrupted during synthesis: never start playback
-                handle = play(self._sink_id, tmp_path)
-                self._current_playback = handle
-            handle.wait()
-        finally:
-            with self._playback_lock:
-                self._current_playback = None
-            tmp_path.unlink(missing_ok=True)
+                    return  # interrupted since the last sentence: don't synthesize the next
+            try:
+                wav_bytes = next(stream)
+            except StopIteration:
+                return
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+            try:
+                tmp_path.write_bytes(wav_bytes)
+                with self._playback_lock:
+                    if self._interrupt_requested:
+                        return  # interrupted during this sentence's synthesis
+                    handle = play(self._sink_id, tmp_path)
+                    self._current_playback = handle
+                handle.wait()
+            finally:
+                with self._playback_lock:
+                    self._current_playback = None
+                tmp_path.unlink(missing_ok=True)
 
     def say(self, text: str) -> None:
         self._speak(text)
@@ -232,9 +247,10 @@ class CascadeSession:
     def interrupt(self) -> None:
         """Barge-in's hook. If playback has already started, stops it
         right now, in whatever thread `say()` is blocked in. If `say()`
-        is still inside `synthesize_wav()`, there's nothing to stop yet —
-        instead this sets a flag `_speak()` checks the moment synthesis
-        finishes, so playback never starts at all."""
+        is still inside a sentence's synthesis call, there's nothing to
+        stop yet — instead this sets a flag `_speak()` checks before
+        starting the next sentence's synthesis and again before its
+        playback, so at most one already-in-flight sentence plays out."""
         with self._playback_lock:
             self._interrupt_requested = True
             if self._current_playback is not None:

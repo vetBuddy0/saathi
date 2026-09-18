@@ -388,11 +388,12 @@ def check_barge_in(
 
     session = CascadeSession(handles.sink_id, client=object())
     # In production, end_turn()'s STT/LLM round trip to Groq gives the
-    # voice time to load before say() is ever called (see cascade.py).
-    # This check calls say() directly, skipping that turn entirely, so
-    # it warms the same way here — otherwise this would be measuring a
-    # cold model load, not the interrupt path a real barge-in hits.
-    session._voice_for(session._last_language)
+    # backend's voice time to load before say() is ever called (see
+    # cascade.py). This check calls say() directly, skipping that turn
+    # entirely, so it warms the same way here — otherwise this would be
+    # measuring a cold model load, not the interrupt path a real
+    # barge-in hits.
+    list(session._current_backend().synthesize_stream(session._last_language, ["warm up."]))
 
     original_volume = _sink_volume_pct(handles.sink_id)
     _set_sink_volume_pct(handles.sink_id, listening_volume_pct)
