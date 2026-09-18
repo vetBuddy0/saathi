@@ -310,6 +310,47 @@ def test_interrupt_during_first_sentence_playback_stops_the_second_sentence_from
     assert backend.synthesized == ["One."]
 
 
+def test_end_turn_applies_a_stored_language_preference_when_detection_is_unsupported(
+    no_real_playback,
+):
+    # A supported live detection still wins over a stored preference for
+    # that turn's reply (resolve_language()'s existing, deliberate
+    # behavior -- see voice/language.py and the Portuguese-reply bug it
+    # was built to fix: Saathi mirrors whatever language she's actually
+    # speaking). Where a stored preference shows through is exactly
+    # where an unsupported/failed detection would otherwise have fallen
+    # back to whatever self._last_language happened to already be --
+    # the preference makes that fallback a deliberate choice (set via
+    # the panel or, eventually, a spoken command) instead of an accident
+    # of session history.
+    client = FakeClient(detected_language="Portuguese")  # unsupported either way
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        language_preference=lambda: "chinese",
+    )
+    session.start()
+    session.end_turn()
+    assert session._last_language == "chinese"
+
+
+def test_end_turn_ignores_an_unsupported_stored_language_preference(no_real_playback):
+    client = FakeClient(detected_language="Portuguese")  # unsupported either way
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        language_preference=lambda: "klingon",
+    )
+    session._last_language = "hindi"
+    session.start()
+    session.end_turn()
+    assert session._last_language == "hindi"
+
+
 def test_end_turn_preloads_the_current_backends_voice(no_real_playback):
     # A backend without a model to warm (e.g. Google) simply has no
     # preload() attribute -- see cascade.py's _preload_voice_in_background

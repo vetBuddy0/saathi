@@ -67,7 +67,7 @@ from typing import Callable
 from groq import Groq
 
 from saathi.audio.playback import PlaybackHandle, play
-from saathi.voice.language import DEFAULT_LANGUAGE, resolve_language
+from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve_language
 from saathi.voice.tts import TTSBackend, split_into_sentences
 from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
@@ -82,6 +82,15 @@ _LLM_MODEL = "openai/gpt-oss-120b"
 _SAMPLE_RATE = 16000
 
 BackendPreference = Callable[[], str]
+LanguagePreference = Callable[[], "str | None"]
+
+
+def _no_language_preference() -> str | None:
+    # Placeholder until item G's Ctrl+L panel / spoken "speak to me in
+    # Mandarin" path write a real preference through IdentityStore (see
+    # saathi/identity/preferences.py). Returning None means "nothing
+    # stored yet" -- end_turn() already degrades sensibly for that case.
+    return None
 
 
 def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
@@ -112,6 +121,7 @@ class CascadeSession:
         client: Groq | None = None,
         backends: dict[str, TTSBackend] | None = None,
         backend_preference: BackendPreference = _default_backend_preference,
+        language_preference: LanguagePreference = _no_language_preference,
     ) -> None:
         if client is None:
             api_key = os.environ.get("GROQ_API_KEY")
@@ -121,6 +131,7 @@ class CascadeSession:
         self._client = client
         self._backends = backends if backends is not None else default_backends()
         self._backend_preference = backend_preference
+        self._language_preference = language_preference
         self._sink_id = sink_id
         self._persona = _PERSONA_PATH.read_text().strip()
         self._chunks: list[bytes] = []
@@ -174,11 +185,27 @@ class CascadeSession:
         self._chunks = []
         wav_bytes = _pcm_to_wav_bytes(pcm)
 
-        # Betting on last turn's language for this turn's voice while
-        # the real answer (this turn's detection, a few lines down) is
-        # still in flight. Wrong on a language switch — falls back to
-        # the ordinary lazy load in _speak(), just not warmed early that
-        # one time.
+        # A stored preference (Ctrl+L panel, or eventually the spoken
+        # "speak to me in Mandarin" tool path — item G) is read here, at
+        # the start of the next turn, not pushed into a running session
+        # directly — that's what makes "effective next turn, no
+        # restart" fall out for free. It sets what resolve_language()
+        # below falls back to; a *supported* live detection this turn
+        # still wins over it, same as it already wins over whatever
+        # self._last_language happened to be from ordinary conversation
+        # (see voice/language.py — Saathi mirrors what she's actually
+        # speaking). Only a *supported* preference is applied at all —
+        # the same "never trust an unvalidated value" rule
+        # resolve_language() already applies to a raw detection.
+        preferred = self._language_preference()
+        if preferred in SUPPORTED_LANGUAGES:
+            self._last_language = preferred
+
+        # Betting on last turn's language (or the preference just
+        # applied above) for this turn's voice while the real answer
+        # (this turn's detection, a few lines down) is still in flight.
+        # Wrong on a language switch — falls back to the ordinary lazy
+        # load in _speak(), just not warmed early that one time.
         self._preload_voice_in_background(self._last_language)
 
         transcription = self._client.audio.transcriptions.create(

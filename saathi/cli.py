@@ -59,10 +59,14 @@ def _run() -> int:
 
     from saathi.config import Config
     from saathi.core import Core
+    from saathi.identity.store import IdentityStore
     from saathi.screen.server import run
 
     config = Config.load()
     core = Core()
+
+    store = IdentityStore(config.identity_db_path)
+    store.create()
 
     session = None
     capture_source_id = None
@@ -72,14 +76,26 @@ def _run() -> int:
         # fake press/release path in screen/server.py unchanged.
         from saathi.audio.aec import EchoCancelHandles, ensure_echo_cancellation
         from saathi.audio.devices import DeviceManager, PulseAudioBackend
+        from saathi.identity.preferences import (
+            LANGUAGE_KEY,
+            TTS_BACKEND_KEY,
+            read_preference,
+        )
         from saathi.voice.engine.cascade import CascadeSession
+        from saathi.voice.tts.registry import DEFAULT_BACKEND_ID
 
         manager = DeviceManager(PulseAudioBackend())
         mic, speaker = manager.choose("input"), manager.choose("output")
         if mic is not None and speaker is not None:
             handles = ensure_echo_cancellation(mic.id, speaker.id)
             if isinstance(handles, EchoCancelHandles):
-                session = CascadeSession(handles.sink_id)
+                session = CascadeSession(
+                    handles.sink_id,
+                    backend_preference=lambda: read_preference(
+                        store, TTS_BACKEND_KEY, DEFAULT_BACKEND_ID
+                    ),
+                    language_preference=lambda: read_preference(store, LANGUAGE_KEY),
+                )
                 capture_source_id = handles.source_id
             else:
                 print("No system echo-cancel available; running without the voice engine.")
@@ -92,6 +108,7 @@ def _run() -> int:
         config.screen_port,
         session=session,
         capture_source_id=capture_source_id,
+        store=store,
     )
     return 0
 

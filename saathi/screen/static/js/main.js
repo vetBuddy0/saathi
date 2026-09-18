@@ -16,8 +16,16 @@
 // face, which CLAUDE.md rules out for a different reason (a person
 // doesn't display one) than this one (a developer's terminal isn't the
 // face).
+//
+// Ctrl+L (settings-panel.js, item C/G) is the one deliberate exception
+// to "the browser only carries spacebar events": a language/TTS-backend
+// panel for whoever sets the device up, not for her — hidden until
+// asked for, gone the moment it's closed, nothing persisted on the
+// face. While it's open, a spacebar press is swallowed here rather than
+// starting a capture underneath it.
 
 import { FACE_MODULES, DEFAULT_FACE } from "./face.js";
+import { createSettingsPanel } from "./settings-panel.js";
 
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 30000;
@@ -27,7 +35,7 @@ function chosenFaceName() {
   return requested && FACE_MODULES[requested] ? requested : DEFAULT_FACE;
 }
 
-function connectWithReconnect(face) {
+function connectWithReconnect(face, onMessage, isInputBlocked) {
   let ws = null;
   let holding = false;
   let reconnectAttempt = 0;
@@ -48,6 +56,7 @@ function connectWithReconnect(face) {
       if (message.type === "state") {
         face.onState(message.state);
       }
+      onMessage(message);
     });
 
     ws.addEventListener("close", () => {
@@ -78,22 +87,26 @@ function connectWithReconnect(face) {
 
   open();
 
+  function send(payload) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  }
+
   window.addEventListener("keydown", (event) => {
-    if (event.code !== "Space" || event.repeat || holding) return;
+    if (event.code !== "Space" || event.repeat || holding || isInputBlocked()) return;
     event.preventDefault();
     holding = true;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "input", event: "press" }));
-    }
+    send({ type: "input", event: "press" });
   });
   window.addEventListener("keyup", (event) => {
     if (event.code !== "Space" || !holding) return;
     event.preventDefault();
     holding = false;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "input", event: "release" }));
-    }
+    send({ type: "input", event: "release" });
   });
+
+  return { send };
 }
 
 async function main() {
@@ -102,7 +115,13 @@ async function main() {
   const face = new FaceImpl();
   await face.mount(document.getElementById("face-container"));
 
-  connectWithReconnect(face);
+  let transport = null;
+  const settingsPanel = createSettingsPanel((payload) => transport && transport.send(payload));
+  transport = connectWithReconnect(
+    face,
+    (message) => settingsPanel.onMessage(message),
+    () => settingsPanel.isOpen()
+  );
 }
 
 main();

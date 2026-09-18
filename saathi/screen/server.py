@@ -1,13 +1,18 @@
 """Serves `static/` and holds the WebSocket that connects `core.py` to the
 Chromium kiosk.
 
-Two message shapes cross this socket, and it interprets nothing beyond
-them: `{"type": "state", "state": "<State value>"}` (server -> browser,
-sent on connect and on every real transition) and
-`{"type": "input", "event": "press" | "release"}` (browser -> server, one
-per spacebar down/up). The browser decides nothing about what a press
-*means* — that is `core.py`'s transition table — this module only carries
-the event there and the resulting state back.
+Four message shapes cross this socket now (checkpoint 2 grew it from
+two): `{"type": "state", ...}` and `{"type": "input", ...}` as before,
+plus `{"type": "settings", ...}` (server -> browser, sent on connect and
+after every successful preference write — languages, TTS backends, and
+which one is currently preferred) and
+`{"type": "set_preference", "key": ..., "value": ...}` (browser ->
+server, from the Ctrl+L panel — item C/G). The browser still decides
+nothing about what a press *means*; the settings panel is explicitly the
+one exception to "the browser only carries events" — item C/G's brief
+asks for it to be a real, if thin, settings surface (language + TTS
+backend), not just another passthrough, because it's for whoever sets
+the device up, not for her — see `static/js/settings-panel.js`.
 
 Checkpoint 1 had no voice engine, so `release` (`LISTENING` -> `THINKING`)
 was immediately followed by a synthetic `no_response` event
@@ -54,6 +59,15 @@ from aiohttp import WSMsgType, web
 
 from saathi.audio.capture import Capture
 from saathi.core import Core, Event, State
+from saathi.identity.preferences import (
+    LANGUAGE_KEY,
+    TTS_BACKEND_KEY,
+    PreferenceLocked,
+    read_preference,
+    write_preference,
+)
+from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
+from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _CAPTURE_CHUNK_BYTES = 3200  # 100ms of 16kHz mono 16-bit PCM
@@ -118,7 +132,44 @@ async def _speak_and_finish(
     core.handle(Event("done"))
 
 
-def build_app(core: Core, session=None, capture_source_id: str | None = None) -> web.Application:
+def _settings_message(store) -> str:
+    # Rebuilt fresh on every call, not cached: a backend's available()
+    # (GCP credentials dropped in after boot, kokoro installed later)
+    # can change while the process runs, and the panel is opened rarely
+    # enough that this cost is a non-issue — see voice/tts/__init__.py's
+    # docstring for the same "checked lazily" principle.
+    backends = []
+    for backend in default_backends().values():
+        available, reason = backend.available()
+        backends.append(
+            {
+                "id": backend.id,
+                "display_name": backend.display_name,
+                "local": backend.local,
+                "available": available,
+                "reason": reason,
+                "cost_per_million_chars_usd": backend.cost_per_million_chars_usd(),
+            }
+        )
+    current_language = DEFAULT_LANGUAGE
+    current_backend = DEFAULT_BACKEND_ID
+    if store is not None:
+        current_language = read_preference(store, LANGUAGE_KEY, DEFAULT_LANGUAGE)
+        current_backend = read_preference(store, TTS_BACKEND_KEY, DEFAULT_BACKEND_ID)
+    return json.dumps(
+        {
+            "type": "settings",
+            "languages": list(SUPPORTED_LANGUAGES),
+            "current_language": current_language,
+            "backends": backends,
+            "current_backend": current_backend,
+        }
+    )
+
+
+def build_app(
+    core: Core, session=None, capture_source_id: str | None = None, store=None
+) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
     live_capture: dict[str, Capture | None] = {"capture": None}
@@ -140,6 +191,7 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
         await ws.prepare(request)
         websockets.add(ws)
         await ws.send_str(json.dumps({"type": "state", "state": core.state.value}))
+        await ws.send_str(_settings_message(store))
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -148,6 +200,48 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
                     payload = json.loads(msg.data)
                 except json.JSONDecodeError:
                     logger.warning("dropped malformed message: %r", msg.data)
+                    continue
+                if payload.get("type") == "set_preference":
+                    key = payload.get("key")
+                    value = payload.get("value")
+                    if key not in (LANGUAGE_KEY, TTS_BACKEND_KEY) or not isinstance(value, str):
+                        logger.warning("dropped malformed set_preference: %r", payload)
+                        continue
+                    if store is None:
+                        await ws.send_str(
+                            json.dumps(
+                                {
+                                    "type": "preference_result",
+                                    "key": key,
+                                    "ok": False,
+                                    "reason": "no identity store configured on this run",
+                                }
+                            )
+                        )
+                        continue
+                    try:
+                        write_preference(store, key, value)
+                    except PreferenceLocked as exc:
+                        await ws.send_str(
+                            json.dumps(
+                                {
+                                    "type": "preference_result",
+                                    "key": key,
+                                    "ok": False,
+                                    "reason": str(exc),
+                                }
+                            )
+                        )
+                        continue
+                    await ws.send_str(
+                        json.dumps(
+                            {"type": "preference_result", "key": key, "ok": True, "reason": ""}
+                        )
+                    )
+                    settings_message = _settings_message(store)
+                    for other_ws in list(websockets):
+                        if not other_ws.closed:
+                            asyncio.ensure_future(other_ws.send_str(settings_message))
                     continue
                 if payload.get("type") != "input":
                     continue
@@ -199,11 +293,16 @@ def build_app(core: Core, session=None, capture_source_id: str | None = None) ->
 
 
 def run(
-    core: Core, host: str, port: int, session=None, capture_source_id: str | None = None
+    core: Core,
+    host: str,
+    port: int,
+    session=None,
+    capture_source_id: str | None = None,
+    store=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
-        build_app(core, session=session, capture_source_id=capture_source_id),
+        build_app(core, session=session, capture_source_id=capture_source_id, store=store),
         host=host,
         port=port,
         print=None,

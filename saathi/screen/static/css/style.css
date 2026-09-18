@@ -94,3 +94,73 @@ html, body {
 
 /* Eyes face draws everything itself onto a <canvas> — no CSS needed
    beyond letting it fill #face-container (see eyes-face.js). */
+
+/* Settings panel (item C/G) — Ctrl+L, for whoever sets the device up,
+   not for her. Deliberately plain: this is a setup tool, not part of
+   the face's own visual language. */
+
+#settings-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  flex-direction: column;
+  gap: 1.2rem;
+  padding: 3rem 4rem;
+  background: rgba(10, 10, 13, 0.94);
+  color: #e8e6e0;
+  font-family: system-ui, sans-serif;
+  overflow-y: auto;
+  cursor: default;
+}
+
+#settings-panel h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+#settings-panel h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #a8a49a;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings-panel__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.settings-panel__option {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  border: 1px solid #454249;
+  background: #1c1b20;
+  color: #e8e6e0;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.settings-panel__option--selected {
+  border-color: #6f8fd6;
+  background: #2a3352;
+}
+
+.settings-panel__option--unavailable {
+  color: #6b6862;
+  cursor: default;
+}
+
+.settings-panel__note,
+.settings-panel__hint {
+  color: #a8a49a;
+  font-size: 0.9rem;
+}
+
+.settings-panel__error {
+  color: #d68a6f;
+  font-size: 0.9rem;
+}

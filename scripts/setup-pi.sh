@@ -353,6 +353,70 @@ prompt_secret() {
     log "${var_name} written to ${ENV_FILE} (mode 0600, root-owned)"
 }
 
+# -- optional GCP credentials (Google TTS backends) ----------------------
+
+GCP_CREDENTIALS_DEST="/etc/saathi/gcp.json"
+
+# Entirely optional, unlike GROQ_API_KEY: Google Neural2/WaveNet and
+# Chirp3-HD (saathi/voice/tts/google_backend.py) are two of five TTS
+# backends, not a hard dependency — GoogleNeural2WaveNetBackend /
+# GoogleChirp3HDBackend.available() report themselves unavailable with a
+# reason when this is missing, the settings panel greys them out, and
+# Piper stays wired as the offline fallback regardless. Skipping this
+# step must leave every other part of setup working exactly as if this
+# function didn't exist — that's why it's a plain y/N prompt with a
+# default of "skip", not something that blocks the rest of the script.
+#
+# Prompts for a *path* to an already-downloaded service account JSON key
+# rather than pasting its contents: a multi-line JSON blob through the
+# same `read -s` used for GROQ_API_KEY would be far more exposed to the
+# exact paste-mangling `prompt_secret` above already had to defend
+# against for a single-line value, for no benefit — downloading the key
+# file to the Pi first (scp, a USB stick, whatever) and pointing at it is
+# both safer and easier to get right.
+prompt_gcp_credentials() {
+    if grep -q "^GOOGLE_APPLICATION_CREDENTIALS=" "$ENV_FILE" 2>/dev/null; then
+        log "GOOGLE_APPLICATION_CREDENTIALS already set in $ENV_FILE; leaving it."
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        log "Not interactive — skipping optional GCP credentials setup. Google TTS backends will show as unavailable until $GCP_CREDENTIALS_DEST exists and GOOGLE_APPLICATION_CREDENTIALS is set in $ENV_FILE."
+        return 0
+    fi
+
+    local answer
+    read -r -p "Set up Google Cloud TTS now? Needs a service account JSON key already downloaded to this Pi. [y/N] " answer
+    case "$answer" in
+        [yY]*) ;;
+        *)
+            log "Skipping GCP credentials setup. Google TTS backends will show as unavailable until this is done later (see the summary at the end of this script)."
+            return 0
+            ;;
+    esac
+
+    local src_path
+    while :; do
+        read -r -p "Path to the service account JSON key file on this Pi: " src_path
+        if [ ! -f "$src_path" ]; then
+            echo "  No file at '$src_path' — try again, or Ctrl+C to abort setup."
+            continue
+        fi
+        if ! python3 -m json.tool "$src_path" >/dev/null 2>&1; then
+            echo "  '$src_path' doesn't parse as JSON — that's not a usable service account key. Try again."
+            continue
+        fi
+        break
+    done
+
+    mkdir -p "$(dirname "$GCP_CREDENTIALS_DEST")"
+    cp "$src_path" "$GCP_CREDENTIALS_DEST"
+    chmod 0600 "$GCP_CREDENTIALS_DEST"
+    chown root:root "$GCP_CREDENTIALS_DEST"
+    printf 'GOOGLE_APPLICATION_CREDENTIALS=%s\n' "$GCP_CREDENTIALS_DEST" >> "$ENV_FILE"
+    chmod 0600 "$ENV_FILE"
+    log "GCP service account key installed at $GCP_CREDENTIALS_DEST (mode 0600, root-owned); GOOGLE_APPLICATION_CREDENTIALS set in $ENV_FILE."
+}
+
 # -- hardware check -----------------------------------------------------
 
 SAATHI_UID=""
@@ -539,6 +603,12 @@ Re-running this script is safe. It will not duplicate packages, the
 system user, or the secret in $ENV_FILE, and it will rewrite the
 systemd units and restart both services — so re-running after a
 'git pull' picks up code changes.
+
+$(if [ -f "$GCP_CREDENTIALS_DEST" ]; then
+    echo "Google Cloud TTS: configured ($GCP_CREDENTIALS_DEST)."
+else
+    echo "Google Cloud TTS: not configured — those backends will show as unavailable in the settings panel. Re-run this script, or write $GCP_CREDENTIALS_DEST by hand (mode 0600, root-owned) and add GOOGLE_APPLICATION_CREDENTIALS=$GCP_CREDENTIALS_DEST to $ENV_FILE, then 'sudo systemctl restart saathi-engine'. Piper works fully without this."
+fi)
 ======================================================================
 EOF
 }
@@ -561,6 +631,7 @@ main() {
     # tier or a future rotation — this is a sanity check against a
     # mangled paste, not a checksum, so it doesn't need to be exact.
     prompt_secret GROQ_API_KEY "Groq API key (console.groq.com)" '^gsk_[A-Za-z0-9]{40,60}$'
+    prompt_gcp_credentials  # optional -- Google TTS backends only
     disable_console_blanking
     claim_tty1_for_the_face
     write_systemd_units
