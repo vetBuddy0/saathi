@@ -246,7 +246,29 @@ real.
 
 **Every proactive utterance records why it fired.** Otherwise "why did it say
 that" is undebuggable, and an annoying pattern is indistinguishable from a
-useful one.
+useful one. The same goes for what it chose *not* to say: every candidate
+that was held back records why — expired, gated, capped, cooled down, or
+outscored — so restraint is inspectable, not just silence.
+
+**Two lanes.** Reminders and everything else are budgeted separately, and
+the split is the difference between a companion and a medical liability.
+
+- *Reminders* — due, and not yet acknowledged, fires. Never capped, never
+  subject to cooldown, never expired by the social budget, and never
+  counted against it. A day with three due reminders shouldn't leave her
+  silent otherwise. Every due reminder fires; they don't compete with each
+  other for a slot.
+- *Everything else* — "noticed" items, ambient and social utterances — has
+  a daily cap (default three) and a cooldown between utterances (default
+  90 minutes), both config. One per tick: the highest-scoring candidate
+  fires, the rest stay candidates — not a queue to be drained — and
+  compete fresh next tick. A "noticed" item that misses its useful window
+  expires and is dropped, not saved: asking about Thursday's scan is kind
+  on Friday and strange on Sunday.
+- *One crossover* — a reminder firing resets the social cooldown. Reminders
+  don't spend the budget, but they do reset the clock: she shouldn't say
+  "time for your tablets" and then chatter about the scan thirty seconds
+  later.
 
 ---
 

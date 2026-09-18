@@ -66,13 +66,20 @@ def test_only_the_highest_confidence_noticed_candidate_fires(store):
     assert lost["suppressed_by"] == "lost to a higher-scoring candidate this tick"
 
 
-def test_a_scheduled_reminder_always_outscores_a_noticed_candidate(store):
+def test_a_reminder_and_a_noticed_candidate_in_one_tick_only_the_reminder_fires(store):
+    # The crossover: the reminder fires (its own lane), and firing it
+    # resets the social cooldown -- so the noticed candidate is held
+    # back this tick by cooldown, not by losing a score competition.
+    # "Time for your tablets" then chatter about the scan thirty seconds
+    # later is exactly what this prevents.
     reminder = InitiativeCandidate(kind="scheduled", reason="reminder")
     noticed = _noticed(store, "noticed", 1.0)
     rows = evaluate(store, [noticed, reminder], PRESENT, now=NOW)
     fired = [r for r in rows if r["suppressed_by"] is None]
     assert len(fired) == 1
     assert fired[0]["kind"] == "scheduled"
+    held = [r for r in rows if r["kind"] == "noticed"][0]
+    assert "cooldown" in held["suppressed_by"]
 
 
 def test_losing_candidates_are_not_a_queue_they_compete_fresh_next_tick(store):
@@ -151,15 +158,81 @@ def test_the_default_daily_cap_is_three(store):
     assert "daily cap" in rows[0]["suppressed_by"]
 
 
-def test_the_daily_cap_blocks_reminders_too_whatever_the_score(store):
+# -- the two lanes ----------------------------------------------------------
+
+
+def _exhaust_social_cap(store):
     for i in range(3):
         candidate = _noticed(store, f"n{i}", 0.9)
-        evaluate(store, [candidate], PRESENT, now=NOW + timedelta(hours=2 * i))
+        rows = evaluate(store, [candidate], PRESENT, now=NOW + timedelta(hours=2 * i))
+        assert rows[0]["suppressed_by"] is None  # all three really fired
+
+
+def test_a_reminder_fires_on_a_day_where_the_social_cap_is_exhausted(store):
+    # The one that matters -- the difference between a companion and a
+    # medical liability. Three social utterances have used up the day's
+    # cap; a due reminder must still fire.
+    _exhaust_social_cap(store)
 
     reminder = InitiativeCandidate(kind="scheduled", reason="take your tablet")
     rows = evaluate(store, [reminder], PRESENT, now=NOW + timedelta(hours=10))
-    assert rows[0]["suppressed_by"] is not None
+    assert rows[0]["suppressed_by"] is None
+
+    # And the cap still holds for the social lane on the same day
+    # (NOW is 12:00 -- +11h is still today; +12h would be midnight).
+    social = _noticed(store, "one more", 0.99)
+    rows = evaluate(store, [social], PRESENT, now=NOW + timedelta(hours=11))
     assert "daily cap" in rows[0]["suppressed_by"]
+
+
+def test_reminders_do_not_count_toward_the_social_cap(store):
+    for i in range(3):
+        reminder = InitiativeCandidate(kind="scheduled", reason=f"reminder {i}")
+        rows = evaluate(store, [reminder], PRESENT, now=NOW + timedelta(hours=i))
+        assert rows[0]["suppressed_by"] is None
+
+    # Three reminders fired today; the social lane's budget is untouched.
+    social = _noticed(store, "a noticed thing", 0.9)
+    rows = evaluate(store, [social], PRESENT, now=NOW + timedelta(hours=5))
+    assert rows[0]["suppressed_by"] is None
+
+
+def test_every_due_reminder_in_a_tick_fires_not_just_one(store):
+    # Each reminder is its own obligation, not a competitor for a slot.
+    morning = InitiativeCandidate(kind="scheduled", reason="blood pressure tablet")
+    other = InitiativeCandidate(kind="scheduled", reason="eye drops")
+    rows = evaluate(store, [morning, other], PRESENT, now=NOW)
+    assert [r["suppressed_by"] for r in rows] == [None, None]
+
+
+def test_a_reminder_firing_resets_the_social_cooldown(store):
+    first = _noticed(store, "first", 0.9)
+    evaluate(store, [first], PRESENT, now=NOW)
+
+    reminder = InitiativeCandidate(kind="scheduled", reason="take your tablet")
+    rows = evaluate(store, [reminder], PRESENT, now=NOW + timedelta(minutes=100))
+    assert rows[0]["suppressed_by"] is None  # past the first's cooldown, and exempt anyway
+
+    # 100 min after the first noticed, but only 60 min after the
+    # reminder: the reminder reset the clock.
+    second = _noticed(store, "second", 0.9)
+    rows = evaluate(store, [second], PRESENT, now=NOW + timedelta(minutes=160))
+    assert "cooldown" in rows[0]["suppressed_by"]
+    assert "60 min since the last one" in rows[0]["suppressed_by"]
+
+    rows = evaluate(store, [second], PRESENT, now=NOW + timedelta(minutes=191))
+    assert rows[0]["suppressed_by"] is None
+
+
+def test_a_reminder_is_still_held_when_presence_is_unconfirmed_but_not_dropped(store):
+    # The base gate applies to both lanes (a reminder to an empty room
+    # helps no one) -- non-terminal, so it fires once she's back.
+    reminder = InitiativeCandidate(kind="scheduled", reason="take your tablet")
+    rows = evaluate(store, [reminder], PolicyContext(), now=NOW)
+    assert "presence" in rows[0]["suppressed_by"]
+
+    rows = evaluate(store, [reminder], PRESENT, now=NOW + timedelta(minutes=10))
+    assert rows[0]["suppressed_by"] is None
 
 
 def test_the_daily_cap_resets_the_next_day(store):

@@ -56,9 +56,10 @@ fixed now, four rules deep in `initiative/policy.py`:
    exempt (a pill reminder shouldn't wait on a cooldown built for
    conversational restraint).
 3. **Daily cap**, 3 by default (`PolicyConfig.daily_cap`). Once hit,
-   nothing more fires that day, "whatever the score" — deliberately
-   including reminders; there is no cap exemption for them, only a
-   cooldown one. See "A real tension worth deciding," below.
+   nothing more fires that day, "whatever the score." *As first
+   written, this included reminders* — since withdrawn; see "The
+   tension, resolved: two lanes," below. The cap is now the social
+   lane's alone.
 4. **Expiry.** A "noticed" candidate more than `PolicyConfig.noticed_expiry_days`
    (default 2) past its source episode's timestamp is dropped —
    `suppressed_by` starts with `"expired:"`, the one other terminal
@@ -161,7 +162,7 @@ comes next.
 | 2nd | fires |
 | 3rd | fires |
 | 4th, highest confidence of all four | **"daily cap reached (3/day)"** |
-| A reminder, same day | **"daily cap reached (3/day)"** — no exemption |
+| A reminder, same day | fires — its own lane (this row read "daily cap reached" before the two-lane change; see below) |
 
 **Expiry (default 2 days):**
 
@@ -170,15 +171,102 @@ comes next.
 | Observed 6 hours ago | fires |
 | Observed 3 days ago (e.g. "Thursday's scan," now Sunday) | **"expired: missed its useful window (3 days since observed, limit 2)"** |
 
-## A real tension worth deciding
+## The tension, resolved: two lanes (2026-09-19)
 
-The daily cap blocks reminders too, "whatever the score" — as
-instructed, no exemption invented beyond the one explicitly given
-(cooldown). But a medication reminder that can't fire because three
-*other* things already used up today's cap is a real, concerning
-outcome for a device some of whose users depend on it for that reminder,
-not a hypothetical. Implemented exactly as specified, not overridden —
-flagging it here rather than silently adding an unrequested carve-out.
-Worth an explicit decision either way: cap the reminders as designed
-(they'll wait until tomorrow's reset), or exempt reminders from the cap
-the same way they're exempt from cooldown.
+The first version of the four rules put reminders under the daily cap,
+"whatever the score." The concern above was raised rather than quietly
+exempted, and the instruction was withdrawn: reminders and everything
+else are now two lanes (SPEC.md, "Initiative"). **Reminders** — due
+and not yet acknowledged — fire: never capped, never cooled down, never
+expired by the social budget, and never counted against it. Every due
+reminder fires; they don't compete for a slot. **Everything else** keeps
+the cap of 3, the 90-minute cooldown, expiry, and one-per-tick. **One
+crossover:** a reminder firing resets the social cooldown — she
+shouldn't say "time for your tablets" and then chatter about the scan
+thirty seconds later.
+
+The test that matters — a reminder fires on a day where the social cap
+is already exhausted, and the cap still holds for social afterward — is
+`test_a_reminder_fires_on_a_day_where_the_social_cap_is_exhausted` in
+`tests/test_initiative_policy_rules.py`, alongside: reminders don't
+count toward the cap, every due reminder in a tick fires, a reminder
+resets the social clock (60 min after a reminder is still cooldown even
+160 min after the last social utterance), and a reminder held for
+unconfirmed presence fires once she's back rather than being dropped.
+
+### Same seeded week, two-lane policy, real output
+
+This run's `reflect()` produced five rules (the first run's five, the
+previous run's two — LLM variance between runs, not a change in method).
+
+| Time | Kind | Result |
+|---|---|---|
+| 09/14 09:00 | scheduled | **ALLOWED** — morning tablet |
+| 09/14 09:00 | noticed ×5 | held — *"cooldown (90 min between utterances; 0 min since the last one)"* |
+| 09/14 21:00 | scheduled | **ALLOWED** — evening tablets |
+| 09/14 21:00 | noticed ×5 | held — cooldown, 0 min since the reminder |
+| 09/15 09:00 | scheduled | **ALLOWED** — leave-in-time reminder |
+| 09/15 09:00 | noticed ×5 | held — cooldown, 0 min since the reminder |
+| 09/15 21:00 | noticed | **ALLOWED** — Priya as a source of comfort |
+| 09/15 21:00 | noticed ×4 | lost to the winner this tick |
+| 09/16 09:00 | noticed | **ALLOWED** — scan anxiety |
+| 09/16 09:00 | noticed ×2 | lost this tick |
+| 09/16 21:00 | noticed | **ALLOWED** — poor sleep and knee pain |
+| 09/16 21:00 | noticed ×1 | lost this tick |
+| 09/17 09:00 | noticed | **ALLOWED** — knee pain fluctuating |
+
+Read the "held" reasons in the reminder ticks: not "lost to a
+higher-scoring candidate" — *cooldown, 0 minutes since the last one*.
+That's the crossover visible in real output: the reminder fired in its
+own lane and reset the clock, and nothing social followed it in the
+same breath. Once the reminders are done, the social lane empties out
+at one per tick, highest confidence first.
+
+Every reminder in this week fired the tick it was due. In the
+previous (capped) version they would have too, only because this
+seeded week never had three social utterances land *before* a
+reminder on the same day — the dedicated test above is what actually
+proves the lane holds when that does happen.
+
+Phrased utterances for this run (allowed candidates only):
+
+- *(09/14 09:00)* "Good morning! Just a gentle nudge to remember your
+  blood pressure tablet before you start your day."
+- *(09/14 21:00)* "Hi there, just a gentle nudge that it's nearly time
+  for your evening tablets. I hope you have a lovely rest of night."
+- *(09/15 09:00)* "Good morning! I'm just popping in to remind you
+  about that scan on Thursday so you can plan to head out on time."
+- *(09/15 21:00)* "It looks like Priya is planning to call this evening.
+  I hope that gives you something lovely to look forward to while I
+  keep you company."
+- *(09/16 09:00)* "I've made a special arrangement to ensure tomorrow's
+  scan goes as smoothly and calmly as possible, so please take a deep
+  breath and trust we've got you covered. You've been so brave, and now
+  it's just time to rest easy tonight."
+- *(09/16 21:00)* "I noticed we talked about fixing your sleep, and I
+  did that because getting good rest really helps ease knee aches and
+  keeps you feeling steady on your feet…"
+- *(09/17 09:00)* "I just wanted to check in since your knee is being a
+  bit more tricky lately. Please remember there's no rush to do
+  everything today…"
+
+Two honest notes on this output, neither about the scheduler:
+
+- **The phrasing step invents things.** "I've made a special
+  arrangement," "Priya is planning to call this evening," "I did that"
+  — none of that is in the reason it was given. That's the phrasing
+  prompt (a one-off in the dry-run script, not shipped code) letting
+  the model embellish; it's exactly the fabrication item D flagged, and
+  it's why the phrasing step must be constrained to the reason and
+  nothing more before any of this is wired to actually speak. Worth
+  fixing at the prompt, not the policy.
+- **Two rules grounded in the same episode collapse into one.** The
+  fifth "noticed" candidate (Priya's visit → mood) vanishes after
+  09/15 21:00 without firing, expiring, or losing: it shares a
+  `source_episode` with the Priya-as-comfort rule that fired that tick,
+  and `scheduler.py` deduplicates by source episode, so once that
+  episode is resolved, every rule citing it is. Arguably right — don't
+  say two things about one observation — but it's a consequence of the
+  single-`source_episode` schema (see `docs/completed/checkpoint-3.md`'s
+  proposed diff), not a choice, and it's recorded here so it isn't
+  mistaken for one.

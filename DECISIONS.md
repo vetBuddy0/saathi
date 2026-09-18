@@ -236,6 +236,29 @@ instruction gave reminders one specific exemption (cooldown), not a
 blanket one, and adding a second on my own judgment would be deciding
 "what changes what she hears" without being asked.
 
+~~**2026-09-19 — The daily cap blocks reminders too, exactly as
+instructed ("whatever the score").**~~ Superseded the same day: the
+instruction was withdrawn after the tension was flagged. Reminders are
+now their own lane (SPEC.md, "Initiative") — never capped, never cooled
+down, never expired, never counted against the social budget; every due
+reminder fires. One crossover: a reminder firing resets the social
+cooldown.
+
+**2026-09-19 — The presence/quiet-hours/busy gate applies to the
+reminder lane too, non-terminal.** The two-lane instruction named cap,
+cooldown and expiry as what reminders escape — not the base gate.
+Reminding an empty room helps no one, and a held reminder returns next
+tick rather than being dropped, so nothing is lost by gating it.
+Reversible in minutes if quiet hours turn out to swallow a late dose;
+the test `test_a_reminder_is_still_held_when_presence_is_unconfirmed_but_not_dropped`
+pins the current behavior so the choice is visible, not accidental.
+
+**2026-09-19 — Every due reminder in a tick fires; they don't compete
+for one slot.** Each is its own obligation. "One per tick" is the social
+lane's rule, built for conversational restraint, and applying it to two
+simultaneously due medications would make one wait on the other for no
+reason anyone asked for.
+
 **2026-09-19 — Stopped tuning Piper's latency; the 1213ms-vs-1200ms
 budget stays red, reported honestly, until Google's streaming TTS is
 unblocked.** Explicit instruction: further Piper-specific work would be
