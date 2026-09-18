@@ -51,7 +51,16 @@ class VoiceSession(Protocol):
 
     def on_intent(self, callback) -> None:
         """Register a callback for tool-call intents the engine emits.
-        Not used this hour — no tools are wired into a turn yet."""
+        `callback(name: str, arguments: dict) -> Any` — called when the
+        model asks to call a tool, with whatever `result` it returns fed
+        straight back to the model as that tool's result. Implemented by
+        `cascade.py` (item G): the engine only ever calls `callback`; it
+        never validates a permission or runs a handler itself — "the
+        voice engine never executes anything. It emits intent; the core
+        validates; the tool executes" (SPEC.md). Which tools the model
+        can even ask for is a *separate* concern
+        (`CascadeSession`'s `tool_schemas` constructor argument) from
+        registering this callback — the two only work together."""
         ...
 
     def interrupt(self) -> None:

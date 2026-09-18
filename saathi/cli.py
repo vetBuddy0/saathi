@@ -81,8 +81,33 @@ def _run() -> int:
             TTS_BACKEND_KEY,
             read_preference,
         )
+        from saathi.tools.language import SET_LANGUAGE_DESCRIPTION, make_set_language_tool
+        from saathi.tools.llm_schema import tool_to_openai_schema
+        from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
         from saathi.voice.engine.cascade import CascadeSession
         from saathi.voice.tts.registry import DEFAULT_BACKEND_ID
+
+        # Item G's spoken entry point. "The voice engine never executes
+        # anything. It emits intent; the core validates; the tool
+        # executes" (SPEC.md) -- this Registry and the permission grant
+        # below are that validation, living here rather than inside
+        # cascade.py. set_language needs no elevated consent beyond
+        # what any device-configuration change would (unlike calls/
+        # music, explicitly out of v1's scope): granted unconditionally.
+        registry = Registry()
+        set_language_tool = make_set_language_tool(store)
+        registry.register(set_language_tool)
+        granted_permissions = frozenset({"preferences"})
+
+        def handle_intent(name: str, arguments: dict) -> dict:
+            try:
+                return registry.call(name, granted_permissions, **arguments)
+            except UnknownTool:
+                return {"status": "error", "detail": f"no such tool: {name}"}
+            except PermissionDenied as exc:
+                return {"status": "denied", "detail": str(exc)}
+
+        tool_schemas = [tool_to_openai_schema(set_language_tool, SET_LANGUAGE_DESCRIPTION)]
 
         manager = DeviceManager(PulseAudioBackend())
         mic, speaker = manager.choose("input"), manager.choose("output")
@@ -96,7 +121,9 @@ def _run() -> int:
                     ),
                     language_preference=lambda: read_preference(store, LANGUAGE_KEY),
                     identity_store=store,
+                    tool_schemas=tool_schemas,
                 )
+                session.on_intent(handle_intent)
                 capture_source_id = handles.source_id
             else:
                 print("No system echo-cancel available; running without the voice engine.")

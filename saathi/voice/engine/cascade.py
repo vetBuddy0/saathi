@@ -69,6 +69,7 @@ the C report for the re-measured numbers.
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import threading
@@ -164,6 +165,7 @@ class CascadeSession:
         backend_preference: BackendPreference = _default_backend_preference,
         language_preference: LanguagePreference = _no_language_preference,
         identity_store: IdentityStore | None = None,
+        tool_schemas: list[dict] | None = None,
     ) -> None:
         if client is None:
             api_key = os.environ.get("GROQ_API_KEY")
@@ -195,6 +197,8 @@ class CascadeSession:
         self._pending_prompt_tokens: int | None = None
         self._pending_completion_tokens: int | None = None
         self._last_turn_timings: TurnTimings | None = None
+        self._tool_schemas = tool_schemas
+        self._intent_callback = None
 
     def pop_last_turn_timings(self) -> TurnTimings | None:
         """The previous turn's granular timings, consumed once — a
@@ -276,27 +280,41 @@ class CascadeSession:
         self._chunks = []
         wav_bytes = _pcm_to_wav_bytes(pcm)
 
-        # A stored preference (Ctrl+L panel, or eventually the spoken
-        # "speak to me in Mandarin" tool path — item G) is read here, at
-        # the start of the next turn, not pushed into a running session
-        # directly — that's what makes "effective next turn, no
-        # restart" fall out for free. It sets what resolve_language()
-        # below falls back to; a *supported* live detection this turn
-        # still wins over it, same as it already wins over whatever
-        # self._last_language happened to be from ordinary conversation
-        # (see voice/language.py — Saathi mirrors what she's actually
-        # speaking). Only a *supported* preference is applied at all —
-        # the same "never trust an unvalidated value" rule
-        # resolve_language() already applies to a raw detection.
+        # A stored preference (Ctrl+L panel, or the spoken "speak to me
+        # in Mandarin" tool path — item G) is read here, at the start of
+        # the next turn, not pushed into a running session directly —
+        # that's what makes "effective next turn, no restart" fall out
+        # for free. A *supported* preference now pins the language for
+        # every following turn, overriding organic detection, until it's
+        # explicitly changed again (another preference write) — not
+        # merely a fallback default for detection to override.
+        #
+        # This was a real, verified bug, not a hypothetical: an earlier
+        # version let a supported live detection win over the
+        # preference every time, same as it already won over an
+        # unset self._last_language from ordinary conversation. That
+        # made "speak to me in Mandarin" invisible the instant she next
+        # spoke a sentence Whisper detected as English — the overwhelmingly
+        # common case, since asking for the switch happens in whatever
+        # language she was already speaking. "Effective next turn" means
+        # every next turn, not "until she next speaks the old language,"
+        # which is indistinguishable from not switching at all. An
+        # *unsupported* preference is still ignored outright, same as an
+        # unsupported detection always has been (voice/language.py's
+        # Portuguese-reply bug fix) — this only changes the *supported*
+        # case's priority against detection, nothing about what counts
+        # as trustworthy in the first place.
         preferred = self._language_preference()
-        if preferred in SUPPORTED_LANGUAGES:
+        language_pinned = preferred in SUPPORTED_LANGUAGES
+        if language_pinned:
             self._last_language = preferred
 
-        # Betting on last turn's language (or the preference just
+        # Betting on last turn's language (or the pinned preference just
         # applied above) for this turn's voice while the real answer
         # (this turn's detection, a few lines down) is still in flight.
-        # Wrong on a language switch — falls back to the ordinary lazy
-        # load in _speak(), just not warmed early that one time.
+        # Wrong on an organic, unpinned language switch — falls back to
+        # the ordinary lazy load in _speak(), just not warmed early that
+        # one time.
         self._preload_voice_in_background(self._last_language)
 
         stt_started_at = time.monotonic()
@@ -307,23 +325,98 @@ class CascadeSession:
         )
         self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
         heard = transcription.text.strip()
-        detected = (transcription.language or "").lower()
-        self._last_language = resolve_language(detected, self._last_language)
+        if not language_pinned:
+            detected = (transcription.language or "").lower()
+            self._last_language = resolve_language(detected, self._last_language)
+
+        messages: list[dict] = [
+            {"role": "system", "content": self._compiled_context},
+            {"role": "system", "content": f"Reply in {self._last_language}."},
+            {"role": "user", "content": heard},
+        ]
 
         llm_started_at = time.monotonic()
+        prompt_tokens = 0
+        completion_tokens = 0
+
         completion = self._client.chat.completions.create(
             model=_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": self._compiled_context},
-                {"role": "system", "content": f"Reply in {self._last_language}."},
-                {"role": "user", "content": heard},
-            ],
+            messages=messages,
+            tools=self._tool_schemas or None,
         )
-        self._pending_llm_ms = round((time.monotonic() - llm_started_at) * 1000)
+        message = completion.choices[0].message
         usage = getattr(completion, "usage", None)
-        self._pending_prompt_tokens = getattr(usage, "prompt_tokens", None)
-        self._pending_completion_tokens = getattr(usage, "completion_tokens", None)
-        return completion.choices[0].message.content.strip()
+        prompt_tokens += getattr(usage, "prompt_tokens", None) or 0
+        completion_tokens += getattr(usage, "completion_tokens", None) or 0
+
+        if message.tool_calls:
+            # "The voice engine never executes anything. It emits
+            # intent; the core validates; the tool executes" (SPEC.md).
+            # _emit_intent() only calls whatever was registered through
+            # on_intent() -- it never touches a Tool or Registry itself.
+            # Handles only the first tool call; a model asking for two
+            # in one turn is a real, unhandled edge case here, not
+            # silently mishandled — flagged, not built, since
+            # set_language is this project's only real tool so far and
+            # nothing exercises multi-call turns yet.
+            tool_call = message.tool_calls[0]
+            reply_text, follow_up_prompt_tokens, follow_up_completion_tokens = (
+                self._continue_after_tool_call(messages, message, tool_call)
+            )
+            prompt_tokens += follow_up_prompt_tokens
+            completion_tokens += follow_up_completion_tokens
+        else:
+            reply_text = (message.content or "").strip()
+
+        self._pending_llm_ms = round((time.monotonic() - llm_started_at) * 1000)
+        self._pending_prompt_tokens = prompt_tokens
+        self._pending_completion_tokens = completion_tokens
+        return reply_text
+
+    def _continue_after_tool_call(
+        self, messages: list[dict], message, tool_call
+    ) -> tuple[str, int, int]:
+        """Emits the intent to whatever `on_intent()` registered, feeds
+        the result back as a normal tool-result message, and asks the
+        model once more for the actual words to speak — a tool result
+        has no reply text of its own (`message.content` is `None` on the
+        first call; confirmed against a real Groq response during item
+        D's bake-off). Returns `(reply_text, prompt_tokens,
+        completion_tokens)` for *this second call only* — the first
+        call's usage is already accounted for by the caller."""
+        arguments = json.loads(tool_call.function.arguments)
+        if self._intent_callback is not None:
+            result = self._intent_callback(tool_call.function.name, arguments)
+        else:
+            result = {"status": "error", "detail": "no intent handler registered"}
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result)}
+        )
+
+        follow_up = self._client.chat.completions.create(model=_LLM_MODEL, messages=messages)
+        follow_up_usage = getattr(follow_up, "usage", None)
+        return (
+            (follow_up.choices[0].message.content or "").strip(),
+            getattr(follow_up_usage, "prompt_tokens", None) or 0,
+            getattr(follow_up_usage, "completion_tokens", None) or 0,
+        )
 
     def _speak(self, text: str) -> None:
         with self._playback_lock:
@@ -406,7 +499,19 @@ class CascadeSession:
         raise NotImplementedError("streaming reply audio isn't built this hour")
 
     def on_intent(self, callback) -> None:
-        raise NotImplementedError("tool-call intents aren't wired into a turn yet")
+        """Item G: real, not a stub anymore. `callback(name, arguments)
+        -> result` is called synchronously from inside `end_turn()`
+        (still blocking/synchronous, per this class's own nature) the
+        moment the model asks for a tool call — `end_turn()` never
+        looks inside `result` beyond handing it back to the model as
+        the next message; validating the call and running the tool is
+        entirely the callback's job (`cli.py` wires one backed by
+        `tools/registry.py`'s `Registry.call()`), never this class's.
+        `tool_schemas` (constructor arg) is what actually offers tools
+        to the model in the first place — registering a callback with
+        nothing in `tool_schemas` means the model is never offered
+        anything to call it for."""
+        self._intent_callback = callback
 
     def interrupt(self) -> None:
         """Barge-in's hook. If playback has already started, stops it

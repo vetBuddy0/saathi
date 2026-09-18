@@ -13,6 +13,7 @@ matters and isn't debt. `FakeTTSBackend` below stands in for whatever
 real backend is selected.
 """
 
+import json
 import tempfile
 import threading
 import time
@@ -39,26 +40,52 @@ class FakeTranscriptionsAPI:
         return SimpleNamespace(text=self.text, language=self.language)
 
 
+def _fake_completion(content=None, tool_calls=None, prompt_tokens=42, completion_tokens=7):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+
 class FakeChatCompletionsAPI:
-    def __init__(self, content: str, prompt_tokens: int = 42, completion_tokens: int = 7) -> None:
-        self.content = content
+    """`responses`, if given, is popped one at a time per `create()` call
+    (the last one repeats indefinitely once exhausted) — what the tool-
+    calling tests use to script a first response with `tool_calls` set
+    and a second, different one for the follow-up call `end_turn()`
+    makes after running the tool. The plain `content=` constructor stays
+    the simple case every non-tool-calling test already uses."""
+
+    def __init__(
+        self,
+        content: str | None = None,
+        prompt_tokens: int = 42,
+        completion_tokens: int = 7,
+        responses: list | None = None,
+    ) -> None:
         self.calls: list[dict] = []
-        self._usage = SimpleNamespace(
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
-        )
+        if responses is not None:
+            self._responses = list(responses)
+        else:
+            self._responses = [_fake_completion(content, None, prompt_tokens, completion_tokens)]
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        message = SimpleNamespace(content=self.content)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=self._usage)
+        if len(self._responses) > 1:
+            return self._responses.pop(0)
+        return self._responses[0]
 
 
 class FakeClient:
     def __init__(
-        self, heard: str = "hello", detected_language: str = "English", reply: str = "hi there"
+        self,
+        heard: str = "hello",
+        detected_language: str = "English",
+        reply: str = "hi there",
+        chat_responses: list | None = None,
     ) -> None:
         self.audio = SimpleNamespace(transcriptions=FakeTranscriptionsAPI(heard, detected_language))
-        self.chat = SimpleNamespace(completions=FakeChatCompletionsAPI(reply))
+        self.chat = SimpleNamespace(
+            completions=FakeChatCompletionsAPI(reply, responses=chat_responses)
+        )
 
 
 class FakeTTSBackend(TTSBackend):
@@ -246,12 +273,17 @@ def test_missing_groq_api_key_raises(monkeypatch):
         CascadeSession("fake-sink")
 
 
-def test_unbuilt_interface_methods_raise_not_implemented(no_real_playback):
+def test_on_audio_is_still_unbuilt(no_real_playback):
     session, _backend = _session(FakeClient())
     with pytest.raises(NotImplementedError):
         session.on_audio(lambda *_args: None)
-    with pytest.raises(NotImplementedError):
-        session.on_intent(lambda *_args: None)
+
+
+def test_on_intent_registers_without_raising(no_real_playback):
+    # Item G: on_intent() is real now, not a stub -- see the dedicated
+    # tool-calling tests below for what registering one actually does.
+    session, _backend = _session(FakeClient())
+    session.on_intent(lambda *_args: None)  # must not raise
 
 
 def test_interrupt_with_nothing_playing_is_a_quiet_no_op(no_real_playback):
@@ -353,16 +385,6 @@ def test_interrupt_during_first_sentence_playback_stops_the_second_sentence_from
 def test_end_turn_applies_a_stored_language_preference_when_detection_is_unsupported(
     no_real_playback,
 ):
-    # A supported live detection still wins over a stored preference for
-    # that turn's reply (resolve_language()'s existing, deliberate
-    # behavior -- see voice/language.py and the Portuguese-reply bug it
-    # was built to fix: Saathi mirrors whatever language she's actually
-    # speaking). Where a stored preference shows through is exactly
-    # where an unsupported/failed detection would otherwise have fallen
-    # back to whatever self._last_language happened to already be --
-    # the preference makes that fallback a deliberate choice (set via
-    # the panel or, eventually, a spoken command) instead of an accident
-    # of session history.
     client = FakeClient(detected_language="Portuguese")  # unsupported either way
     session = CascadeSession(
         "fake-sink",
@@ -371,6 +393,50 @@ def test_end_turn_applies_a_stored_language_preference_when_detection_is_unsuppo
         backend_preference=lambda: "fake",
         language_preference=lambda: "chinese",
     )
+    session.start()
+    session.end_turn()
+    assert session._last_language == "chinese"
+
+
+def test_a_supported_stored_preference_pins_the_language_over_organic_detection(
+    no_real_playback,
+):
+    # The real bug this session found and fixed by hand, not a
+    # hypothetical: "speak to me in Mandarin" (item G) writes a
+    # preference and is documented as "effective next turn" -- every
+    # next turn, not just the ones where she happens not to speak
+    # English again. A supported detection that used to win outright
+    # made the switch invisible the instant she spoke a sentence Whisper
+    # detected as English, which is the overwhelmingly common case,
+    # since asking for the switch itself usually happens in whatever
+    # language she was already speaking. Verified against a real Groq
+    # call before this fix landed: asking (in English) to switch to
+    # Mandarin correctly wrote the preference, but the very next turn's
+    # English audio silently reverted it.
+    client = FakeClient(detected_language="English")  # a supported, *different* detection
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        language_preference=lambda: "chinese",
+    )
+    session.start()
+    session.end_turn()
+    assert session._last_language == "chinese"
+
+
+def test_a_pinned_language_preference_persists_across_multiple_turns(no_real_playback):
+    client = FakeClient(detected_language="English")
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        language_preference=lambda: "chinese",
+    )
+    session.start()
+    session.end_turn()
     session.start()
     session.end_turn()
     assert session._last_language == "chinese"
@@ -498,3 +564,114 @@ def test_context_is_refreshed_in_the_background_after_say_completes(no_real_play
         time.sleep(0.01)
     assert "tea" in session._compiled_context
     store.close()
+
+
+# -- item G: tool calling (on_intent, set_language's real entry point) ----
+
+
+def _fake_tool_call(call_id, name, arguments: dict):
+    return SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+    )
+
+
+def test_a_tool_call_emits_an_intent_and_speaks_the_follow_up_reply(no_real_playback):
+    tool_call = _fake_tool_call("call_1", "set_language", {"language": "chinese"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="好的,我现在会说中文了。"),
+        ]
+    )
+    session, _backend = _session(client)
+    received_intents = []
+    session.on_intent(lambda name, args: received_intents.append((name, args)) or {"status": "ok"})
+
+    session.start()
+    reply = session.end_turn()
+
+    assert received_intents == [("set_language", {"language": "chinese"})]
+    assert reply == "好的,我现在会说中文了。"
+    # Two real chat completion calls were made: the one that asked for
+    # the tool, and the follow-up that turned its result into words.
+    assert len(client.chat.completions.calls) == 2
+
+
+def test_a_tool_calls_result_is_fed_back_as_a_tool_message(no_real_playback):
+    tool_call = _fake_tool_call("call_1", "set_language", {"language": "hindi"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="ठीक है।"),
+        ]
+    )
+    session, _backend = _session(client)
+    session.on_intent(lambda name, args: {"status": "ok", "language": args["language"]})
+
+    session.start()
+    session.end_turn()
+
+    follow_up_messages = client.chat.completions.calls[1]["messages"]
+    tool_messages = [m for m in follow_up_messages if m["role"] == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["tool_call_id"] == "call_1"
+    assert json.loads(tool_messages[0]["content"]) == {"status": "ok", "language": "hindi"}
+
+
+def test_a_tool_call_with_no_registered_intent_handler_still_gets_a_reply(no_real_playback):
+    # Nothing has called on_intent() yet -- must not crash the turn.
+    tool_call = _fake_tool_call("call_1", "set_language", {"language": "chinese"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="Sorry, I can't do that right now."),
+        ]
+    )
+    session, _backend = _session(client)
+    session.start()
+    reply = session.end_turn()
+    assert reply == "Sorry, I can't do that right now."
+
+
+def test_tool_call_token_usage_sums_both_completion_calls(no_real_playback):
+    tool_call = _fake_tool_call("call_1", "set_language", {"language": "english"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(
+                content=None, tool_calls=[tool_call], prompt_tokens=100, completion_tokens=20
+            ),
+            _fake_completion(content="Sure.", prompt_tokens=150, completion_tokens=5),
+        ]
+    )
+    session, _backend = _session(client)
+    session.on_intent(lambda name, args: {"status": "ok"})
+    session.start()
+    session.say(session.end_turn())
+
+    timings = session.pop_last_turn_timings()
+    assert timings.prompt_tokens == 250  # 100 + 150
+    assert timings.completion_tokens == 25  # 20 + 5
+
+
+def test_no_tool_schemas_means_no_tools_param_is_sent(no_real_playback):
+    client = FakeClient()
+    session, _backend = _session(client)  # no tool_schemas passed to CascadeSession
+    session.start()
+    session.end_turn()
+    assert client.chat.completions.calls[0]["tools"] is None
+
+
+def test_tool_schemas_are_passed_through_to_the_chat_completion_call(no_real_playback):
+    schema = [{"type": "function", "function": {"name": "set_language", "parameters": {}}}]
+    session = CascadeSession(
+        "fake-sink",
+        client=FakeClient(),
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        tool_schemas=schema,
+    )
+    session.start()
+    session.end_turn()
+    calls = session._client.chat.completions.calls
+    assert calls[0]["tools"] == schema
