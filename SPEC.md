@@ -257,7 +257,9 @@ the split is the difference between a companion and a medical liability.
   subject to cooldown, never expired by the social budget, and never
   counted against it. A day with three due reminders shouldn't leave her
   silent otherwise. Every due reminder fires; they don't compete with each
-  other for a slot.
+  other for a slot. Reminders respect presence and ignore quiet hours: if
+  someone set a reminder for 10pm, 10pm is the point — quiet hours exist to
+  stop unsolicited chatter, not to withhold a dose someone scheduled.
 - *Everything else* — "noticed" items, ambient and social utterances — has
   a daily cap (default three) and a cooldown between utterances (default
   90 minutes), both config. One per tick: the highest-scoring candidate
@@ -269,6 +271,18 @@ the split is the difference between a companion and a medical liability.
   don't spend the budget, but they do reset the clock: she shouldn't say
   "time for your tablets" and then chatter about the scan thirty seconds
   later.
+
+**Phrasing may not invent.** The step that turns an allowed candidate into
+words receives only the reason and the source episode text, and may not
+introduce a fact not present in them: no new named entities, no claims
+about the future or about actions taken. It may ask, recall, or
+acknowledge; it may not announce, promise, or arrange. "Priya is planning
+to call" to someone who then waits for a phone that never rings is not a
+tone problem. A check compares every generated utterance against its
+source and rejects it on a proper noun or a future-tense claim that isn't
+there; if the model can't be constrained, a template with the reason
+inserted is used instead — a slightly stiff sentence that's true beats a
+warm one that isn't. Nothing speaks unprompted until this holds.
 
 ---
 

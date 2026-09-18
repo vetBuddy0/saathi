@@ -50,12 +50,14 @@ liability. Now:
   social lane is evaluated in the same tick, and the cooldown clock
   reads the latest fired row of *any* kind.
 
-The base gate (`should_speak()` — presence, quiet hours, busy) applies
-to both lanes, non-terminal: a reminder due while she's out is held
-until she's back, not dropped. A judgment call, recorded in
-DECISIONS.md — the two-lane instruction named cap, cooldown and expiry
-as the things reminders escape, not presence; reminding an empty room
-helps no one, and a held reminder returns next tick.
+The social gate (`should_speak()` — presence, quiet hours, busy) is the
+social lane's. The reminder lane has its own, `reminder_may_fire()`:
+presence, yes — a reminder due while she's out is held until she's
+back, not dropped — but *not* quiet hours. If someone deliberately set a
+reminder for 10pm, 10pm is the point; quiet hours exist to stop
+unsolicited chatter, not to withhold a scheduled dose. `busy` is kept
+for reminders as a judgment call (DECISIONS.md): held one tick, never
+dropped.
 
 **Every candidate is still logged, allowed or not, with why** (SPEC.md:
 "otherwise 'why did it say that' is undebuggable") — expired, gated,
@@ -108,6 +110,23 @@ def should_speak(candidate: InitiativeCandidate, context: PolicyContext) -> Poli
         )
     if context.quiet_hours:
         return PolicyDecision(False, "quiet hours")
+    if context.busy:
+        return PolicyDecision(False, "something else is already happening")
+    return PolicyDecision(True, candidate.reason)
+
+
+def reminder_may_fire(candidate: InitiativeCandidate, context: PolicyContext) -> PolicyDecision:
+    """The reminder lane's gate: presence, and nothing else from the
+    social gate. Quiet hours exist to stop unsolicited chatter, not to
+    withhold a dose someone deliberately scheduled for 10pm — 10pm is
+    the point. Presence still holds (a reminder to an empty room helps
+    no one; it returns next tick). `busy` is kept, as a judgment call
+    recorded in DECISIONS.md: a reminder mid-phone-call waits one tick,
+    it isn't dropped."""
+    if context.presence is not True:
+        return PolicyDecision(
+            False, "presence not confirmed — no confirmed reason she's there to hear it"
+        )
     if context.busy:
         return PolicyDecision(False, "something else is already happening")
     return PolicyDecision(True, candidate.reason)
@@ -203,10 +222,11 @@ def evaluate(
     reminders = [c for c in candidates if c.kind == REMINDER_KIND]
     social = [c for c in candidates if c.kind != REMINDER_KIND]
 
-    # -- Reminder lane: due and not yet acknowledged -> fires. Logged
-    # first, so the social lane's cooldown clock below sees it.
+    # -- Reminder lane: due and not yet acknowledged -> fires, through
+    # its own gate (presence, not quiet hours). Logged first, so the
+    # social lane's cooldown clock below sees it.
     for candidate in reminders:
-        decision = should_speak(candidate, context)
+        decision = reminder_may_fire(candidate, context)
         _log(candidate, None if decision.speak else decision.reason)
 
     # -- Social lane.

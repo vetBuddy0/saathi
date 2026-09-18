@@ -127,21 +127,28 @@ def event_candidates(store: IdentityStore) -> list[InitiativeCandidate]:
     return []
 
 
-def _already_resolved_source_episodes(store: IdentityStore) -> set[int]:
+def _already_resolved_noticed_reasons(store: IdentityStore) -> set[str]:
+    """Dedup is on the *rule*, not its source episode. Two rules
+    grounded in the same episode are two separate things to notice —
+    one firing must not resolve the other. `initiatives` has no
+    `rule_id` column (a schema question, proposed alongside the
+    many-to-many provenance diff in docs/completed/checkpoint-3.md —
+    not applied here), so the rule's own text, which is exactly what
+    `reason` holds for a "noticed" row, is the key."""
     return {
-        row["source_episode"]
+        row["reason"]
         for row in store.read("initiatives", kind="noticed")
-        if row["source_episode"] is not None and _is_resolved(row)
+        if _is_resolved(row)
     }
 
 
 def noticed_candidates(
     store: IdentityStore, *, confidence_floor: float = NOTICED_CONFIDENCE_FLOOR
 ) -> list[InitiativeCandidate]:
-    already_resolved = _already_resolved_source_episodes(store)
+    already_resolved = _already_resolved_noticed_reasons(store)
     candidates = []
     for rule in store.read("rules", active=1):
-        if rule["source_episode"] is None or rule["source_episode"] in already_resolved:
+        if rule["source_episode"] is None or rule["text"] in already_resolved:
             continue
         confidence = rule["confidence"] or 0.0
         if confidence < confidence_floor:

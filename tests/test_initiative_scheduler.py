@@ -178,6 +178,28 @@ def test_noticed_candidates_deduplicates_against_already_proposed_episodes(store
     assert noticed_candidates(store) == []
 
 
+def test_two_rules_from_the_same_episode_are_two_separate_candidates(store):
+    # Dedup is on the rule, not the source episode: one firing must not
+    # resolve the other. Two things noticed about one observation are
+    # two things to say.
+    episode_id = store.append(
+        "episodes", ts=NOW.isoformat(), entity_id=None, text="e", importance=5.0, embedding=None
+    )
+    for text in ("first insight", "second insight"):
+        store.append(
+            "rules", text=text, confidence=0.9, learned_at=NOW.isoformat(),
+            source_episode=episode_id, active=1,
+        )
+    assert {c.reason for c in noticed_candidates(store)} == {"first insight", "second insight"}
+
+    # The first fires; the second must still be proposed.
+    store.append(
+        "initiatives", ts=NOW.isoformat(), kind="noticed", reason="first insight",
+        source_episode=episode_id, spoken=0, suppressed_by=None,
+    )
+    assert [c.reason for c in noticed_candidates(store)] == ["second insight"]
+
+
 # -- propose_candidates --------------------------------------------------
 
 

@@ -63,7 +63,15 @@ complete. Proposed:
 -rules(id, text, confidence, learned_at, source_episode, active)
 +rules(id, text, confidence, learned_at, active)
 +rule_episodes(rule_id, episode_id)   -- one row per citation, append-only
+-initiatives(id, ts, kind, reason, source_episode, spoken, suppressed_by)
++initiatives(id, ts, kind, reason, rule_id, source_episode, spoken, suppressed_by)
 ```
+
+The `initiatives.rule_id` line was added 2026-09-19: "noticed" dedup
+now keys on the rule, not its source episode (two rules from one
+observation are two things to say), and today it has to use the rule's
+*text* as that key because there's no column for the id. Real today,
+not a placeholder — but a proper id is what it should be.
 
 **2. `IdentityStore` has no update capability, and three real features
 now need one:** retracting a rule (`rules.active`), completing/silencing

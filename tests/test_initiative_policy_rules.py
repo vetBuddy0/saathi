@@ -224,6 +224,23 @@ def test_a_reminder_firing_resets_the_social_cooldown(store):
     assert rows[0]["suppressed_by"] is None
 
 
+def test_a_reminder_fires_during_quiet_hours_but_a_social_candidate_does_not(store):
+    # Quiet hours exist to stop unsolicited chatter, not to withhold a
+    # dose someone deliberately scheduled for 10pm -- 10pm is the point.
+    quiet = PolicyContext(presence=True, quiet_hours=True)
+    reminder = InitiativeCandidate(kind="scheduled", reason="take your evening tablets")
+    social = _noticed(store, "a noticed thing", 0.9)
+
+    rows = evaluate(store, [reminder, social], quiet, now=NOW)
+    by_kind = {r["kind"]: r for r in rows}
+    assert by_kind["scheduled"]["suppressed_by"] is None
+    assert by_kind["noticed"]["suppressed_by"] is not None
+    # Held for quiet hours specifically -- not for the cooldown the
+    # reminder just reset, which would also be true but isn't the point
+    # being pinned here. Quiet hours is checked first for social.
+    assert "quiet hours" in by_kind["noticed"]["suppressed_by"]
+
+
 def test_a_reminder_is_still_held_when_presence_is_unconfirmed_but_not_dropped(store):
     # The base gate applies to both lanes (a reminder to an empty room
     # helps no one) -- non-terminal, so it fires once she's back.

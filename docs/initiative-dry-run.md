@@ -250,23 +250,78 @@ Phrased utterances for this run (allowed candidates only):
   bit more tricky lately. Please remember there's no rush to do
   everything today…"
 
-Two honest notes on this output, neither about the scheduler:
+Two things that run exposed, both since fixed:
 
-- **The phrasing step invents things.** "I've made a special
-  arrangement," "Priya is planning to call this evening," "I did that"
-  — none of that is in the reason it was given. That's the phrasing
-  prompt (a one-off in the dry-run script, not shipped code) letting
-  the model embellish; it's exactly the fabrication item D flagged, and
-  it's why the phrasing step must be constrained to the reason and
-  nothing more before any of this is wired to actually speak. Worth
-  fixing at the prompt, not the policy.
-- **Two rules grounded in the same episode collapse into one.** The
-  fifth "noticed" candidate (Priya's visit → mood) vanishes after
-  09/15 21:00 without firing, expiring, or losing: it shares a
-  `source_episode` with the Priya-as-comfort rule that fired that tick,
-  and `scheduler.py` deduplicates by source episode, so once that
-  episode is resolved, every rule citing it is. Arguably right — don't
-  say two things about one observation — but it's a consequence of the
-  single-`source_episode` schema (see `docs/completed/checkpoint-3.md`'s
-  proposed diff), not a choice, and it's recorded here so it isn't
-  mistaken for one.
+- **The phrasing step was inventing facts** — "I've made a special
+  arrangement," "Priya is planning to call this evening," "I did that."
+  None of it was in the reason. To someone living alone, the first has
+  her waiting for a phone that never rings; the second she'd believe.
+  Not a tone problem. See "Phrasing, constrained," below.
+- **Two rules grounded in the same episode collapsed into one.** The
+  fifth "noticed" candidate vanished after 09/15 21:00 without firing,
+  expiring, or losing: it shared a `source_episode` with the rule that
+  fired that tick, and dedup was by source episode. Now dedup is on the
+  rule (its text — `initiatives` has no `rule_id` column; that's in the
+  proposed schema diff in `docs/completed/checkpoint-3.md`, not applied).
+  Two things noticed about one observation are two things to say;
+  pinned by `test_two_rules_from_the_same_episode_are_two_separate_candidates`.
+
+Also since fixed: **reminders ignore quiet hours** (they still respect
+presence). If someone set a reminder for 10pm, 10pm is the point;
+quiet hours exist to stop unsolicited chatter, not to withhold a
+scheduled dose. Pinned by
+`test_a_reminder_fires_during_quiet_hours_but_a_social_candidate_does_not`.
+
+## Phrasing, constrained (2026-09-19)
+
+`initiative/phrase.py` is now shipped code, and the model call it
+makes is boxed in:
+
+- It receives **only** the reason and the source episode text. No
+  persona, no memory, nothing else a "fact" could come from.
+- `check()` rejects any **capitalized word not in the source**
+  (sentence-initial ordinary words like "Good" or "Just" are allowed;
+  "Priya" isn't, at the start of a sentence or anywhere else, unless
+  the source says Priya).
+- `check()` rejects **future-tense and taken-action claims** — "will",
+  "'ll", "going to", "planning to", "I've made", "I did",
+  "arrangement" — *regardless* of the source (a source that says
+  "planning to visit Saturday" does not license "planning to call this
+  evening"), and time words like "tomorrow" or "this evening" unless
+  the source says them.
+- A rejected utterance is retried once, then **falls back to a
+  template** with the source inserted verbatim. Stiff, true.
+
+Tested with the exact fabrications from the earlier run
+(`tests/test_initiative_phrase.py`): "Priya is planning to call this
+evening" is caught on `is planning` and `this evening` (and on `Priya`
+when the source never named her); "I've made a special arrangement to
+ensure tomorrow's scan…" on `I've made`, `arrangement`, `tomorrow`, and
+`we've got you covered`; "I did that" on `I did`. Recalls and questions
+pass: "You mentioned the scan on Thursday. How are you feeling about
+it?" — clean.
+
+**Same seeded week, constrained phrasing, real output.** (This run's
+`reflect()` produced fewer rules than the last — the usual variance —
+so the social lane had one allowed candidate; every reminder fired as
+before.)
+
+| Time | Kind | Would say | Check |
+|---|---|---|---|
+| 09/14 09:00 | scheduled | "It is time for your morning blood pressure tablet. How are you feeling today?" | passes |
+| 09/14 21:00 | scheduled | "Just a gentle nudge to take your evening tablets." | passes |
+| 09/15 09:00 | scheduled | "A reminder: leave in time for Thursday's scan appointment reminder check-in." | passes — **the template**: the model's two attempts failed the check, so the source itself was spoken |
+| 09/15 21:00 | noticed | "It's lovely that your daughter is here for lunch and a good chat with you. It must be a real comfort to have that time together." | passes |
+
+Compare the last row to the earlier "It looks like Priya is planning to
+call this evening": same lane, same kind of candidate, now a
+present-tense acknowledgement of what the source actually said (she
+mentioned Priya had arrived for lunch), with nothing announced. And the
+third row is the fallback doing its job in real output — a stiff
+sentence that is exactly the reminder someone set, rather than a warm
+one the model embellished.
+
+The check is a heuristic — pure local text, no second model call to
+grade the first — so it will sometimes force a template on an innocent
+sentence. That's the intended failure direction. **Nothing speaks
+unprompted until this holds**, and nothing is wired to speak yet.

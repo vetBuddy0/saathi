@@ -259,6 +259,38 @@ lane's rule, built for conversational restraint, and applying it to two
 simultaneously due medications would make one wait on the other for no
 reason anyone asked for.
 
+~~**2026-09-19 — The presence/quiet-hours/busy gate applies to the
+reminder lane too.**~~ Refined the same day, explicit instruction:
+reminders respect presence and *ignore quiet hours* — if someone set a
+reminder for 10pm, 10pm is the point. `busy` is still applied to
+reminders (held one tick during a call, never dropped); the instruction
+named presence and quiet hours only, and interrupting a phone call with
+a tablet reminder wasn't asked for. Reversible in minutes.
+
+**2026-09-19 — Phrasing claims are flagged regardless of whether the
+source contains the same construction.** Found by the test for the
+dry run's own fabrication: a source saying "Priya is planning to visit
+Saturday" was licensing "Priya is planning to call this evening" — the
+construction matched, the fact didn't. Recalling a stated plan now has
+to be phrased without future tense or it falls to the template.
+Stricter than strictly necessary, on purpose: a false positive costs a
+stiff sentence; a false negative costs her an evening waiting for a
+phone that never rings.
+
+**2026-09-19 — The phrasing check is a local heuristic, not a second
+model call.** Grading one model's output with another would be a
+second place for a fact to be invented, and would put a model call in
+the aftermath of every tick. Capitalized-word and pattern matching is
+crude and occasionally forces a template on an innocent sentence —
+the intended failure direction.
+
+**2026-09-19 — "Noticed" dedup keys on the rule's text, not a rule id.**
+`initiatives` has no `rule_id` column; adding one is a schema question
+(proposed with the many-to-many provenance diff, not applied). The
+rule's text is exactly what a "noticed" row's `reason` holds, so it's a
+real key today, not a placeholder — two rules with byte-identical text
+would collapse, which is acceptable until the column exists.
+
 **2026-09-19 — Stopped tuning Piper's latency; the 1213ms-vs-1200ms
 budget stays red, reported honestly, until Google's streaming TTS is
 unblocked.** Explicit instruction: further Piper-specific work would be
