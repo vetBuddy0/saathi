@@ -95,6 +95,7 @@ def _run() -> int:
                         store, TTS_BACKEND_KEY, DEFAULT_BACKEND_ID
                     ),
                     language_preference=lambda: read_preference(store, LANGUAGE_KEY),
+                    identity_store=store,
                 )
                 capture_source_id = handles.source_id
             else:
