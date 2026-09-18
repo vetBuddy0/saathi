@@ -43,3 +43,10 @@ passes, latency budget passes. Not "verified manually".
 Say what you tried and stop. A clear "this is blocked because X" beats a
 plausible implementation that doesn't work. Never narrow the spec silently —
 if something can't be done as written, raise it.
+
+## Autonomy
+
+Decide alone anything reversible in under an hour, and record it in
+DECISIONS.md. Ask only about money, new vendors, the five interfaces, or
+anything that changes what she hears. Never stop for confirmation. Never ask
+the same thing twice.
