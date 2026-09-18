@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import sys
 import threading
 import wave
 from pathlib import Path
@@ -32,7 +33,16 @@ def _ensure_voice_model(voice_name: str) -> Path:
     _VOICE_DIR.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
-            "python3",
+            # sys.executable, not the bare string "python3" -- found by
+            # real testing, not inspection: a plain "python3" resolves
+            # against $PATH, which is not guaranteed to be this same
+            # interpreter (it resolved to an unrelated Anaconda install
+            # with no `piper` package on this very machine). Using this
+            # process's own interpreter is what setup-pi.sh already gets
+            # right by going through `uv run python3 ...` for the same
+            # download; this fixes the same class of bug for the path
+            # that runs outside setup-pi.sh's `uv run` wrapper.
+            sys.executable,
             "-m",
             "piper.download_voices",
             voice_name,

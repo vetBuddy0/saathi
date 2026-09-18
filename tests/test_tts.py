@@ -9,13 +9,15 @@ faked here -- see each backend module's docstring for what was verified
 by hand instead.
 """
 
+import sys
+
 import pytest
 
 from saathi.voice.tts import TTSBackend, split_into_sentences
 from saathi.voice.tts.google_backend import GoogleChirp3HDBackend, GoogleNeural2WaveNetBackend
 from saathi.voice.tts.kokoro_backend import KokoroBackend
 from saathi.voice.tts.melo_backend import MeloTTSBackend
-from saathi.voice.tts.piper_backend import PiperBackend
+from saathi.voice.tts.piper_backend import PiperBackend, _ensure_voice_model
 from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
 
@@ -56,6 +58,27 @@ def test_registry_ids_are_unique_and_match_backend_id_attribute():
     backends = default_backends()
     for key, backend in backends.items():
         assert key == backend.id
+
+
+def test_ensure_voice_model_downloads_using_this_interpreter_not_bare_python3(
+    monkeypatch, tmp_path
+):
+    # Regression test for a real bug found by hand: a bare "python3" on
+    # $PATH is not guaranteed to be this process's own interpreter (it
+    # resolved to an unrelated Anaconda install with no `piper` package
+    # installed, on the machine this was built on). Downloading must use
+    # sys.executable, the same interpreter actually running this code.
+    monkeypatch.setattr("saathi.voice.tts.piper_backend._VOICE_DIR", tmp_path)
+    captured_argv = []
+
+    def fake_run(argv, check):
+        captured_argv.append(argv)
+        (tmp_path / "some-voice.onnx").touch()
+
+    monkeypatch.setattr("saathi.voice.tts.piper_backend.subprocess.run", fake_run)
+    _ensure_voice_model("some-voice")
+
+    assert captured_argv[0][0] == sys.executable
 
 
 def test_piper_backend_is_always_available():
