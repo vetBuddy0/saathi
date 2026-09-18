@@ -120,6 +120,20 @@ class IdentityStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
 
+    @property
+    def path(self) -> Path:
+        """Read-only, purely additive to `create`/`append`/`read` — added
+        for `identity/compile.py`'s background-thread refresh
+        (`voice/engine/cascade.py`), which needs its own connection to
+        the same file rather than sharing this one: `sqlite3` connections
+        can't cross threads (`check_same_thread`, on by default and not
+        something to silently flip off for one caller's convenience —
+        that would change this object's threading contract for
+        everyone). A second connection to the same file is SQLite's own
+        supported way to do this; this property is what makes opening
+        one possible without reaching into `_path` from outside."""
+        return self._path
+
     def create(self) -> None:
         """Create the schema. Idempotent — safe to call on every startup."""
         with self._conn:

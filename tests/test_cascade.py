@@ -13,14 +13,17 @@ matters and isn't debt. `FakeTTSBackend` below stands in for whatever
 real backend is selected.
 """
 
+import tempfile
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
 
 import saathi.voice.engine.cascade as cascade_module
+from saathi.identity.store import IdentityStore
 from saathi.voice.engine.cascade import CascadeSession
 from saathi.voice.tts import TTSBackend
 
@@ -413,3 +416,85 @@ def test_interrupt_requested_flag_is_reset_at_the_start_of_each_say_call(no_real
     # A stale flag from a previous (or no-op) interrupt must not silently
     # swallow the next turn's speech.
     assert backend.synthesized == ["Hello there."]
+
+
+# -- item F: compiled context from IdentityStore --------------------------
+
+
+def _tmp_store() -> IdentityStore:
+    tmp_dir = tempfile.mkdtemp()
+    store = IdentityStore(Path(tmp_dir) / "identity.sqlite3")
+    store.create()
+    return store
+
+
+def test_no_identity_store_keeps_the_old_static_persona_behavior(no_real_playback):
+    # Every caller that doesn't know about IdentityStore yet -- including
+    # every other test in this file -- must see exactly the old behavior.
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.end_turn()
+    system_messages = [m["content"] for m in client.chat.completions.calls[0]["messages"]]
+    assert system_messages[0] == cascade_module._PERSONA_PATH.read_text().strip()
+
+
+def test_an_identity_store_compiles_context_at_construction(no_real_playback):
+    store = _tmp_store()
+    store.append(
+        "rules",
+        text="She likes being greeted by name.",
+        confidence=0.9,
+        learned_at="2026-09-18T00:00:00+00:00",
+        active=1,
+    )
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        identity_store=store,
+    )
+    session.start()
+    session.end_turn()
+    system_messages = [m["content"] for m in client.chat.completions.calls[0]["messages"]]
+    assert "She likes being greeted by name." in system_messages[0]
+    store.close()
+
+
+def test_context_is_refreshed_in_the_background_after_say_completes(no_real_playback):
+    store = _tmp_store()
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        identity_store=store,
+    )
+
+    # A rule written *after* construction must not appear yet -- nothing
+    # has recompiled the context since __init__.
+    store.append(
+        "rules",
+        text="She prefers tea over coffee.",
+        confidence=0.9,
+        learned_at="2026-09-18T00:00:00+00:00",
+        active=1,
+    )
+    assert "tea" not in session._compiled_context
+
+    session.start()
+    session.say("a reply")  # the turn ending is what triggers the refresh
+
+    deadline = time.monotonic() + 1.0
+    while "tea" not in session._compiled_context and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "tea" in session._compiled_context
+    store.close()

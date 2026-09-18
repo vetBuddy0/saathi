@@ -3,9 +3,21 @@
 
 One-hour spike (2026-09-17), built to close the loop end to end, not to
 be the real engine: `GROQ_API_KEY` from the environment only, never
-committed. The persona is `persona_stub.txt` next door — one hardcoded
-paragraph, explicitly *not* the real identity file, which is being
-written separately.
+committed.
+
+Item F: the persona is no longer a static read of `persona_stub.txt`.
+`identity/compile.py`'s `compile_context()` is now the actual source of
+what the engine receives — it reads that same file as its base layer
+and folds in whatever `IdentityStore` holds on top of it (still nothing,
+today — see that module's docstring). `_refresh_compiled_context_in_background()`
+is where SPEC.md's "compiled between turns, never during one" is
+actually enforced: once at construction, and again after every `say()`
+call returns, in a background thread — so the *next* `end_turn()` reads
+context compiled from the turn that just finished, one turn stale on
+purpose. Passing no `identity_store` keeps the old static behavior
+exactly (`persona_stub.txt`, read once, never refreshed) — every
+existing caller that doesn't know about `IdentityStore` yet, including
+several tests, still works unchanged.
 
 The brief asked for Kimi K2. The key this was tested with doesn't have
 it (`GET /v1/models` doesn't list either `moonshotai/kimi-k2-instruct` or
@@ -69,6 +81,8 @@ from typing import Callable
 from groq import Groq
 
 from saathi.audio.playback import PlaybackHandle, play
+from saathi.identity.compile import compile_context
+from saathi.identity.store import IdentityStore
 from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve_language
 from saathi.voice.tts import TTSBackend, split_into_sentences
 from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
@@ -149,6 +163,7 @@ class CascadeSession:
         backends: dict[str, TTSBackend] | None = None,
         backend_preference: BackendPreference = _default_backend_preference,
         language_preference: LanguagePreference = _no_language_preference,
+        identity_store: IdentityStore | None = None,
     ) -> None:
         if client is None:
             api_key = os.environ.get("GROQ_API_KEY")
@@ -160,7 +175,16 @@ class CascadeSession:
         self._backend_preference = backend_preference
         self._language_preference = language_preference
         self._sink_id = sink_id
-        self._persona = _PERSONA_PATH.read_text().strip()
+        self._identity_store = identity_store
+        # No store: exactly the old, static behavior -- persona_stub.txt,
+        # read once, never refreshed. A store: compile_context() runs
+        # once here (there's no previous turn to trigger a background
+        # refresh from, and SPEC.md says context must already be held
+        # "when she starts speaking") and again after every say() call.
+        if identity_store is not None:
+            self._compiled_context = compile_context(identity_store)
+        else:
+            self._compiled_context = _PERSONA_PATH.read_text().strip()
         self._chunks: list[bytes] = []
         self._last_language = DEFAULT_LANGUAGE
         self._playback_lock = threading.Lock()
@@ -181,6 +205,31 @@ class CascadeSession:
         timings = self._last_turn_timings
         self._last_turn_timings = None
         return timings
+
+    def _refresh_compiled_context_in_background(self) -> None:
+        # SPEC.md: "Context is compiled between turns, never during
+        # one." Called once a turn is fully over (see _speak()'s tail),
+        # in a background thread so a slow compile (scoring many
+        # episodes) never adds latency to the turn that's already
+        # finishing. The *next* end_turn() reads self._compiled_context
+        # whenever it happens to run -- one turn stale on purpose, per
+        # SPEC.md's own words, not a race to close.
+        if self._identity_store is None:
+            return
+
+        # A fresh connection to the same file, not the shared one --
+        # found by real testing, not inspection: sqlite3 connections
+        # can't cross threads (ProgrammingError), and flipping
+        # check_same_thread off on the shared connection would change
+        # IdentityStore's threading contract for every caller just to
+        # suit this one. See IdentityStore.path's docstring.
+        store_path = self._identity_store.path
+
+        def _refresh() -> None:
+            with IdentityStore(store_path) as background_store:
+                self._compiled_context = compile_context(background_store)
+
+        threading.Thread(target=_refresh, daemon=True).start()
 
     def _current_backend(self) -> TTSBackend:
         # Read fresh every call, not cached at construction -- this is
@@ -265,7 +314,7 @@ class CascadeSession:
         completion = self._client.chat.completions.create(
             model=_LLM_MODEL,
             messages=[
-                {"role": "system", "content": self._persona},
+                {"role": "system", "content": self._compiled_context},
                 {"role": "system", "content": f"Reply in {self._last_language}."},
                 {"role": "user", "content": heard},
             ],
@@ -344,7 +393,14 @@ class CascadeSession:
         self._pending_completion_tokens = None
 
     def say(self, text: str) -> None:
-        self._speak(text)
+        try:
+            self._speak(text)
+        finally:
+            # The turn is over regardless of which of _speak()'s several
+            # return points was hit (empty text, interrupted mid-sentence,
+            # finished normally) -- see _refresh_compiled_context_in_background()'s
+            # docstring for why "after every say()" is the right boundary.
+            self._refresh_compiled_context_in_background()
 
     def on_audio(self, callback) -> None:
         raise NotImplementedError("streaming reply audio isn't built this hour")
