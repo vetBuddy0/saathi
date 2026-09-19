@@ -26,6 +26,7 @@ with nothing to catch.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Callable
 
 from saathi.identity.store import IdentityStore
 
@@ -46,6 +47,29 @@ def read_preference(store: IdentityStore, key: str, default: str | None = None) 
         return default
     latest = max(rows, key=lambda row: (row["updated_at"], row["id"]))
     return latest["value"]
+
+
+def threadsafe_reader(
+    store: IdentityStore, key: str, default: str | None = None
+) -> Callable[[], str | None]:
+    """A zero-arg reader for `key` that is safe to call from *any*
+    thread — `CascadeSession` calls its preference readers from the
+    executor thread `end_turn()` runs in, and from the daemon thread
+    that warms the voice at construction, never from the thread that
+    opened `store`. `sqlite3` connections can't cross threads
+    (`ProgrammingError`), and this was found live, not in tests: the
+    very first spacebar release of a real run crashed the turn, while
+    every test passed `lambda: "fake"` and never touched a store from
+    another thread. Opens its own short-lived connection to the same
+    file per call (SQLite's own supported way — see
+    `IdentityStore.path`), which is one tiny read per turn."""
+    path = store.path
+
+    def _read() -> str | None:
+        with IdentityStore(path) as own:
+            return read_preference(own, key, default)
+
+    return _read
 
 
 def write_preference(store: IdentityStore, key: str, value: str) -> None:

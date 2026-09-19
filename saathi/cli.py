@@ -79,7 +79,7 @@ def _run() -> int:
         from saathi.identity.preferences import (
             LANGUAGE_KEY,
             TTS_BACKEND_KEY,
-            read_preference,
+            threadsafe_reader,
         )
         from saathi.tools.language import SET_LANGUAGE_DESCRIPTION, make_set_language_tool
         from saathi.tools.llm_schema import tool_to_openai_schema
@@ -114,12 +114,18 @@ def _run() -> int:
         if mic is not None and speaker is not None:
             handles = ensure_echo_cancellation(mic.id, speaker.id)
             if isinstance(handles, EchoCancelHandles):
+                # threadsafe_reader, not a lambda over `store`: these are
+                # called from end_turn()'s executor thread and from the
+                # voice-warming daemon thread, never from this one, and
+                # a sqlite3 connection can't cross threads. Found live --
+                # the first spacebar release of a real run crashed the
+                # turn. See identity/preferences.py.
                 session = CascadeSession(
                     handles.sink_id,
-                    backend_preference=lambda: read_preference(
+                    backend_preference=threadsafe_reader(
                         store, TTS_BACKEND_KEY, DEFAULT_BACKEND_ID
                     ),
-                    language_preference=lambda: read_preference(store, LANGUAGE_KEY),
+                    language_preference=threadsafe_reader(store, LANGUAGE_KEY),
                     identity_store=store,
                     tool_schemas=tool_schemas,
                 )

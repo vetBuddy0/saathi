@@ -683,6 +683,47 @@ def test_context_is_refreshed_in_the_background_after_say_completes(no_real_play
     store.close()
 
 
+def test_end_turn_in_a_worker_thread_with_store_backed_preferences(no_real_playback):
+    # The live bug, reproduced the way it actually happened: cli.py
+    # gives CascadeSession store-backed preference readers, and
+    # screen/server.py runs end_turn() in an executor thread -- a
+    # different thread from the one that opened the store. The old
+    # `lambda: read_preference(store, ...)` wiring crashed here on the
+    # very first spacebar release of a real run. Construction alone
+    # already exercises it too: the voice-warming daemon thread calls
+    # the backend reader.
+    from saathi.identity.preferences import LANGUAGE_KEY, TTS_BACKEND_KEY, threadsafe_reader
+
+    store = _tmp_store()
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=threadsafe_reader(store, TTS_BACKEND_KEY, "fake"),
+        language_preference=threadsafe_reader(store, LANGUAGE_KEY),
+        identity_store=store,
+    )
+
+    errors: list = []
+    replies: list = []
+
+    def _turn():
+        try:
+            session.start()
+            session.send_audio(b"\x00\x00" * 100)
+            replies.append(session.end_turn())
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_turn)
+    thread.start()
+    thread.join(timeout=5)
+    assert errors == []
+    assert replies == ["hi there"]
+    store.close()
+
+
 # -- item G: tool calling (on_intent, set_language's real entry point) ----
 
 

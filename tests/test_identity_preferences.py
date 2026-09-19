@@ -56,6 +56,55 @@ def test_writing_the_same_key_many_times_always_reads_the_latest(store):
     assert read_preference(store, LANGUAGE_KEY) == "english"
 
 
+def test_threadsafe_reader_works_from_another_thread(store):
+    # Found live, not by the earlier tests: cli.py wired the preference
+    # readers as lambdas over the main thread's connection, and the
+    # first real end_turn() -- run in an executor thread -- crashed with
+    # sqlite3's cross-thread ProgrammingError. A plain lambda over
+    # `store` fails this test; threadsafe_reader must not.
+    import threading
+
+    from saathi.identity.preferences import threadsafe_reader
+
+    write_preference(store, LANGUAGE_KEY, "chinese")
+    reader = threadsafe_reader(store, LANGUAGE_KEY, "english")
+
+    result: list = []
+    errors: list = []
+
+    def _run():
+        try:
+            result.append(reader())
+        except Exception as exc:  # pragma: no cover - the failure this test exists to catch
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    thread.join(timeout=5)
+    assert errors == []
+    assert result == ["chinese"]
+
+
+def test_a_plain_lambda_over_the_store_really_does_fail_across_threads(store):
+    # The counterexample, kept so the reason threadsafe_reader exists
+    # can't be quietly forgotten: this is exactly what cli.py used to do.
+    import sqlite3
+    import threading
+
+    errors: list = []
+
+    def _run():
+        try:
+            read_preference(store, LANGUAGE_KEY)
+        except sqlite3.ProgrammingError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    thread.join(timeout=5)
+    assert len(errors) == 1
+
+
 def test_different_keys_dont_interfere(store):
     write_preference(store, "language", "chinese")
     write_preference(store, "tts_backend", "piper")
