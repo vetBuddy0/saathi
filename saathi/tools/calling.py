@@ -16,11 +16,15 @@ handler, because only the first tool call per turn is handled
 (DECISIONS 2026-09-18): there is no second call to do it in. Ringing
 takes seconds; the sentence is spoken before it rings.
 
-Stage 2 resolution for `call_contact`, in order: "the test number"; a
-relationship word ("my daughter") through her `edges`; an exact
-(accent- and case-insensitive) name. Anything else is *no match*: say
-so and offer to save a number — never dial a guess. (Stage 3 adds
-fuzzy name matching between "exact" and "no match".)
+Resolution for `call_contact`, in order: "the test number"; a
+relationship word ("my daughter") through her `edges`; then her saved
+names through `call/match.py`, which answers in three bands —
+confident (say "Calling Basudeb.", then dial), unsure (a Choice or
+Confirm card via `call/choosing.py`; nothing dials until she answers),
+none (say so, offer to save a number; never dial a guess). An exact
+name goes through the matcher too, not around it: it scores 1.0, and is
+confident unless a sound-alike is also saved — which is exactly when
+Whisper's spelling of the day must not decide who rings.
 
 `answer_card` is how a *spoken* answer reaches a card calling showed:
 her "yes" arrives as the next turn's tool call and becomes
@@ -47,6 +51,8 @@ from typing import Any, Protocol
 
 from saathi.call import contacts
 from saathi.call.cards import CardController
+from saathi.call.choosing import ChoiceFlow
+from saathi.call.match import match as match_name
 from saathi.call.controller import CallController
 from saathi.call.saving import SaveFlow
 from saathi.call.twilio import TwilioError
@@ -106,8 +112,25 @@ def _dial(controller: CallController, number: str, who: str) -> dict[str, Any]:
     }
 
 
-def make_call_tool(controller: CallController, store_path: Path | None = None) -> Tool:
-    """`store_path=None` is Stage 1 behaviour: only the test number."""
+def make_contact_dialer(controller: CallController):
+    """What `ChoiceFlow` calls once she has picked someone — the same
+    `_dial` path as a confident match, so the note and the busy/error
+    handling can't drift apart."""
+
+    def dial(contact: contacts.Contact) -> dict[str, Any]:
+        return _dial(controller, contact.phone, contact.name)
+
+    return dial
+
+
+def make_call_tool(
+    controller: CallController,
+    store_path: Path | None = None,
+    choices: ChoiceFlow | None = None,
+) -> Tool:
+    """`store_path=None` is Stage 1 behaviour: only the test number.
+    Without `choices`, an unsure match is answered as no match — never
+    dialled."""
 
     def _call_contact(contact: str) -> dict[str, Any]:
         contact = (contact or "").strip()
@@ -141,20 +164,22 @@ def make_call_tool(controller: CallController, store_path: Path | None = None) -
                     "number can be called. Say so in one short, warm sentence."
                 ),
             }
-        match = None
         if contacts.is_known_relation(contact):
-            match = contacts.find_by_relation(store_path, contact)
-        if match is None:
-            match = contacts.find_by_exact_name(store_path, contact)
-        if match is None:
-            return {
-                "status": "no_match",
-                "note": (
-                    f"There is no number saved for '{contact}'. Say so plainly in one "
-                    "sentence and offer to save their number. Do not guess who she meant."
-                ),
-            }
-        return _dial(controller, match.phone, match.name)
+            related = contacts.find_by_relation(store_path, contact)
+            if related is not None:
+                return _dial(controller, related.phone, related.name)
+        result = match_name(contact, contacts.list_contacts(store_path), lambda c: c.name)
+        if result.band == "confident":
+            return _dial(controller, result.best.phone, result.best.name)
+        if result.band == "unsure" and choices is not None:
+            return choices.offer(contact, result.choices())
+        return {
+            "status": "no_match",
+            "note": (
+                f"There is no number saved for '{contact}'. Say so plainly in one "
+                "sentence and offer to save their number. Do not guess who she meant."
+            ),
+        }
 
     return Tool(
         name="call_contact",

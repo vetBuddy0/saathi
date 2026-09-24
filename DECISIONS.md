@@ -519,3 +519,48 @@ The other assumption held: `answer()` runs `on_answer` callbacks
 synchronously on the answering thread, after its lock is released.
 Cards remain a local stub of PR #3's shape; calling never calls `ask()`;
 if SCREEN ships its own voice-answer tool it replaces `answer_card`.
+
+**2026-09-25 — Name matching: sound folding + Jaro-Winkler, three bands,
+thresholds from a 41-pair corpus.** `call/match.py`, pure Python. Folds
+ph/dh/th/bh/gh/kh, sh/zh/ch, q->c, x->s, k->c, ee->i, oo->u, v->b, w->b,
+y->i, final ng->n, doubled letters; strips accents and pinyin tone
+digits; scores both orders of a two-word name and, for a one-word
+request, each word of a saved name ("Priya" -> "Priya Sharma"). Corpus
+(`tests/test_call_match.py`): 24 same-person pairs score >= 0.956, 6
+ask-her pairs 0.800-0.925, 11 different-people pairs <= 0.783.
+**Confident >= 0.93 *and* >= 0.05 ahead of the runner-up; unsure >=
+0.79; below that, none.** Both gaps are thin (0.925 vs 0.956; 0.783 vs
+0.800) and 0.79 was moved down from 0.80 when Wong/Wang landed on the
+line at 0.7999 — the threshold sits at the midpoint of the gap, not on a
+corpus point. Expect to retune from real misses; the corpus is where to
+add them. Soundex/Metaphone lost (English-centric, no pinyin), edit
+distance lost (names agree at the start; JW's prefix bonus rewards it),
+jellyfish/rapidfuzz lost (a dependency for ~40 lines).
+
+**2026-09-25 — Zhou/Chou stays a non-match (0.778).** Chou is Wade-Giles
+for Zhou, so they can be one surname — but the brief's table folds zh->z
+and ch->c separately, and folding zh with ch would also merge Zhang and
+Chang (different surnames). Recorded rather than special-cased; a saved
+"Chou" she calls "Zhou" gets "no number for Zhou" and an offer to save,
+never a wrong dial.
+
+**2026-09-25 — Exact names go through the matcher, not around it.** The
+brief put fuzzy matching after an exact-name lookup. An exact lookup
+first would dial "Meena" outright even with "Mina" also saved — letting
+Whisper's spelling of the day pick who rings, which is the failure the
+bands exist to stop. Through the matcher an exact name scores 1.0 and is
+confident unless a sound-alike is saved, in which case she is asked.
+The relationship lookup ("my daughter") still runs first: an edge is
+something she told us, not a spelling.
+
+**2026-09-25 — Unsure with one plausible name is a Confirm card ("Did
+you mean Anand?"), not a Choice card.** A Choice card needs two options
+(PR #3); a single sub-confident name still must not dial on its own.
+
+**2026-09-25 — A choice answered by voice dials inside the `answer_card`
+call; a choice answered by tap dials on a short worker thread, and
+rings without "Calling X." being said.** The voice path can report
+"Calling Basudeb." (or a failure) in the same turn. A tap arrives on the
+screen server's loop, which must not block on a Twilio request, and
+nothing may speak outside a turn without reaching through
+`VoiceSession`; the name on the card she just tapped stands in.

@@ -198,3 +198,92 @@ def test_answer_card_passes_the_first_one_as_choice_1(tmp_path):
     cards.show(card)
     result = make_answer_card_tool(cards, [_Flow()]).handler(choice=1)
     assert result["status"] == "answered" and seen[0].choice == 1
+
+
+# -- Stage 3 -----------------------------------------------------------------
+
+from saathi.call.choosing import ChoiceFlow  # noqa: E402
+from saathi.tools.calling import make_contact_dialer  # noqa: E402
+
+
+def _stage3(tmp_path, *people):
+    path = _store(tmp_path)
+    for name, number in people:
+        _contacts.save_contact(path, name, number, "SG", None)
+    controller, client = _controller()
+    cards = FakeCardController()
+    choices = ChoiceFlow(cards, make_contact_dialer(controller))
+    call = make_call_tool(controller, path, choices)
+    answer = make_answer_card_tool(cards, [choices])
+    return call, answer, cards, client
+
+
+A = "+65" + "9123" + "4567"
+B = "+65" + "9876" + "5432"
+C = "+65" + "9555" + "0000"
+
+
+def test_confident_says_the_saved_name_and_dials(tmp_path):
+    call, _, cards, client = _stage3(tmp_path, ("Basudeb", A), ("Priya", B))
+    result = call.handler(contact="Vasudev")
+    assert result["status"] == "calling" and "Calling Basudeb." in result["note"]
+    assert client.created[0][0] == A and cards.current is None
+
+
+def test_unsure_shows_a_choice_and_dials_nothing_until_she_answers(tmp_path):
+    call, answer, cards, client = _stage3(tmp_path, ("Meena", A), ("Mina", B), ("Ravi", C))
+    result = call.handler(contact="Meena")
+    assert result["status"] == "unsure" and client.created == []
+    card = cards.current
+    assert card.kind == "choice" and set(card.options) == {"Meena", "Mina"}
+    assert card.spoken in result["note"] and "the first" in card.spoken
+    chosen = card.options[0]
+    picked = answer.handler(choice=1)  # "the first one"
+    assert picked["status"] == "calling" and f"Calling {chosen}." in picked["note"]
+    assert client.created[0][0] == (A if chosen == "Meena" else B)
+
+
+def test_a_rejected_choice_dials_nothing(tmp_path):
+    call, answer, cards, client = _stage3(tmp_path, ("Meena", A), ("Mina", B))
+    call.handler(contact="Meena")
+    assert answer.handler(choice=3)["status"] == "no_card"  # out of range: refused
+    assert client.created == [] and cards.current is not None
+
+
+def test_a_single_unsure_name_is_confirmed_by_name_before_dialling(tmp_path):
+    call, answer, cards, client = _stage3(tmp_path, ("Anand", A))
+    result = call.handler(contact="Anant")
+    assert result["status"] == "unsure" and cards.current.kind == "confirm"
+    assert "Did you mean Anand?" in result["note"] and client.created == []
+    assert answer.handler(yes=False)["status"] == "not_calling"
+    assert client.created == []
+
+
+def test_no_match_says_so_and_never_dials(tmp_path):
+    call, _, cards, client = _stage3(tmp_path, ("Priya", A))
+    result = call.handler(contact="Suresh")
+    assert result["status"] == "no_match" and "offer to save" in result["note"]
+    assert client.created == [] and cards.current is None
+
+
+def test_a_tap_on_the_choice_dials_off_the_calling_thread(tmp_path):
+    import time
+
+    call, _, cards, client = _stage3(tmp_path, ("Meena", A), ("Mina", B))
+    call.handler(contact="Mina")
+    card = cards.current
+    assert cards.answer(card.id, {"choice": 2}, source="tap")
+    for _ in range(100):
+        if client.created:
+            break
+        time.sleep(0.01)
+    assert client.created[0][0] == (A if card.options[1] == "Meena" else B)
+
+
+def test_unsure_without_a_choice_flow_is_treated_as_no_match(tmp_path):
+    path = _store(tmp_path)
+    _contacts.save_contact(path, "Meena", A, "SG", None)
+    _contacts.save_contact(path, "Mina", B, "SG", None)
+    controller, client = _controller()
+    result = make_call_tool(controller, path).handler(contact="Meena")
+    assert result["status"] == "no_match" and client.created == []
