@@ -879,3 +879,222 @@ press behind it. The hold timer also exits on `abandon()`, so
 **2026-09-25 — `readback()` only regroups phone-number shapes;
 decimals and times pass through.** Review: "37.5" was becoming "375".
 A "." or ":" now means "not a phone number".
+
+**2026-09-25 — Calling is in scope, reversing 2026-09-18's "calls/music
+out for v1".** Explicit brief (Stream B). The stub was built so "v2
+swaps an implementation rather than inventing plumbing" (SPEC.md); that
+is exactly what `tools/calling.py` does — same name, schema and
+`"calls"` permission, only the handler changes. Granting `"calls"` in
+`cli.py` is a shared-file edit, proposed as a diff in
+`docs/completed/calling.md`, not applied. SPEC.md's "Out: calls" line
+is proposed for amendment the same way.
+
+**2026-09-25 — Twilio Media Streams, not SIP or LiveKit.** Brief-given,
+recorded for the trail: Media Streams is a bidirectional WebSocket of
+20 ms μ-law frames — the same shape as the cascade's audio path — with
+no registrar, NAT traversal, media stack or second always-on vendor.
+
+**2026-09-25 — μ-law and 16k<->8k resampling are ~60 lines of numpy in
+`call/codec.py`, not `audioop` and not a new dependency.** `audioop`
+works on the 3.12 this runs today and is *removed* in 3.13, which
+`pyproject.toml`'s `>=3.12` permits; a resampling library is a
+dependency for one ratio. The encoder is bit-exact with the G.711
+reference (`audioop` is used as an oracle where it still exists, all
+65536 inputs); the resampler is a pair-average decimator and linear
+interpolation, adequate for a 3.4 kHz telephone band.
+
+**2026-09-25 — The relay is a cloudflared quick tunnel behind a
+three-method `Relay` protocol; production is a real always-on service.**
+Twilio connects inwards and the device is behind home wifi. Quick
+tunnels need no login and cost nothing; they also change hostname per
+start and take 60-90 s to become resolvable (measured here: up in 7 s,
+publicly reachable at 84 s) — which is why `CallController.prepare()`
+brings the relay up at boot, not on the first dial. ngrok (new vendor,
+interstitial page), an SSH reverse tunnel (needs a VPS + key on the
+device) and a *named* cloudflared tunnel (needs a Cloudflare login on
+this box; the obvious production shape) lost for now. cloudflared
+2026.9.3, Apache-2.0, sha256 verified against GitHub's asset digest,
+installed to `~/.local/bin`, never vendored.
+
+**2026-09-25 — The media server runs on its own thread and event loop
+(port 8768), not on the screen server's loop.** The face has a 100 ms
+reaction budget and is another stream's territory; a phone call's
+socket sharing that loop would put every 20 ms frame in the face's way.
+`build_media_app()` stays a plain aiohttp app so a fake Twilio peer
+drives it in tests.
+
+**2026-09-25 — Streaming playback for the far end is `pacat --playback`
+fed on stdin, in `call/audio.py`, not in `audio/playback.py`.** There
+is no streaming playback anywhere in this codebase and `playback.py`
+is `paplay` on a file. The right home is a general `play_stream()` in
+`audio/playback.py`; that file is not this stream's to edit, so the
+writer lives beside its only caller and the move is proposed in the
+completion doc. `--latency-msec=60` bounds Pulse's own buffering so
+hang-up doesn't leave a tail of far-end audio playing.
+
+**2026-09-25 — No new `core.py` state for calls; `HANDOFF` is not
+re-purposed.** SPEC.md defines `HANDOFF` as "a question goes to the
+slower, smarter path", resolving into the same turn. A real `IN_CALL`
+state is a `core.py` + `Face` change (one of the five interfaces) and
+is proposed, not built. Until then `CallController.active` is the "a
+call is happening" signal initiative's gate should read.
+
+**2026-09-25 — Hang-up is a two-second spacebar hold, registered
+through a `HoldSeam` protocol that SCREEN implements; a single tap
+during a call does nothing.** Double-tap lost: hard timing for older
+hands, easy to trigger by accident. The seam is stubbed
+(`FakeHoldSeam`) until SCREEN's real hold handling lands; calling never
+touches the spacebar or renders a card itself.
+
+**2026-09-25 — Twilio auth is an API key + secret, not the account auth
+token, and every Twilio error is re-raised `from None` as a
+`TwilioError` carrying only an operation name and HTTP status.** A
+leaked key is revocable without rotating the account; `urllib`'s
+`HTTPError` text carries the URL (account SID) and a request log would
+carry both phone numbers, so nothing from the original exception
+survives. Consequence: `X-Twilio-Signature` validation on `/twiml`
+needs the auth token the device doesn't hold — that check belongs to
+the production relay, and until then the tunnel's random hostname is
+the only guard. Recorded as debt.
+
+**2026-09-25 — Stage 1's `call_contact` dials only "the test number"
+(any contact matching /\btest\b/i) and answers everything else with a
+polite "not yet" note.** Brief-given ordering: contacts are not built
+on an audio path that hasn't been heard working. The note is how the
+model is steered to say "Calling the test number." — a tool never
+speaks through `VoiceSession`.
+
+**2026-09-25 — Contacts are `entities` + `edges`, not a new table; the
+convention is recorded in `saathi/call/contacts.py`.** Brief-given, and
+the reason is the product's: the daughter she talks about and the one
+she phones must be one person. `kind="self"` (name `"self"`, lowest id
+wins) is the src of every relationship; `kind="person"` carries the
+phone as JSON in `notes` (`{"phone","country"}` — the only free field);
+`edges(self, person, relation, since, until=None)`. Nothing that builds
+the model's context reads `entities`, so numbers never reach the model.
+
+**2026-09-25 — A wrong number is superseded, not corrected: latest
+wins.** `IdentityStore` is append-only on `main` and `edges` has no id.
+A new number is a new person row with the same (normalised) name; reads
+take the highest id per name and the most recent open edge per
+relation, and a relation resolves to a person *through the name* so an
+old edge still reaches the new number. History stays. Nothing depends
+on the proposed `retire()`; when it lands, superseded edges can get
+`until`.
+
+**2026-09-25 — Country for a number without "plus": stored `country`
+preference, then the device timezone, then language only where it
+names one country (hindi -> IN).** Timezone beat language: a Mandarin
+speaker in Singapore is the case this product exists for, and English,
+Chinese and Bengali each span several countries. The inferred code is
+always *said* on the read-back ("That's a Singapore number, plus six
+five."), and a confirmed save writes the `country` preference so it's
+learned, not configured. No locale at all -> she is asked which
+country. A small country table replaced `phonenumbers` (large new
+dependency for nine countries); any other country works by saying
+"plus".
+
+**2026-09-25 — The model passes the number exactly as she said it; the
+parser does the digits.** Asking the model to normalise lost: a model
+"correcting" a digit is the silent wrong digit the read-back exists to
+prevent. Homophones ("for", "to", "won", "ate") are *not* digits — "the
+number for Priya" would gain a 4 — they are reported as unknown words,
+which lowers confidence and is said back.
+
+**2026-09-25 — Across turns, a number fragment is appended only while
+the draft is too short.** Otherwise new digits replace it (a different
+number) and a restatement from the start replaces it. Found by a test:
+the first version appended a full second number to a complete first
+one. After a "no" on the read-back, the name and relation are kept and
+the whole number is asked for again — re-saying beats naming which
+digit was wrong. Drafts expire after 10 minutes.
+
+**2026-09-25 — A save needs a name *or* a relation, not both.** "Save
+my daughter's number" is complete: the relation is stored as the name
+until she gives one. Asking for a name she didn't volunteer would break
+"ask only for what's actually missing".
+
+**2026-09-25 — `save_contact` needs a new `"contacts"` permission;
+`answer_card` uses `"calls"`.** Saving writes her memory with no
+external consequence; placing a call has one. `answer_card` can finish
+a save or (Stage 3) choose who to ring, so it takes the stronger scope.
+Both are granted in `cli.py` (a proposed diff, not applied).
+
+~~**2026-09-25 — Cards are a local stub shaped exactly like PR #3's
+`saathi/screen/cards.py`, not an import from `batch/youtube`.** Same
+builders, same `show`/`clear`/`answer`/`on_answer`, same `Answer`
+fields; the swap at merge is one import line. Calling never calls
+`ask()` — it would hold THINKING with the mic closed inside a tool
+handler. Assumed, to confirm against PR #3: `answer()` runs `on_answer`
+callbacks synchronously, and `{"choice": n}` is zero-based.
+`answer_card` is calling's own voice-answer tool; if SCREEN ships one,
+it wins at merge.~~
+
+
+**2026-09-25 — Correction: card choices are 1-based, not 0-based.**
+Supersedes the stub-assumption entry above. Checked against PR #3's
+`saathi/screen/cards.py`: `validate_answer` accepts only
+`1 <= n <= len(card.options)`, options are numbered 1..3 on screen and
+in speech, and `Answer.choice` carries that same number. My stub
+assumed 0-based and `answer_card` subtracted one — "the first one"
+would have been sent as `{"choice": 0}`, which the real controller
+rejects. Now the stub validates exactly as PR #3 does (`{"choice": 0}`
+and one past the end are refused, nothing happens), `answer_card`
+passes her number through unchanged, and a regression test pins it.
+The other assumption held: `answer()` runs `on_answer` callbacks
+synchronously on the answering thread, after its lock is released.
+Cards remain a local stub of PR #3's shape; calling never calls `ask()`;
+if SCREEN ships its own voice-answer tool it replaces `answer_card`.
+
+**2026-09-25 — Name matching: sound folding + Jaro-Winkler, three bands,
+thresholds from a 41-pair corpus.** `call/match.py`, pure Python. Folds
+ph/dh/th/bh/gh/kh, sh/zh/ch, q->c, x->s, k->c, ee->i, oo->u, v->b, w->b,
+y->i, final ng->n, doubled letters; strips accents and pinyin tone
+digits; scores both orders of a two-word name and, for a one-word
+request, each word of a saved name ("Priya" -> "Priya Sharma"). Corpus
+(`tests/test_call_match.py`): 24 same-person pairs score >= 0.956, 6
+ask-her pairs 0.800-0.925, 11 different-people pairs <= 0.783.
+**Confident >= 0.93 *and* >= 0.05 ahead of the runner-up; unsure >=
+0.79; below that, none.** Both gaps are thin (0.925 vs 0.956; 0.783 vs
+0.800) and 0.79 was moved down from 0.80 when Wong/Wang landed on the
+line at 0.7999 — the threshold sits at the midpoint of the gap, not on a
+corpus point. Expect to retune from real misses; the corpus is where to
+add them. Soundex/Metaphone lost (English-centric, no pinyin), edit
+distance lost (names agree at the start; JW's prefix bonus rewards it),
+jellyfish/rapidfuzz lost (a dependency for ~40 lines).
+
+**2026-09-25 — Zhou/Chou stays a non-match (0.778).** Chou is Wade-Giles
+for Zhou, so they can be one surname — but the brief's table folds zh->z
+and ch->c separately, and folding zh with ch would also merge Zhang and
+Chang (different surnames). Recorded rather than special-cased; a saved
+"Chou" she calls "Zhou" gets "no number for Zhou" and an offer to save,
+never a wrong dial.
+
+**2026-09-25 — Exact names go through the matcher, not around it.** The
+brief put fuzzy matching after an exact-name lookup. An exact lookup
+first would dial "Meena" outright even with "Mina" also saved — letting
+Whisper's spelling of the day pick who rings, which is the failure the
+bands exist to stop. Through the matcher an exact name scores 1.0 and is
+confident unless a sound-alike is saved, in which case she is asked.
+The relationship lookup ("my daughter") still runs first: an edge is
+something she told us, not a spelling.
+
+**2026-09-25 — Unsure with one plausible name is a Confirm card ("Did
+you mean Anand?"), not a Choice card.** A Choice card needs two options
+(PR #3); a single sub-confident name still must not dial on its own.
+
+**2026-09-25 — A choice answered by voice dials inside the `answer_card`
+call; a choice answered by tap dials on a short worker thread, and
+rings without "Calling X." being said.** The voice path can report
+"Calling Basudeb." (or a failure) in the same turn. A tap arrives on the
+screen server's loop, which must not block on a Twilio request, and
+nothing may speak outside a turn without reaching through
+`VoiceSession`; the name on the card she just tapped stands in.
+
+**2026-09-25 — Hang-up tears down at once and tells Twilio on a worker
+thread.** Found reviewing the wiring, not in a test: PR #3's
+`HoldController` fires its handler on the screen server's event loop,
+and `complete_call` is a blocking HTTP request with a 15 s timeout — a
+slow Twilio would have frozen the face. The mic and sink are released
+and the state goes IDLE synchronously; only the REST call moves off the
+thread. `hangup(wait=True)` joins it for `shutdown()` and scripts.
