@@ -391,9 +391,7 @@ async def test_set_preference_rejects_an_unknown_key_or_non_string_value():
             await _connect(ws)
 
             await ws.send_json({"type": "set_preference", "key": "volume", "value": "11"})
-            await ws.send_json(
-                {"type": "set_preference", "key": "language", "value": ["chinese"]}
-            )
+            await ws.send_json({"type": "set_preference", "key": "language", "value": ["chinese"]})
             # Neither malformed message gets a response; a well-formed one
             # right after does, proving the connection is still alive and
             # the bad messages were dropped, not silently queued.
@@ -568,4 +566,36 @@ async def test_a_superseded_barge_in_turn_is_not_logged():
 
     rows = store.read("turns")
     store.close()
+    assert rows == []
+
+
+async def test_a_silent_turn_goes_back_to_idle_without_speaking_or_logging(monkeypatch):
+    # The silence bug's contract: end_turn() returning "" means nothing
+    # was said. THINKING -> IDLE via no_response -- never SPEAKING, no
+    # fallback line, no "I didn't catch that", and no `turns` row.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+
+    class SilentSession(FakeSession):
+        def end_turn(self) -> str:
+            return ""
+
+    store = _tmp_store()
+    session = SilentSession()
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source", store=store)
+
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+
+    rows = store.read("turns")
+    store.close()
+    assert core.state == State.IDLE
+    assert session.spoken == []
     assert rows == []

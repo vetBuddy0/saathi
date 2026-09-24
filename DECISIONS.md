@@ -298,3 +298,58 @@ thrown away the moment Google's credentials land, since that's the
 architectural fix (audio starts before the sentence finishes rendering,
 not just synthesized faster on the same blocking path). Pipelining and
 the startup warm-up were kept — they help any backend, not just Piper.
+
+**2026-09-24 — The silence guard gates on Silero VAD before STT, not
+on Whisper's `no_speech_prob`.** The instruction named `no_speech_prob`.
+Measured on this machine, four consecutive probes of a silent
+echo-cancelled source: `whisper-large-v3-turbo` returned
+`no_speech_prob=0.0000` every time while transcribing the silence as
+" Thank you.", " I'm going to go." and " voice. That is me. Thank you."
+A threshold on a value that is always zero is a guard that never
+fires. The same buffers scored 0 of 119 chunks over Silero's threshold
+(max 0.37), so the question "did she say anything" is asked of the
+audio, in `audio/vad.py`'s `contains_speech()`, before an STT call is
+spent. The empty-transcript half of the instruction is kept as a second
+guard behind it.
+
+**2026-09-24 — A silent turn writes no `turns` row.** `turns` feeds
+the latency-budget p95. A turn that skipped STT, LLM and TTS entirely
+has no timings to contribute and would drag that percentile down for
+reasons that have nothing to do with how fast she answers. The turn
+ends via `no_response` -> IDLE, logged as a line, not a row.
+
+**2026-09-24 — Window token budget uses a 4-chars-per-token estimate,
+not a tokenizer.** Any real tokenizer is a new dependency; CLAUDE.md
+rules that out for this. The estimate only decides when to evict one
+exchange from the window, where being off by a fifth is one exchange
+either way, and the exact count from the API is what's logged per
+turn — nothing downstream trusts the estimate to be true.
+
+**2026-09-24 — One background digest call per turn, not two.**
+Importance rating (layer 3) and summary regeneration (layer 2) read the
+same material; two calls would send it twice, every turn. Asked for
+together, returned as one JSON object, from `say()`'s tail thread —
+never during a turn. Only spent when there is somewhere for the output
+to go (a store, or evicted exchanges to fold); sessions with neither
+make no extra call.
+
+**2026-09-24 — Importance stays on Park et al.'s 1-10 scale.**
+`retrieve_episodes` min-max normalizes across the candidate set, so the
+absolute range never reaches the ranking; keeping the paper's numbers
+lets the prompt say what the paper says.
+
+**2026-09-24 — Episodes are written with `embedding` NULL, and that
+leaves retrieval's relevance axis dead. Raised, not hidden.** Groq
+offers no embedding model; CLAUDE.md rules out a vector DB and a
+second vendor. `retrieve_episodes` already documents this degradation
+(recency + importance only), so the rows land on a path that exists
+rather than a new one — but it means "relevance" in SPEC.md's
+"recency + importance + relevance" is currently a constant. Needs a
+decision on an embedding source; not one this pass can make.
+
+**2026-09-24 — Fixture wiring in `tests/test_cascade.py` gained
+`speech_gate=_hears_speech`.** Not "changing a test so it passes":
+the constructor grew a dependency whose real default (Silero) correctly
+calls the fixtures' 200 bytes of zeros silence. Tests inject the gate
+the same way they already inject `client=` and `backends=`; one test
+deliberately omits it to pin that the real gate is the default.

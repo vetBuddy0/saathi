@@ -74,6 +74,14 @@ class FakeChatCompletionsAPI:
         return self._responses[0]
 
 
+def _hears_speech(pcm: bytes) -> bool:
+    # Fixture audio is a few hundred bytes of zeros -- real silence, which
+    # the real Silero gate correctly rejects. Every session here that is
+    # meant to reach STT injects this instead; the gate's own behaviour
+    # is tested separately (test_end_turn_on_silence_*).
+    return True
+
+
 class FakeClient:
     def __init__(
         self,
@@ -148,6 +156,7 @@ def _session(client: FakeClient, backend: FakeTTSBackend | None = None):
     backend = backend or FakeTTSBackend()
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": backend},
         backend_preference=lambda: "fake",
@@ -333,6 +342,7 @@ def test_current_backend_falls_back_to_piper_when_preferred_is_unavailable(no_re
     piper_stand_in.id = "piper"
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=FakeClient(),
         backends={"piper": piper_stand_in, "unavailable": UnavailableFakeBackend()},
         backend_preference=lambda: "unavailable",
@@ -345,6 +355,7 @@ def test_current_backend_falls_back_to_piper_for_an_unknown_preference(no_real_p
     piper_stand_in.id = "piper"
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=FakeClient(),
         backends={"piper": piper_stand_in},
         backend_preference=lambda: "some-backend-that-was-removed",
@@ -484,6 +495,7 @@ def test_end_turn_applies_a_stored_language_preference_when_detection_is_unsuppo
     client = FakeClient(detected_language="Portuguese")  # unsupported either way
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -512,6 +524,7 @@ def test_a_supported_stored_preference_pins_the_language_over_organic_detection(
     client = FakeClient(detected_language="English")  # a supported, *different* detection
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -526,6 +539,7 @@ def test_a_pinned_language_preference_persists_across_multiple_turns(no_real_pla
     client = FakeClient(detected_language="English")
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -542,6 +556,7 @@ def test_end_turn_ignores_an_unsupported_stored_language_preference(no_real_play
     client = FakeClient(detected_language="Portuguese")  # unsupported either way
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -566,6 +581,7 @@ def test_construction_preloads_the_backends_voice_immediately():
 
     CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=FakeClient(),
         backends={"fake": PreloadingFakeBackend()},
         backend_preference=lambda: "fake",
@@ -617,6 +633,7 @@ def test_no_identity_store_keeps_the_old_static_persona_behavior(no_real_playbac
     client = FakeClient()
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -639,6 +656,7 @@ def test_an_identity_store_compiles_context_at_construction(no_real_playback):
     client = FakeClient()
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -656,6 +674,7 @@ def test_context_is_refreshed_in_the_background_after_say_completes(no_real_play
     client = FakeClient()
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -698,6 +717,7 @@ def test_end_turn_in_a_worker_thread_with_store_backed_preferences(no_real_playb
     client = FakeClient()
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=client,
         backends={"fake": FakeTTSBackend()},
         backend_preference=threadsafe_reader(store, TTS_BACKEND_KEY, "fake"),
@@ -824,6 +844,7 @@ def test_tool_schemas_are_passed_through_to_the_chat_completion_call(no_real_pla
     schema = [{"type": "function", "function": {"name": "set_language", "parameters": {}}}]
     session = CascadeSession(
         "fake-sink",
+        speech_gate=_hears_speech,
         client=FakeClient(),
         backends={"fake": FakeTTSBackend()},
         backend_preference=lambda: "fake",
@@ -833,3 +854,205 @@ def test_tool_schemas_are_passed_through_to_the_chat_completion_call(no_real_pla
     session.end_turn()
     calls = session._client.chat.completions.calls
     assert calls[0]["tools"] == schema
+
+
+# --- the silence bug, and the three memory layers -----------------------
+
+
+def test_end_turn_on_silence_returns_empty_and_never_calls_stt(no_real_playback):
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        speech_gate=lambda pcm: False,  # the gate says: nothing said
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.end_turn() == ""
+    assert client.audio.transcriptions.calls == []
+    assert client.chat.completions.calls == []
+
+
+def test_end_turn_on_empty_transcript_returns_empty_and_never_calls_the_model(no_real_playback):
+    client = FakeClient(heard="   ")
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.end_turn() == ""
+    assert len(client.audio.transcriptions.calls) == 1
+    assert client.chat.completions.calls == []
+    # No fabricated timings for a turn that never reached the model.
+    session.say("")
+    assert session.pop_last_turn_timings() is None
+
+
+def test_the_real_gate_is_the_default_and_rejects_the_fixture_silence(no_real_playback):
+    # No speech_gate injected: the real Silero gate runs, and 200 bytes
+    # of zeros is silence. This is the one test here that exercises the
+    # default, so a future refactor can't quietly make the gate opt-in.
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    assert session.end_turn() == ""
+    assert client.audio.transcriptions.calls == []
+
+
+def test_second_turn_carries_the_first_exchange_verbatim(no_real_playback):
+    client = FakeClient(heard="what day is the scan?", reply="Thursday.")
+    session, _ = _session(client)
+
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    first_reply = session.end_turn()
+    session.say(first_reply)  # the exchange is recorded on say()'s tail
+
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    first_messages = client.chat.completions.calls[0]["messages"]
+    second_messages = client.chat.completions.calls[1]["messages"]
+    assert [m["role"] for m in first_messages] == ["system", "system", "user"]
+    assert [m["role"] for m in second_messages] == ["system", "system", "user", "assistant", "user"]
+    assert second_messages[2] == {"role": "user", "content": "what day is the scan?"}
+    assert second_messages[3] == {"role": "assistant", "content": "Thursday."}
+    assert second_messages[4]["role"] == "user"
+
+
+def test_history_is_not_recorded_until_the_reply_is_spoken(no_real_playback):
+    # end_turn() alone doesn't commit the exchange -- a barge-in can
+    # still supersede it. say() is the commit point.
+    client = FakeClient()
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    assert [m["role"] for m in client.chat.completions.calls[1]["messages"]] == [
+        "system",
+        "system",
+        "user",
+    ]
+
+
+def test_running_summary_is_sent_as_system_context_before_the_window(no_real_playback):
+    client = FakeClient()
+    session, _ = _session(client)
+    session._conversation.fold("She asked about her scan earlier.")
+
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    messages = client.chat.completions.calls[0]["messages"]
+    assert messages[1] == {
+        "role": "system",
+        "content": "Earlier in this conversation: She asked about her scan earlier.",
+    }
+    assert messages[2]["content"].startswith("Reply in ")
+
+
+def _wait_for(predicate, timeout_s: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def test_after_say_the_digest_writes_an_episode_and_folds_the_summary(no_real_playback):
+    store = IdentityStore(Path(tempfile.mkdtemp()) / "identity.sqlite3")
+    store.create()
+    digest_json = json.dumps(
+        {
+            "observation": "She mentioned her scan is on Thursday.",
+            "importance": 7,
+            "summary": "They discussed Thursday's scan.",
+        }
+    )
+    client = FakeClient(
+        heard="the scan is on Thursday",
+        chat_responses=[_fake_completion("I'll remember."), _fake_completion(digest_json)],
+    )
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        identity_store=store,
+        speech_gate=_hears_speech,
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    reply = session.end_turn()
+    session.say(reply)
+
+    assert _wait_for(lambda: len(store.read("episodes")) == 1)
+    episode = store.read("episodes")[0]
+    assert episode["text"] == "She mentioned her scan is on Thursday."
+    assert episode["importance"] == 7.0
+    assert _wait_for(lambda: session._conversation.summary == "They discussed Thursday's scan.")
+    # And the recompiled context now carries it -- one turn stale, as
+    # documented, but *this* turn's episode is in the *next* turn's prompt.
+    assert _wait_for(lambda: "scan is on Thursday" in session._compiled_context)
+    store.close()
+
+
+def test_no_store_and_nothing_evicted_means_no_digest_call(no_real_playback):
+    # The digest is a model call; without anywhere for its output to go
+    # it must not be spent. Most tests and smoke.py are in this state.
+    client = FakeClient()
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.say(session.end_turn())
+    time.sleep(0.1)
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_digest_failure_still_recompiles_context_and_leaves_memory_intact(no_real_playback):
+    store = IdentityStore(Path(tempfile.mkdtemp()) / "identity.sqlite3")
+    store.create()
+
+    class ExplodingOnSecondCall(FakeChatCompletionsAPI):
+        def create(self, **kwargs):
+            if len(self.calls) >= 1:
+                self.calls.append(kwargs)
+                raise ConnectionError("groq is down")
+            return super().create(**kwargs)
+
+    client = FakeClient()
+    client.chat = SimpleNamespace(completions=ExplodingOnSecondCall("hi there"))
+    session = CascadeSession(
+        "fake-sink",
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        identity_store=store,
+        speech_gate=_hears_speech,
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.say(session.end_turn())
+
+    assert _wait_for(lambda: len(client.chat.completions.calls) == 2)
+    time.sleep(0.1)
+    assert store.read("episodes") == []
+    assert session._conversation.summary == ""
+    # The window (layer 1) never depended on the call.
+    assert len(session._conversation.window) == 1
+    store.close()

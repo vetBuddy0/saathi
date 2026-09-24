@@ -72,3 +72,37 @@ def test_speech_start_detector_reset_allows_firing_again():
     detector.reset()
     second_fires = [detector.push(chunk) for chunk in chunks]
     assert sum(second_fires) == 1
+
+
+def test_contains_speech_is_false_for_digital_silence():
+    # The real model, on real zeros: the exact input Whisper turns into
+    # " Thank you." -- see contains_speech's docstring for the measurement.
+    from saathi.audio.vad import CHUNK_BYTES, contains_speech
+
+    assert contains_speech(b"\x00" * (CHUNK_BYTES * 40)) is False
+    assert contains_speech(b"") is False
+    assert contains_speech(b"\x00" * (CHUNK_BYTES - 2)) is False  # under one chunk
+
+
+def test_contains_speech_fires_on_the_same_debounce_barge_in_trusts(monkeypatch):
+    # Positive case without needing recorded speech: stand in for the
+    # detector and check the buffer is walked in CHUNK_BYTES steps and
+    # the answer is whatever onset detection says.
+    import saathi.audio.vad as vad_module
+
+    pushed: list[int] = []
+
+    class FiresOnThirdChunk:
+        def __init__(self, vad, consecutive_chunks):
+            assert consecutive_chunks == 3
+
+        def push(self, chunk: bytes) -> bool:
+            pushed.append(len(chunk))
+            return len(pushed) == 3
+
+    monkeypatch.setattr(vad_module, "SpeechStartDetector", FiresOnThirdChunk)
+    monkeypatch.setattr(vad_module, "VoiceActivityDetector", lambda: None)
+
+    assert vad_module.contains_speech(b"\x00" * (vad_module.CHUNK_BYTES * 5 + 7)) is True
+    # Stopped at the chunk that fired; the trailing 7 bytes were never a chunk.
+    assert pushed == [vad_module.CHUNK_BYTES] * 3

@@ -74,3 +74,28 @@ class SpeechStartDetector:
         self._run_length = 0
         self._fired = False
         self._vad.reset()
+
+
+def contains_speech(pcm: bytes, *, consecutive_chunks: int = 3) -> bool:
+    """Whole-buffer question: did she say anything at all in this turn?
+
+    Exists because Whisper does not answer it. Measured on this machine
+    (2026-09-24, four consecutive probes of a silent echo-cancelled
+    source, RMS 1-750): `whisper-large-v3-turbo` returned
+    `no_speech_prob=0.0000` every time while transcribing the silence as
+    " Thank you.", " I'm going to go." and " voice. That is me. Thank
+    you." — so a `no_speech_prob` threshold, the obvious guard, cannot
+    tell a silent turn from a spoken one on this path. Silero can: the
+    same buffers scored 0 of 119 chunks over threshold (max 0.37).
+
+    Reuses `SpeechStartDetector`'s debounce rather than a fresh
+    threshold, so "speech" here means the same ~96 ms of sustained
+    voice that barge-in already trusts — one definition, not two.
+    A trailing partial chunk is dropped, not zero-padded: it is under
+    32 ms and can't change the answer.
+    """
+    detector = SpeechStartDetector(VoiceActivityDetector(), consecutive_chunks)
+    for offset in range(0, len(pcm) - CHUNK_BYTES + 1, CHUNK_BYTES):
+        if detector.push(pcm[offset : offset + CHUNK_BYTES]):
+            return True
+    return False

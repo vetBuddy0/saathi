@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import queue
 import tempfile
@@ -100,11 +101,16 @@ import soundfile as sf
 from groq import Groq
 
 from saathi.audio.playback import PlaybackHandle, play
+from saathi.audio.vad import contains_speech
 from saathi.identity.compile import compile_context
+from saathi.identity.digest import digest_turn, write_episode
 from saathi.identity.store import IdentityStore
+from saathi.voice.conversation import ConversationMemory, Exchange
 from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve_language
 from saathi.voice.tts import TTSBackend, split_into_sentences
 from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
+
+logger = logging.getLogger(__name__)
 
 _PERSONA_PATH = Path(__file__).parent.parent / "persona_stub.txt"
 _STT_MODEL = "whisper-large-v3-turbo"
@@ -137,6 +143,7 @@ def _estimate_llm_cost_usd(
         prompt_tokens * _LLM_PRICE_PER_MILLION_USD["input"] / 1_000_000
         + completion_tokens * _LLM_PRICE_PER_MILLION_USD["output"] / 1_000_000
     )
+
 
 BackendPreference = Callable[[], str]
 LanguagePreference = Callable[[], "str | None"]
@@ -248,6 +255,7 @@ class CascadeSession:
         language_preference: LanguagePreference = _no_language_preference,
         identity_store: IdentityStore | None = None,
         tool_schemas: list[dict] | None = None,
+        speech_gate: Callable[[bytes], bool] | None = None,
     ) -> None:
         if client is None:
             api_key = os.environ.get("GROQ_API_KEY")
@@ -281,6 +289,16 @@ class CascadeSession:
         self._last_turn_timings: TurnTimings | None = None
         self._tool_schemas = tool_schemas
         self._intent_callback = None
+        # None means the real Silero gate (audio/vad.py's contains_speech);
+        # tests inject a permissive one. Same shape as `client`/`backends`:
+        # the default is the real thing, never a stub.
+        self._speech_gate = speech_gate if speech_gate is not None else contains_speech
+        self._conversation = ConversationMemory()
+        # Set by end_turn(), consumed by say()'s tail: the exchange that
+        # just happened, waiting to be recorded once it's actually been
+        # spoken. None when say() is called without an end_turn() before
+        # it (smoke.py's barge-in check), which then records nothing.
+        self._pending_exchange: Exchange | None = None
         # Warm the current backend's voice right now, not on the first
         # end_turn() -- see this module's docstring on cold starts.
         # Without this, only the *second* reply onward benefited from a
@@ -366,6 +384,17 @@ class CascadeSession:
     def end_turn(self) -> str:
         pcm = b"".join(self._chunks)
         self._chunks = []
+        # The silence bug, fixed where it starts. Whisper hallucinates
+        # stock phrases (" Thank you.") on silence and reports
+        # no_speech_prob=0.0 while doing it -- measured, see
+        # audio/vad.py's contains_speech(). So the question "did she
+        # say anything" is asked of the audio, before any STT call is
+        # spent on it. An empty string is the contract for "nothing
+        # said": screen/server.py ends the turn silently on it, back to
+        # IDLE, and never enters SPEAKING. Not a spoken "I didn't catch
+        # that" -- she would say it every time a door closed.
+        if not self._speech_gate(pcm):
+            return ""
         flac_bytes = _pcm_to_flac_bytes(pcm)
 
         # A stored preference (Ctrl+L panel, or the spoken "speak to me
@@ -413,15 +442,31 @@ class CascadeSession:
         )
         self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
         heard = transcription.text.strip()
+        if not heard:
+            # The gate heard voice but Whisper made nothing of it. Same
+            # contract as the gate: nothing said, end silently.
+            self._pending_stt_ms = None
+            return ""
         if not language_pinned:
             detected = (transcription.language or "").lower()
             self._last_language = resolve_language(detected, self._last_language)
 
+        # Three layers of memory, oldest to newest, then her words.
+        # Layer 3 (episodes, via compile_context) and layer 2 (the
+        # running summary) are system context; layer 1 (the verbatim
+        # window) is real prior turns, as the model saw them. See
+        # voice/conversation.py for why verbatim and why capped.
         messages: list[dict] = [
             {"role": "system", "content": self._compiled_context},
-            {"role": "system", "content": f"Reply in {self._last_language}."},
-            {"role": "user", "content": heard},
         ]
+        summary = self._conversation.summary
+        if summary:
+            messages.append(
+                {"role": "system", "content": f"Earlier in this conversation: {summary}"}
+            )
+        messages.append({"role": "system", "content": f"Reply in {self._last_language}."})
+        messages.extend(self._conversation.messages())
+        messages.append({"role": "user", "content": heard})
 
         llm_started_at = time.monotonic()
         prompt_tokens = 0
@@ -459,6 +504,15 @@ class CascadeSession:
         self._pending_first_token_ms = round((time.monotonic() - llm_started_at) * 1000)
         self._pending_prompt_tokens = prompt_tokens
         self._pending_completion_tokens = completion_tokens
+        # The real count from the API, not an estimate. A flat number
+        # here across turns is the tell that history isn't being sent.
+        logger.info(
+            "prompt tokens: %d (window: %d exchanges, summary: %d chars)",
+            prompt_tokens,
+            len(self._conversation.window),
+            len(summary),
+        )
+        self._pending_exchange = Exchange(user=heard, assistant=reply_text)
         return reply_text
 
     def _continue_after_tool_call(
@@ -595,7 +649,70 @@ class CascadeSession:
             # return points was hit (empty text, interrupted mid-sentence,
             # finished normally) -- see _refresh_compiled_context_in_background()'s
             # docstring for why "after every say()" is the right boundary.
-            self._refresh_compiled_context_in_background()
+            self._after_turn_in_background()
+
+    def _after_turn_in_background(self) -> None:
+        """Everything memory does once a turn is fully over, in order:
+        record the exchange in the window (layer 1, synchronous -- no
+        I/O, and the next end_turn() must see it even if the thread
+        below is slow), then in one background thread: the digest
+        call (an `episodes` row, layer 3, and a re-folded summary,
+        layer 2), then the context recompile, so the episode just
+        written is in the context the next turn reads. One thread,
+        sequential, because the recompile has to see the write.
+
+        An interrupted reply is still recorded as what Saathi said:
+        she did say it, or started to, and the alternative -- dropping
+        the exchange -- would make her forget her own half of a turn
+        the person clearly heard enough of to talk over.
+
+        The digest is only spent when there is somewhere for its
+        output to go: a store to write the episode to, or evicted
+        exchanges the summary must absorb. A session with neither
+        (smoke.py, most tests) makes no extra model call at all.
+        """
+        exchange = self._pending_exchange
+        self._pending_exchange = None
+        if exchange is not None:
+            self._conversation.record(exchange.user, exchange.assistant)
+        unfolded = self._conversation.unfolded()
+        summary = self._conversation.summary
+        store_path = self._identity_store.path if self._identity_store is not None else None
+        needs_digest = exchange is not None and (store_path is not None or bool(unfolded))
+        if not needs_digest and store_path is None:
+            return
+
+        def _run() -> None:
+            if needs_digest:
+                try:
+                    digest = digest_turn(
+                        self._client,
+                        model=_LLM_MODEL,
+                        exchange=exchange,
+                        unfolded=unfolded,
+                        summary=summary,
+                    )
+                except Exception:
+                    # Offline, bad key, rate limit: the turn already
+                    # happened and was spoken; memory just doesn't
+                    # advance this once. Never lets the thread die
+                    # before the recompile below.
+                    logger.exception("turn digest failed; memory not advanced this turn")
+                    digest = None
+                if digest is not None:
+                    if digest.summary is not None:
+                        self._conversation.fold(digest.summary)
+                    if store_path is not None and digest.observation is not None:
+                        with IdentityStore(store_path) as background_store:
+                            write_episode(background_store, digest.observation, digest.importance)
+            if store_path is not None:
+                # Same fresh-connection rule as
+                # _refresh_compiled_context_in_background(): sqlite3
+                # connections can't cross threads.
+                with IdentityStore(store_path) as background_store:
+                    self._compiled_context = compile_context(background_store)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def on_audio(self, callback) -> None:
         raise NotImplementedError("streaming reply audio isn't built this hour")

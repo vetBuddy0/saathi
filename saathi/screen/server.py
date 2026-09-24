@@ -143,11 +143,21 @@ async def _run_turn(
             session, core, generation, turn_generation, _FALLBACK_REPLY_TEXT, store, eou_ms
         )
         return
+    if not reply_text.strip():
+        # Nothing was said (the session's speech gate, or an empty
+        # transcript -- see cascade.py's end_turn()). THINKING -> IDLE
+        # via no_response, never SPEAKING: no fallback line, no "I
+        # didn't catch that". And no `turns` row: a turn is an exchange,
+        # and this wasn't one -- logging it would put a row with no
+        # STT, LLM or TTS time into the p95 the latency budget reads.
+        if turn_generation["value"] != generation:
+            return
+        core.handle(Event("no_response"))
+        logger.info("nothing said; turn ended silently")
+        return
     logger.info("reply: %s", reply_text)
 
-    await _speak_and_finish(
-        session, core, generation, turn_generation, reply_text, store, eou_ms
-    )
+    await _speak_and_finish(session, core, generation, turn_generation, reply_text, store, eou_ms)
 
 
 async def _speak_and_finish(
@@ -319,9 +329,7 @@ def build_app(
                             turn_generation["value"] += 1
                             generation = turn_generation["value"]
                             asyncio.get_running_loop().create_task(
-                                _run_turn(
-                                    session, core, generation, turn_generation, store, eou_ms
-                                )
+                                _run_turn(session, core, generation, turn_generation, store, eou_ms)
                             )
         finally:
             websockets.discard(ws)
