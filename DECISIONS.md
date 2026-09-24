@@ -353,3 +353,87 @@ the constructor grew a dependency whose real default (Silero) correctly
 calls the fixtures' 200 bytes of zeros silence. Tests inject the gate
 the same way they already inject `client=` and `backends=`; one test
 deliberately omits it to pin that the real gate is the default.
+
+**2026-09-25 — Calling is in scope, reversing 2026-09-18's "calls/music
+out for v1".** Explicit brief (Stream B). The stub was built so "v2
+swaps an implementation rather than inventing plumbing" (SPEC.md); that
+is exactly what `tools/calling.py` does — same name, schema and
+`"calls"` permission, only the handler changes. Granting `"calls"` in
+`cli.py` is a shared-file edit, proposed as a diff in
+`docs/completed/calling.md`, not applied. SPEC.md's "Out: calls" line
+is proposed for amendment the same way.
+
+**2026-09-25 — Twilio Media Streams, not SIP or LiveKit.** Brief-given,
+recorded for the trail: Media Streams is a bidirectional WebSocket of
+20 ms μ-law frames — the same shape as the cascade's audio path — with
+no registrar, NAT traversal, media stack or second always-on vendor.
+
+**2026-09-25 — μ-law and 16k<->8k resampling are ~60 lines of numpy in
+`call/codec.py`, not `audioop` and not a new dependency.** `audioop`
+works on the 3.12 this runs today and is *removed* in 3.13, which
+`pyproject.toml`'s `>=3.12` permits; a resampling library is a
+dependency for one ratio. The encoder is bit-exact with the G.711
+reference (`audioop` is used as an oracle where it still exists, all
+65536 inputs); the resampler is a pair-average decimator and linear
+interpolation, adequate for a 3.4 kHz telephone band.
+
+**2026-09-25 — The relay is a cloudflared quick tunnel behind a
+three-method `Relay` protocol; production is a real always-on service.**
+Twilio connects inwards and the device is behind home wifi. Quick
+tunnels need no login and cost nothing; they also change hostname per
+start and take 60-90 s to become resolvable (measured here: up in 7 s,
+publicly reachable at 84 s) — which is why `CallController.prepare()`
+brings the relay up at boot, not on the first dial. ngrok (new vendor,
+interstitial page), an SSH reverse tunnel (needs a VPS + key on the
+device) and a *named* cloudflared tunnel (needs a Cloudflare login on
+this box; the obvious production shape) lost for now. cloudflared
+2026.9.3, Apache-2.0, sha256 verified against GitHub's asset digest,
+installed to `~/.local/bin`, never vendored.
+
+**2026-09-25 — The media server runs on its own thread and event loop
+(port 8768), not on the screen server's loop.** The face has a 100 ms
+reaction budget and is another stream's territory; a phone call's
+socket sharing that loop would put every 20 ms frame in the face's way.
+`build_media_app()` stays a plain aiohttp app so a fake Twilio peer
+drives it in tests.
+
+**2026-09-25 — Streaming playback for the far end is `pacat --playback`
+fed on stdin, in `call/audio.py`, not in `audio/playback.py`.** There
+is no streaming playback anywhere in this codebase and `playback.py`
+is `paplay` on a file. The right home is a general `play_stream()` in
+`audio/playback.py`; that file is not this stream's to edit, so the
+writer lives beside its only caller and the move is proposed in the
+completion doc. `--latency-msec=60` bounds Pulse's own buffering so
+hang-up doesn't leave a tail of far-end audio playing.
+
+**2026-09-25 — No new `core.py` state for calls; `HANDOFF` is not
+re-purposed.** SPEC.md defines `HANDOFF` as "a question goes to the
+slower, smarter path", resolving into the same turn. A real `IN_CALL`
+state is a `core.py` + `Face` change (one of the five interfaces) and
+is proposed, not built. Until then `CallController.active` is the "a
+call is happening" signal initiative's gate should read.
+
+**2026-09-25 — Hang-up is a two-second spacebar hold, registered
+through a `HoldSeam` protocol that SCREEN implements; a single tap
+during a call does nothing.** Double-tap lost: hard timing for older
+hands, easy to trigger by accident. The seam is stubbed
+(`FakeHoldSeam`) until SCREEN's real hold handling lands; calling never
+touches the spacebar or renders a card itself.
+
+**2026-09-25 — Twilio auth is an API key + secret, not the account auth
+token, and every Twilio error is re-raised `from None` as a
+`TwilioError` carrying only an operation name and HTTP status.** A
+leaked key is revocable without rotating the account; `urllib`'s
+`HTTPError` text carries the URL (account SID) and a request log would
+carry both phone numbers, so nothing from the original exception
+survives. Consequence: `X-Twilio-Signature` validation on `/twiml`
+needs the auth token the device doesn't hold — that check belongs to
+the production relay, and until then the tunnel's random hostname is
+the only guard. Recorded as debt.
+
+**2026-09-25 — Stage 1's `call_contact` dials only "the test number"
+(any contact matching /\btest\b/i) and answers everything else with a
+polite "not yet" note.** Brief-given ordering: contacts are not built
+on an audio path that hasn't been heard working. The note is how the
+model is steered to say "Calling the test number." — a tool never
+speaks through `VoiceSession`.
