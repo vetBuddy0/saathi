@@ -353,3 +353,136 @@ the constructor grew a dependency whose real default (Silero) correctly
 calls the fixtures' 200 bytes of zeros silence. Tests inject the gate
 the same way they already inject `client=` and `backends=`; one test
 deliberately omits it to pin that the real gate is the default.
+
+**2026-09-25 — The Google Neural2/WaveNet backend synthesizes per
+sentence through the batch API; only Chirp3-HD streams.** Found on
+the first live run, not by reading: `streaming_synthesize` with any
+non-Chirp voice returns `400 Currently, only Chirp 3: HD voices are
+supported for streaming synthesis`, and the first-party streaming page
+says the same. The brief asked for both "streaming, not batch" and a
+Neural2 comparison; on this API they're mutually exclusive. Kept the
+backend (batch per sentence, the same shape as Piper and Kokoro, with
+"per-sentence" in its display name) so the comparison could be run at
+all. The option that lost — deleting it — would have made "is Chirp
+worth its price" unanswerable.
+
+**2026-09-25 — Mandarin and Bengali on the Neural2 backend are WaveNet
+voices.** `list_voices()` at the Singapore endpoint: `cmn-CN` and
+`bn-IN` have no Neural2 voices, only WaveNet and Chirp3-HD. WaveNet was
+already "an alternative voice ID within the same class" (2026-09-18),
+so a per-language table picks Neural2 where it exists and WaveNet where
+it doesn't, all female. Measured live: WaveNet Mandarin takes ~3 s to
+first audio (3077 ms and 3023 ms on two runs), which by itself rules
+this backend out for a Mandarin speaker.
+
+**2026-09-25 — Chirp3-HD's voice table is one speaker name applied to
+every language code.** Chirp's names (`Achernar`, `Sulafat`, ...) are
+the same speaker in `en-US`, `cmn-CN`, `hi-IN` and `bn-IN` — the
+structural answer to "recognisably the same character" that no other
+backend in the registry can give. Default speaker `Sulafat`: female,
+and the one whose descriptor in Google's own voice list is "Warm", the
+brief's word. `Achernar` ("Soft", the blind draft's pick), `Gacrux`
+("Mature") and `Vindemiatrix` ("Gentle") are rendered as candidates by
+`compare.py --candidates`; the final choice is the user's ears, and it
+is one constant.
+
+**2026-09-25 — Chirp's streamed PCM is joined and wrapped in a WAV
+header per sentence; sub-sentence yields were rejected.** `TTSBackend`
+promises one WAV per sentence and `cascade._speak()` spawns one
+`paplay` per item. Yielding each ~240 ms Google chunk as its own WAV
+would put a process spawn inside every sentence — audible gaps, worse
+than the sentence-level wait. The first-chunk win (measured: first
+chunk at ~330 ms vs ~720–830 ms for the whole first sentence) needs a
+raw-PCM playback path in `audio/playback.py` and `cascade._speak()`,
+outside this stream's territory. `GoogleChirp3HDBackend.stream_pcm()`
+is the additive, `getattr`-discovered capability that path would
+consume (the `preload()` pattern, 2026-09-18); the diff is proposed in
+`docs/completed/voice.md`, not applied.
+
+**2026-09-25 — Google client moved from `texttospeech_v1beta1` to
+`texttospeech_v1`.** Both expose `streaming_synthesize` at the pinned
+2.37.0; the GA surface is the one less likely to move, and the beta
+import had no recorded reason.
+
+**2026-09-25 — An unsupported language raises `ValueError` from the
+Google backends rather than defaulting to English.** Same principle as
+`KokoroBackend` and `voice/language.py`: unavailable and visibly so
+beats silently wrong. `cascade` only ever passes a resolved, supported
+language, so nothing on the real path can hit it.
+
+**2026-09-25 — `compare.py` measures TTFA exactly as `cascade._speak()`
+does (generator, then clock, then first `next()`), and reports Google's
+first-chunk time in a separate column labelled a projection.** A number
+taken any other way wouldn't be the one `turns.first_tts_chunk_ms`
+holds and the latency-budget test reads. The projection column is
+there because it is the number that decides whether the playback-path
+change is worth making; it is never presented as today's TTFA.
+
+~~**2026-09-25 — `tts_backend` preference on this machine's
+`~/.saathi/identity.sqlite3` set to `google-chirp3-hd` for the barge-in
+proof, and left set.** This changes what she hears on the next run, so
+it is called out here and in `docs/completed/voice.md` rather than
+done quietly: the brief's whole point was to hear the warmer voice,
+and the Ctrl+L panel reverts it in one click. Piper remains
+`DEFAULT_BACKEND_ID` and the automatic fallback whenever Google is
+unavailable — the repo's default is unchanged.~~
+Superseded the same day, after code review: CLAUDE.md lists "anything
+that changes what she hears" as ask-first, and until `cascade.py`
+forwards prefetch exceptions (diff proposed in `docs/completed/voice.md`)
+a Google failure costs a sentence. Preference reset to `piper`; the
+Ctrl+L panel switches to Chirp in one click, and that click is the
+user's.
+
+**2026-09-25 — A Google synthesis failure yields 100 ms of silence for
+that sentence and takes the backend offline for 60 s, rather than
+raising.** Found by code review, not by me: `cascade._prefetch_next_chunk()`
+only enqueues on success, so a raise from the backend leaves `_speak()`
+blocked on its queue forever — `say()` never returns and the session is
+dead. Silence is not the preference; it is the honest degradation
+until the helper forwards exceptions (proposed, not applied). The
+failure is logged at WARNING, and the cooldown makes `available()`
+false so `_current_backend()` routes the next turn to Piper through
+the path that already exists — `available()` only stats the key file
+and cannot otherwise see a revoked key, exhausted quota or a Wi-Fi
+drop.
+
+**2026-09-25 — Every Google call carries a 10 s deadline.** The
+streaming call has no default deadline in the gapic client; a stalled
+connection would hold a sentence, and the turn, open indefinitely. Ten
+seconds against a measured 0.5–1.7 s per sentence.
+
+**2026-09-25 — A "voice" is a pair: the same speaker in every supported
+language, six entries at most, in `voice/tts/voices.py`.** The user's
+rule, and checkpoint 2's exit condition: pick a voice and she must not
+become a different person when she switches language. Chirp3-HD is the
+only backend in the registry that can offer that structurally (one
+speaker name across `en-US`/`cmn-CN`/`hi-IN`/`bn-IN`), so five of the
+six are Chirp speakers named by Google's own descriptors — Warm
+(Sulafat, the default), Soft (Achernar), Gentle (Vindemiatrix), Mature
+(Gacrux), Bright (Zephyr); all confirmed live, female, in all four
+locales. The sixth is Piper, listed as the offline fallback, not as a
+character. **Neural2 is not a voice**: Google has no Neural2 Mandarin
+voice, so that backend is `en-US-Neural2-C` + `cmn-CN-Wavenet-A`, two
+different people, and cannot meet the rule. It stays in the panel's
+backend row with its list price so the Chirp-vs-Neural2 cost comparison
+the user asked for is still visible; the brief's "compare with Neural2"
+is met there and not as a selectable voice. The option that lost:
+keying the preference by backend id plus a speaker string — that puts
+the pairing rule in JavaScript and lets a stray `tts_backend` row select
+a backend with no pair. The old `tts_backend` preference is still read,
+as a fallback, so a device that picked Chirp before voices existed keeps
+hearing Chirp.
+
+**2026-09-25 — Per-voice cost comes from three new `turns` columns
+(`voice`, `tts_chars`, `tts_cost_usd`), not from a list price.** The
+panel's backend row showed `$30 / 1M chars` and nothing else; "as with
+the backends" in the brief assumed a real-usage figure that was never
+wired (`docs/completed/C-tts-backends.md`). `cost_usd` stays the LLM
+half; nothing sums the two yet. Rows logged before the columns existed
+have `voice` NULL and are not attributed to anyone — "spent so far"
+means since the picker, and the panel says so rather than guessing.
+Added in place by `ALTER TABLE ADD COLUMN`; the aggregation is a Python
+fold in `identity/usage.py` (`IdentityStore.read` is exact-match only
+and adding SQL aggregates to one of the five interfaces is a
+conversation, not a feature). SPEC.md's `turns` line changes; that diff
+is proposed in `docs/completed/voice-picker.md`, not applied.

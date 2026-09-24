@@ -1,8 +1,11 @@
 """Reading and writing the `preferences` table through `IdentityStore`,
-for exactly two keys so far: `"language"` (item G) and `"tts_backend"`
-(item C) — both need "the family picks one now, changeable later" and
-both need the same "write it once, read the latest" semantics, so one
-small module serves both instead of each caller reinventing it.
+for three keys: `"language"` (item G), `"tts_backend"` (item C) and
+`"voice"` (the paired-voice picker, which supersedes `tts_backend` as
+the thing that decides what she sounds like -- `tts_backend` is still
+read, as a fallback, so an older device's choice survives). All need
+"the family picks one now, changeable later" and the same "write it
+once, read the latest" semantics, so one small module serves them
+instead of each caller reinventing it.
 
 This does **not** add a method to `IdentityStore`. Checkpoint 1's
 `create`/`append`/`read` boundary is deliberate (see that module's
@@ -29,9 +32,42 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from saathi.identity.store import IdentityStore
+from saathi.voice.tts.voices import DEFAULT_VOICE_ID, voice_by_id, voice_from_legacy_backend
 
 LANGUAGE_KEY = "language"
 TTS_BACKEND_KEY = "tts_backend"
+VOICE_KEY = "voice"
+
+
+def read_voice_preference(store: IdentityStore) -> str:
+    """The id of the voice pair she should speak with -- always a real
+    id from `voices.VOICES`, never `None`, so callers don't each carry a
+    fallback. Order: the `voice` preference if it names a pair that
+    still exists; else the pre-picker `tts_backend` preference mapped to
+    that backend's pair (a device that chose Chirp before voices existed
+    keeps Chirp); else `DEFAULT_VOICE_ID`. A `voice` row naming a pair
+    that was later removed from the list falls through rather than
+    raising: an operator's stale choice is not an error at turn time."""
+    chosen = read_preference(store, VOICE_KEY)
+    if voice_by_id(chosen) is not None:
+        return chosen  # type: ignore[return-value]  # voice_by_id proved it's a str
+    legacy = read_preference(store, TTS_BACKEND_KEY)
+    if legacy is not None:
+        return voice_from_legacy_backend(legacy)
+    return DEFAULT_VOICE_ID
+
+
+def threadsafe_voice_reader(store: IdentityStore) -> Callable[[], str]:
+    """`threadsafe_reader` for the voice, with `read_voice_preference`'s
+    fallback chain instead of a single key -- see that function for why
+    every call opens its own connection."""
+    path = store.path
+
+    def _read() -> str:
+        with IdentityStore(path) as own:
+            return read_voice_preference(own)
+
+    return _read
 
 
 def read_preference(store: IdentityStore, key: str, default: str | None = None) -> str | None:

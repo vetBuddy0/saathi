@@ -137,3 +137,69 @@ def test_a_fresh_database_needs_no_migration_and_gets_the_new_schema_directly():
             engine="cascade",
         )
         assert turn_id is not None
+
+
+# -- turns: voice/tts_chars/tts_cost_usd (2026-09-25) ------------------------
+
+
+@pytest.fixture
+def pre_voice_picker_db_path():
+    """The 2026-09-18 shape exactly: granular timing columns present,
+    the three voice-usage columns absent -- what every device running
+    the previous build has on disk."""
+    tmp_dir = tempfile.mkdtemp()
+    path = Path(tmp_dir) / "identity.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE turns ("
+        "id INTEGER PRIMARY KEY, ts TEXT NOT NULL, mode TEXT, eou_ms INTEGER, "
+        "stt_ms INTEGER, first_token_ms INTEGER, first_tts_chunk_ms INTEGER, "
+        "prompt_tokens INTEGER, completion_tokens INTEGER, cost_usd REAL, "
+        "handoff INTEGER, engine TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO turns (ts, mode, eou_ms, stt_ms, first_token_ms, first_tts_chunk_ms, "
+        "prompt_tokens, completion_tokens, cost_usd, handoff, engine) "
+        "VALUES ('2026-09-20T00:00:00+00:00', 'voice', 500, 300, 400, 200, 10, 5, 0.0001, "
+        "0, 'cascade')"
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_v1_migrated_turn_has_no_voice_rather_than_a_guessed_one(old_schema_db_path):
+    with IdentityStore(old_schema_db_path) as store:
+        store.create()
+        row = store.read("turns")[0]
+        assert row["voice"] is None
+        assert row["tts_chars"] is None
+        assert row["tts_cost_usd"] is None
+
+
+def test_pre_picker_turns_gain_the_voice_columns_in_place(pre_voice_picker_db_path):
+    with IdentityStore(pre_voice_picker_db_path) as store:
+        store.create()
+        row = store.read("turns")[0]
+        # Everything the row had survives; the new columns are NULL.
+        assert row["stt_ms"] == 300 and row["cost_usd"] == 0.0001
+        assert row["voice"] is None
+        store.append(
+            "turns",
+            ts="now",
+            mode="voice",
+            eou_ms=1,
+            handoff=0,
+            engine="cascade",
+            voice="warm",
+            tts_chars=42,
+            tts_cost_usd=0.00126,
+        )
+        assert store.read("turns", voice="warm")[0]["tts_chars"] == 42
+
+
+def test_voice_column_migration_is_idempotent(pre_voice_picker_db_path):
+    with IdentityStore(pre_voice_picker_db_path) as store:
+        store.create()
+        store.create()  # a second startup must not re-ALTER ("duplicate column")
+        assert len(store.read("turns")) == 1

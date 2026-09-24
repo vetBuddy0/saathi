@@ -14,6 +14,17 @@ not yet feel like a person. Not diagnosed. Nothing below is confirmed
 as the cause; these are the things known to be true that could
 plausibly contribute, listed so the investigation starts from evidence
 rather than guesses:
+- **The voice itself.** Every reply she hears is Piper, which is flat
+  and synthetic, and no amount of memory or persona text survives a
+  flat delivery. Absent from this list until 2026-09-25 and the most
+  likely cause, above the length cap and above 13 ms of latency. Google
+  Chirp3-HD is now real (`saathi/voice/tts/google_backend.py`, the same
+  speaker in English and Mandarin) and selectable in the Ctrl+L panel;
+  the six comparison files are in `~/.saathi/tts-compare/` and
+  `docs/completed/voice.md` has the numbers. Listening is the next
+  step, and it is the user's. Known cost: as wired today (one WAV per
+  sentence) Chirp adds ~500 ms to time-to-first-audio over Piper; the
+  raw-PCM playback path proposed in that doc brings it to ~330 ms.
 - `persona_stub.txt` is still a stub. It is the user's file to write
   (`compile.py` never invents identity content), and everything she
   sends starts from it.
