@@ -14,6 +14,15 @@ asks for it to be a real, if thin, settings surface (language + TTS
 backend), not just another passthrough, because it's for whoever sets
 the device up, not for her — see `static/js/settings-panel.js`.
 
+The YouTube stream (2026-09-25) added two more: `{"type": "media",
+"action": ...}` (server -> browser: results, play, pause, resume, stop,
+volume, layout — emitted by `tools/media.py`'s controller through the
+`broadcast` seam `build_app` installs on it, never on connect) and
+`{"type": "media_event", "event": ...}` (browser -> server: the player
+reporting `ended`/`error`). Ducking needs no new message: the browser
+lowers the player's volume on the `state` it already receives
+(`listening`/`thinking`/`speaking`) — see `static/js/media-policy.js`.
+
 Checkpoint 1 had no voice engine, so `release` (`LISTENING` -> `THINKING`)
 was immediately followed by a synthetic `no_response` event
 (`THINKING` -> `IDLE`) rather than waiting for a real answer — SPEC.md's
@@ -224,7 +233,11 @@ def _settings_message(store) -> str:
 
 
 def build_app(
-    core: Core, session=None, capture_source_id: str | None = None, store=None
+    core: Core,
+    session=None,
+    capture_source_id: str | None = None,
+    store=None,
+    media=None,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -232,13 +245,47 @@ def build_app(
     turn_generation = {"value": 0}
     turn_started_at: dict[str, float | None] = {"value": None}
 
-    def broadcast_state(state, _event: Event) -> None:
-        message = json.dumps({"type": "state", "state": state.value})
+    def _send_all(message: str) -> None:
         for ws in list(websockets):
             if not ws.closed:
                 asyncio.ensure_future(ws.send_str(message))
 
+    def broadcast_state(state, _event: Event) -> None:
+        _send_all(json.dumps({"type": "state", "state": state.value}))
+
     core.subscribe(broadcast_state)
+
+    # The broadcast seam. `media` (tools/media.py's MediaController) is
+    # anything with `set_broadcast(fn)`. Its caller runs on the executor
+    # thread inside `session.end_turn()`, where touching `websockets` is
+    # unsafe, so the callable it's given hops to this loop first. The
+    # server still decides nothing: the tool says what the screen
+    # shows, this only carries it. Installed on startup, not here,
+    # because there is no running loop at build time; a message before
+    # then has no screen to reach anyway and is dropped.
+    loop_holder: dict[str, asyncio.AbstractEventLoop | None] = {"loop": None}
+
+    def broadcast_threadsafe(payload: dict) -> None:
+        loop = loop_holder["loop"]
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(_send_all, json.dumps(payload))
+
+    seams = [obj for obj in (media,) if obj is not None]
+    if seams:
+
+        async def install_seams(_app: web.Application) -> None:
+            loop_holder["loop"] = asyncio.get_running_loop()
+            for obj in seams:
+                obj.set_broadcast(broadcast_threadsafe)
+
+        async def remove_seams(_app: web.Application) -> None:
+            for obj in seams:
+                obj.set_broadcast(None)
+            loop_holder["loop"] = None
+
+        app.on_startup.append(install_seams)
+        app.on_cleanup.append(remove_seams)
 
     async def index(_request: web.Request) -> web.FileResponse:
         return web.FileResponse(_STATIC_DIR / "index.html")
@@ -282,10 +329,18 @@ def build_app(
                             {"type": "preference_result", "key": key, "ok": True, "reason": ""}
                         )
                     )
-                    settings_message = _settings_message(store)
-                    for other_ws in list(websockets):
-                        if not other_ws.closed:
-                            asyncio.ensure_future(other_ws.send_str(settings_message))
+                    _send_all(_settings_message(store))
+                    continue
+                if payload.get("type") == "media_event":
+                    # The player reporting back ("ended", "error"). A
+                    # report, not a decision: the controller updates
+                    # what "play that again" means; nothing here does.
+                    event = payload.get("event")
+                    video_id = payload.get("video_id")
+                    if media is not None and isinstance(event, str):
+                        media.on_browser_event(
+                            event, video_id if isinstance(video_id, str) else None
+                        )
                     continue
                 if payload.get("type") != "input":
                     continue
@@ -348,10 +403,13 @@ def run(
     session=None,
     capture_source_id: str | None = None,
     store=None,
+    media=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
-        build_app(core, session=session, capture_source_id=capture_source_id, store=store),
+        build_app(
+            core, session=session, capture_source_id=capture_source_id, store=store, media=media
+        ),
         host=host,
         port=port,
         print=None,

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import threading
 from pathlib import Path
@@ -599,3 +600,249 @@ async def test_a_silent_turn_goes_back_to_idle_without_speaking_or_logging(monke
     assert core.state == State.IDLE
     assert session.spoken == []
     assert rows == []
+
+
+# -- media (YouTube stream): the tool speaks to the screen through the seam --
+
+
+def _media_fixture_results():
+    from saathi.tools.media import parse_search_response
+
+    fixture = Path(__file__).parent / "fixtures" / "youtube_search_old_chinese_songs.json"
+    return parse_search_response(json.loads(fixture.read_text()))
+
+
+class ToolSession(FakeSession):
+    """A FakeSession whose end_turn() does what a real CascadeSession does
+    inside a turn with a tool call: invokes the registered intent handler
+    (cli.py's handle_intent shape -- permission-checked Registry.call)
+    from the executor thread, records the result, and returns a reply.
+    Queue one call per turn with `queue()`."""
+
+    def __init__(self, handle_intent) -> None:
+        super().__init__()
+        self._handle_intent = handle_intent
+        self._queued: list[dict] = []
+        self.results: list[dict] = []
+
+    def queue(self, **arguments) -> None:
+        self._queued.append(arguments)
+
+    def end_turn(self) -> str:
+        if not self._queued:
+            return "reply"
+        arguments = self._queued.pop(0)
+        result = self._handle_intent("play_music", arguments)
+        self.results.append(result)
+        return "reply"
+
+
+def _media_app(granted=frozenset({"music"}), results=None):
+    """A build_app wired the way cli.py's diff wires it: a controller,
+    the tool registered, the permission granted (or not), and the
+    controller handed to build_app so the seam gets installed."""
+    from saathi.tools.media import MediaController, make_media_tool
+    from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
+
+    found = results if results is not None else _media_fixture_results()
+    controller = MediaController(search=lambda _query: found)
+    registry = Registry()
+    registry.register(make_media_tool(controller))
+
+    def handle_intent(name: str, arguments: dict) -> dict:
+        try:
+            return registry.call(name, granted, **arguments)
+        except UnknownTool:
+            return {"status": "error", "detail": f"no such tool: {name}"}
+        except PermissionDenied as exc:
+            return {"status": "denied", "detail": str(exc)}
+
+    session = ToolSession(handle_intent)
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source", media=controller)
+    return app, session, controller, found
+
+
+async def _turn_collecting_media(ws, session, **call) -> list[dict]:
+    """One full turn with `call` queued for the tool; returns every
+    `media` message that arrived before the turn's `idle`."""
+    session.queue(**call)
+    await ws.send_json({"type": "input", "event": "press"})
+    assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    await ws.send_json({"type": "input", "event": "release"})
+    assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+    media = []
+    states = []
+    while True:
+        message = await ws.receive_json()
+        if message["type"] == "media":
+            media.append(message)
+            continue
+        states.append(message["state"])
+        if message["state"] == "idle":
+            break
+    assert states == ["speaking", "idle"]
+    return media
+
+
+async def test_connecting_with_a_media_controller_still_yields_exactly_state_then_settings(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, _ = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="old Chinese songs")
+            assert controller.last_results  # a search has happened...
+        async with client.ws_connect("/ws") as fresh:
+            # ...and a fresh connection is still state, settings, nothing
+            # else. No `media` on connect, ever.
+            assert (await _connect(fresh))["type"] == "state"
+            await fresh.send_json({"type": "input", "event": "press"})
+            assert await fresh.receive_json() == {"type": "state", "state": "listening"}
+
+
+async def test_a_search_turn_broadcasts_three_results_to_every_client_and_returns_spoken_titles(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            media = await _turn_collecting_media(
+                ws, session, action="search", query="old Chinese songs"
+            )
+            seen_by_other = await other.receive_json()
+            while seen_by_other["type"] != "media":
+                seen_by_other = await other.receive_json()
+
+    assert len(media) == 1
+    assert media[0]["action"] == "results"
+    assert len(media[0]["results"]) == 3
+    assert media[0]["results"][0]["index"] == 1
+    assert seen_by_other == media[0]
+
+    result = session.results[0]
+    assert result["status"] == "ok"
+    assert [r[:6] for r in result["results"]] == ["One: 推", "Two: T", "Three:"]
+    assert "note" in result
+    json.dumps(result)
+
+
+async def test_the_second_one_that_one_and_again_resolve_across_turns(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="old Chinese songs")
+
+            # "the second one"
+            media = await _turn_collecting_media(ws, session, action="play", choice=2)
+            assert media == [
+                {
+                    "type": "media",
+                    "action": "play",
+                    "video_id": found[1].video_id,
+                    "title": found[1].title,
+                    "index": 2,
+                    "volume": 70,
+                    "fullscreen": False,
+                }
+            ]
+            assert session.results[-1]["playing"].startswith("Two: ")
+
+            # "that one" -- no choice: the one she most recently meant
+            media = await _turn_collecting_media(ws, session, action="play")
+            assert media[0]["video_id"] == found[1].video_id
+
+            # "play that again"
+            media = await _turn_collecting_media(ws, session, action="again")
+            assert media[0]["action"] == "play"
+            assert media[0]["video_id"] == found[1].video_id
+
+            # "the first one", several turns later
+            media = await _turn_collecting_media(ws, session, action="play", choice=1)
+            assert media[0]["video_id"] == found[0].video_id
+
+
+async def test_every_transport_and_layout_action_broadcasts_its_message(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="q")
+            await _turn_collecting_media(ws, session, action="play", choice=1)
+
+            expected = {
+                "quieter": {"type": "media", "action": "volume", "level": 55},
+                "louder": {"type": "media", "action": "volume", "level": 70},
+                "pause": {"type": "media", "action": "pause"},
+                "resume": {"type": "media", "action": "resume"},
+                "bigger": {"type": "media", "action": "layout", "mode": "fullscreen"},
+                "smaller": {"type": "media", "action": "layout", "mode": "panel"},
+                "stop": {"type": "media", "action": "stop"},
+            }
+            for action, message in expected.items():
+                media = await _turn_collecting_media(ws, session, action=action)
+                assert media == [message], action
+
+
+async def test_without_the_music_permission_the_tool_is_denied_and_nothing_is_shown(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, _ = _media_app(granted=frozenset({"preferences"}))
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            media = await _turn_collecting_media(ws, session, action="search", query="q")
+    assert media == []
+    assert session.results[0]["status"] == "denied"
+    assert controller.last_results == []
+
+
+async def test_the_browser_reporting_ended_updates_what_carry_on_means(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="q")
+            await _turn_collecting_media(ws, session, action="play", choice=3)
+            assert controller.playing is True
+
+            await ws.send_json({"type": "media_event", "event": "ended"})
+            await ws.send_json({"type": "media_event", "event": 42})  # malformed: dropped
+            # A well-formed turn right after proves both were consumed.
+            media = await _turn_collecting_media(ws, session, action="resume")
+
+    assert controller.playing is True
+    assert media[0]["action"] == "play"  # carrying on after it ended starts it over
+    assert media[0]["video_id"] == found[2].video_id
+
+
+async def test_a_media_message_emitted_off_the_loop_thread_reaches_the_client(monkeypatch):
+    # The seam's whole reason to exist: the handler runs in the executor
+    # thread, where the socket set must not be touched directly.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    _, session, controller, _ = _media_app()
+    thread_names = []
+
+    class ThreadRecordingSession(ToolSession):
+        def end_turn(self) -> str:
+            thread_names.append(threading.current_thread().name)
+            return super().end_turn()
+
+    recording = ThreadRecordingSession(session._handle_intent)
+    app = build_app(Core(), session=recording, capture_source_id="fake", media=controller)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            media = await _turn_collecting_media(ws, recording, action="search", query="q")
+    assert media and media[0]["action"] == "results"
+    assert thread_names and "MainThread" not in thread_names

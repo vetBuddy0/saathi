@@ -17,6 +17,12 @@
 // doesn't display one) than this one (a developer's terminal isn't the
 // face).
 //
+// The media panel (media-panel.js, YouTube stream) draws beside the
+// face what tools/media.py's controller tells it to — results, a
+// player — and ducks the video on the state messages already flowing
+// here. It adds nothing to the input path: space during playback is an
+// ordinary press.
+//
 // Ctrl+L (settings-panel.js, item C/G) is the one deliberate exception
 // to "the browser only carries spacebar events": a language/TTS-backend
 // panel for whoever sets the device up, not for her — hidden until
@@ -26,6 +32,7 @@
 
 import { FACE_MODULES, DEFAULT_FACE } from "./face.js";
 import { createSettingsPanel } from "./settings-panel.js";
+import { createMediaPanel } from "./media-panel.js";
 
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 30000;
@@ -35,7 +42,7 @@ function chosenFaceName() {
   return requested && FACE_MODULES[requested] ? requested : DEFAULT_FACE;
 }
 
-function connectWithReconnect(face, onMessage, isInputBlocked) {
+function connectWithReconnect(face, onMessage, isInputBlocked, onOpen) {
   let ws = null;
   let holding = false;
   let reconnectAttempt = 0;
@@ -49,6 +56,7 @@ function connectWithReconnect(face, onMessage, isInputBlocked) {
         console.info("saathi: reconnected to the engine");
       }
       reconnectAttempt = 0;
+      if (onOpen) onOpen();
     });
 
     ws.addEventListener("message", (event) => {
@@ -116,11 +124,23 @@ async function main() {
   await face.mount(document.getElementById("face-container"));
 
   let transport = null;
-  const settingsPanel = createSettingsPanel((payload) => transport && transport.send(payload));
+  const sendLater = (payload) => transport && transport.send(payload);
+  const settingsPanel = createSettingsPanel(sendLater);
+  // `?demo=media|media-playing|media-fullscreen` draws the panel with
+  // sample content and no network, for looking at the layout. Dev
+  // only; the kiosk never passes it.
+  const demo = new URLSearchParams(window.location.search).get("demo");
+  const mediaPanel = createMediaPanel(sendLater, { demo });
   transport = connectWithReconnect(
     face,
-    (message) => settingsPanel.onMessage(message),
-    () => settingsPanel.isOpen()
+    (message) => {
+      settingsPanel.onMessage(message);
+      mediaPanel.onMessage(message);
+    },
+    // Not the media panel: space must keep working during playback --
+    // a press ducks the video (media-panel.js), it never blocks input.
+    () => settingsPanel.isOpen(),
+    () => mediaPanel.onConnected()
   );
 }
 

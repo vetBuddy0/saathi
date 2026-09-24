@@ -353,3 +353,75 @@ the constructor grew a dependency whose real default (Silero) correctly
 calls the fixtures' 200 bytes of zeros silence. Tests inject the gate
 the same way they already inject `client=` and `backends=`; one test
 deliberately omits it to pin that the real gate is the default.
+
+**2026-09-25 — `"music"` is granted in `cli.py` (proposed diff), reversing
+the 2026-09-18 "calls/music are out for v1" gate.** Explicit instruction:
+the YouTube stream's brief makes music real. The 2026-09-18 reasoning
+("real-world consequential") still holds for calls — a call reaches
+another person — but playing a song on her own screen has no consequence
+outside the room, and stopping it is one word. Granted unconditionally,
+same as `"preferences"`; `"calls"` stays ungranted. The grant itself is
+a `cli.py` edit (cross-territory), written into
+`docs/completed/youtube.md`, not applied here.
+
+**2026-09-25 — One `play_music` tool with an `action` enum, not ten
+tools.** `cascade.py` handles exactly one tool call per turn, so
+"search, then offer" has to be one call whose result carries the
+titles. Ten small tools would have put ten descriptions in front of the
+model on every turn; one tool whose vocabulary matches how she talks
+(`louder`, `bigger`, `again`, `next`) is what the real model
+(`qwen/qwen3.8-27b`) picked correctly on the first try. Name kept as
+`play_music`, permission kept as `"music"`, exactly the stub's — SPEC.md's
+"v2 swaps an implementation rather than inventing plumbing".
+
+**2026-09-25 — Search results live in the tool's controller, not in the
+model's context or the identity store.** "The second one" three turns
+later must resolve to the same video whether or not the model still has
+the list in its window; a Python list on the object the handler closes
+over is the only place that is true by construction. Not persisted:
+what was offered is conversation state, not memory, and a reboot
+forgetting it is right.
+
+**2026-09-25 — Space during playback ducks the video to 20%, held
+through thinking and speaking, restored at idle. Never pauses.** The
+brief rules out pausing. 20% over mute because a room going
+dead-silent on every press reads as broken; 20% over 50% because the
+AEC does not cover browser audio on this box (measured — see
+`docs/completed/youtube.md`), so whatever is left under her voice is
+what Whisper hears. Lives in the browser (`media-policy.js`) keyed on
+the `state` messages it already receives, so no PLAYING state was added
+to `core.py` — playback is media state, not conversation state.
+
+**2026-09-25 — A new search stops whatever was playing.** The offer has
+to be read aloud, and reading three titles over a song she has just
+asked to replace serves no one. Pausing-then-resuming-if-she-declines
+was the alternative and was rejected as state the model would have to
+reason about across turns; "carry on" after a search means "start that
+one again", which the tool does.
+
+**2026-09-25 — The screen server owns the media broadcast seam; the
+tool never sees the socket.** `build_app(media=...)` installs a
+thread-safe callable on the controller at startup
+(`loop.call_soon_threadsafe`), because the handler runs in the executor
+thread inside `end_turn()`. The alternative — the tool importing the
+server and appending to its socket set — is the "tool reaching into the
+UI" CLAUDE.md names. `media` messages are never sent on connect; the
+existing `state`-then-`settings` handshake is untouched.
+
+**2026-09-25 — Volume is tracked in the tool (70 default, steps of 15,
+floor 10, ceiling 100), not read back from the player.** Deterministic
+and testable; "quieter" never reaches silence ("stop" is the word for
+that); the browser applies the duck on top.
+
+**2026-09-25 — `media-policy.js` is tested in a headless Chromium, not
+node.** No node on the device or the dev box, and a JS runtime as a dev
+dependency for two pure functions is the kind of thing that turns into
+a build step. The face already runs in Chromium; the test skips (not
+fails) where no Chromium binary exists.
+
+**2026-09-25 — Fullscreen keeps the face at 22vw × 22vh in the
+bottom-left corner, over the video.** The face never goes away is the
+brief's rule; a corner over the picture was chosen over shrinking the
+video to leave a strip, because a letterboxed 16:9 at 1080p already
+has empty bars and a small face over the picture reads as the same
+person stepping aside, not a different screen.
