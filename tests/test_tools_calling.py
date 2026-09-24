@@ -237,7 +237,7 @@ def test_unsure_shows_a_choice_and_dials_nothing_until_she_answers(tmp_path):
     card = cards.current
     assert card.kind == "choice" and {o.label for o in card.options} == {"Meena", "Mina"}
     assert card.spoken in result["note"] and "the first" in card.spoken
-    chosen = card.options[0]
+    chosen = card.options[0].label  # the real cards carry Option objects; the name is the label
     picked = answer.handler(choice=1)  # "the first one"
     assert picked["status"] == "calling" and f"Calling {chosen}." in picked["note"]
     assert client.created[0][0] == (A if chosen == "Meena" else B)
