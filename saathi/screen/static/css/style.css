@@ -2,6 +2,21 @@
    on black is a hardware limit, not a style"). No status text anywhere in
    here — the face itself is the only signal. */
 
+/* Card colour tokens (cards.js). Every text/background pair here is
+   checked for WCAG AAA (7:1) by tests/test_cards_style.py, which reads
+   these exact declarations -- change a value here and the test says
+   whether it still passes. */
+:root {
+  --card-bg: #0d0d10;
+  --card-fg: #f2efe8;
+  --card-accent: #ffce85;
+  --card-button-bg: #26222c;
+  --card-button-fg: #f7f4ee;
+  --card-dismiss-bg: #16151a;
+  --card-dismiss-fg: #e6e2da;
+  --card-progress-track: #26222c;
+}
+
 html, body {
   margin: 0;
   height: 100%;
@@ -291,4 +306,134 @@ body.media--fullscreen .media-title {
   left: calc(22vw + 6vw);
   text-align: right;
   text-shadow: 0 0 1.5vh rgba(0, 0, 0, 0.9);
+}
+
+/* Cards (cards.js) — Choice, Confirm, Read-back, Holding. Beside the
+   face in the same non-face region the media panel uses, above it when
+   both are up (one card at a time; a card over a playing video is
+   still a card beside the face). Sizes are the brief's floors, not
+   targets: no text under 32px, no tap target under 100px tall. No
+   :hover rule anywhere below -- touchscreens don't hover -- and no
+   animation that ends on its own. */
+
+#card-panel {
+  position: fixed;
+  inset: 0 0 0 50%;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 4vw;
+  box-sizing: border-box;
+  background: var(--card-bg);
+  color: var(--card-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK SC",
+    sans-serif;
+  cursor: default;
+}
+#card-panel[hidden] {
+  display: none;
+}
+body.card--open #face-container {
+  inset: 0 50% 0 0;
+}
+/* If the video is fullscreen, the face is already in a corner; the card
+   takes the right half over the picture and the face stays where it is. */
+body.media--fullscreen.card--open #face-container {
+  inset: auto auto 3vh 3vh;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 3vh;
+  width: 100%;
+}
+
+.card__title {
+  font-size: clamp(40px, 2.6vw, 56px);
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+.card__options {
+  display: flex;
+  flex-direction: column;
+  gap: 2vh;
+}
+.card__options--row {
+  flex-direction: row;
+}
+.card__options--row .card__option {
+  flex: 1;
+  justify-content: center;
+}
+
+.card__option,
+.card__dismiss {
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  gap: 1.2vw;
+  padding: 0 2vw;
+  border: 0;
+  border-radius: 2vh;
+  font: inherit;
+  font-size: clamp(36px, 2.2vw, 48px);
+  line-height: 1.2;
+  text-align: left;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+.card__option {
+  background: var(--card-button-bg);
+  color: var(--card-button-fg);
+}
+.card__option:active {
+  background: var(--card-accent);
+  color: var(--card-bg);
+}
+.card__dismiss {
+  justify-content: center;
+  background: var(--card-dismiss-bg);
+  color: var(--card-dismiss-fg);
+  font-size: clamp(32px, 2vw, 44px);
+}
+.card__dismiss:active {
+  background: var(--card-button-bg);
+}
+
+.card__number {
+  color: var(--card-accent);
+  font-weight: 700;
+  min-width: 1.4em;
+}
+
+.card__label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.card__value {
+  font-size: clamp(72px, 7vw, 150px);
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.card__progress {
+  height: 6vh;
+  min-height: 48px;
+  border-radius: 3vh;
+  background: var(--card-progress-track);
+  overflow: hidden;
+}
+.card__progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--card-accent);
 }

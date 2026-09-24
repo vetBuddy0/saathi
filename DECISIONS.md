@@ -425,3 +425,50 @@ brief's rule; a corner over the picture was chosen over shrinking the
 video to leave a strip, because a letterboxed 16:9 at 1080p already
 has empty bars and a small face over the picture reads as the same
 person stepping aside, not a different screen.
+
+**2026-09-25 — Cards are a `screen/` module (`cards.py` + `cards.js`),
+not a tool and not part of any one stream.** Every stream that asks
+her something (calling, music, reminders) must ask the same way or she
+learns three dialects of "which one?". Plain HTML/CSS, no component
+library: none is built for a 75-year-old across a room, and the target
+sizes, no-hover and one-at-a-time rules would be fought rather than
+given. Cards are content and interaction, not the status text SPEC.md
+forbids — recorded in the module docstring so it isn't re-litigated.
+
+**2026-09-25 — A fourth option raises `TooManyOptions`; nothing
+truncates.** "More than that, say so and offer the best three" needs
+the caller to pick the three and to say so out loud; a silent cut would
+hide both. Same for `choice()` with one option: that's a `confirm()`.
+
+**2026-09-25 — `CardController.ask()` exists but must not be called
+inside `end_turn()`.** Blocking the turn keeps the state machine in
+THINKING with the mic closed, so she could only answer by tap —
+breaking "voice and touch always both work". Tools `show()` and return
+the card's `spoken` text as their note; her spoken answer arrives next
+turn and the tool calls `answer(id, ..., source="voice")` — the same
+door a tap uses. `ask()` is for code between turns (initiative, a
+call's own loop). Kept rather than dropped because the coordinator's
+brief asked for it and the between-turns use is real.
+
+**2026-09-25 — A replaced or cleared card is answered as a dismiss
+(`source="code"`), never silently dropped.** One card at a time means
+a `show()` can pull a question out from under an `ask()`; releasing the
+waiter with a dismiss is what keeps "nothing waits on a question she
+can no longer see" true.
+
+**2026-09-25 — While a hold handler is set, `core.py` never hears the
+press.** A short press does nothing at all (no turn, no capture); a
+hold past `seconds` fires once. The alternative — passing the press
+through and starting a turn as well — would open the mic over a live
+call. The timer lives in `server.py` (it owns the loop) and ticks at
+100 ms; `HoldController` only knows the progress and whether it fired.
+Progress is re-issued as the same card id so the browser updates the
+bar in place.
+
+**2026-09-25 — Card tap targets are 112px tall, text floors are
+40/36/32px, digits are grouped in threes.** The brief's minimums are
+100px and 32px; the extra is margin so a rounding or a font swap on
+the Pi can't drop under them. The floors are asserted from computed
+styles in a real 1080p headless Chromium, not from the CSS text.
+Contrast pairs are named tokens in `:root` so the AAA test reads the
+same values the page does.

@@ -846,3 +846,241 @@ async def test_a_media_message_emitted_off_the_loop_thread_reaches_the_client(mo
             media = await _turn_collecting_media(ws, recording, action="search", query="q")
     assert media and media[0]["action"] == "results"
     assert thread_names and "MainThread" not in thread_names
+
+
+# -- cards: shown by a tool through the seam, answered by tap or voice -----
+
+
+def _cards_app(hold_seconds=None, on_hold_complete=None):
+    from saathi.screen.cards import CardController, HoldController, confirm
+
+    cards = CardController()
+    hold = None
+    if hold_seconds is not None:
+        hold = HoldController(cards)
+        hold.set_handler(on_hold_complete or (lambda: None), seconds=hold_seconds, label="Hold")
+
+    class CardSession(FakeSession):
+        """end_turn() shows a card, as a tool would from the executor
+        thread, and returns what the tool would tell the model to say."""
+
+        shown: list[str] = []
+
+        def end_turn(self) -> str:
+            card = confirm("Call Priya, your daughter?")
+            CardSession.shown.append(cards.show(card))
+            return card.spoken
+
+    session = CardSession()
+    CardSession.shown = []
+    core = Core()
+    app = build_app(
+        core,
+        session=session,
+        capture_source_id="fake-aec-source",
+        cards=cards,
+        hold=hold,
+    )
+    return app, session, cards, hold, core
+
+
+async def _turn_collecting_cards(ws, session) -> list[dict]:
+    await ws.send_json({"type": "input", "event": "press"})
+    assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    await ws.send_json({"type": "input", "event": "release"})
+    assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+    cards_seen = []
+    while True:
+        message = await ws.receive_json()
+        if message["type"] == "card":
+            cards_seen.append(message)
+            continue
+        if message["state"] == "idle":
+            break
+    return cards_seen
+
+
+async def test_connecting_with_cards_and_hold_still_yields_exactly_state_then_settings(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, hold, _ = _cards_app(hold_seconds=None)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_cards(ws, session)
+            assert cards.current is not None  # a card is up...
+        async with client.ws_connect("/ws") as fresh:
+            # ...and a fresh connection still gets state, settings, nothing
+            # else -- no card on connect.
+            assert (await _connect(fresh))["type"] == "state"
+            await fresh.send_json({"type": "input", "event": "press"})
+            assert await fresh.receive_json() == {"type": "state", "state": "listening"}
+
+
+async def test_a_card_shown_from_a_turn_reaches_every_client_and_carries_spoken(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            seen = await _turn_collecting_cards(ws, session)
+            seen_by_other = await other.receive_json()
+            while seen_by_other["type"] != "card":
+                seen_by_other = await other.receive_json()
+    assert len(seen) == 1
+    card = seen[0]["card"]
+    assert card["kind"] == "confirm"
+    assert card["id"] == session.shown[0]
+    assert card["title"] == card["spoken"] == "Call Priya, your daughter?"
+    assert seen_by_other == seen[0]
+    assert session.spoken == [card["spoken"]]  # the engine said what the screen shows
+
+
+async def test_a_tap_answers_the_card_clears_it_everywhere_and_reaches_on_answer(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    answers = []
+    cards.on_answer(answers.append)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            seen = await _turn_collecting_cards(ws, session)
+            card_id = seen[0]["card"]["id"]
+            # drain the other client's copy of the whole turn
+            while (await other.receive_json()).get("state") != "idle":
+                pass
+
+            await other.send_json({"type": "card_answer", "id": "stale", "answer": {"yes": True}})
+            await other.send_json({"type": "card_answer", "id": card_id, "answer": {"yes": True}})
+            assert await ws.receive_json() == {"type": "card", "card": None}
+            assert await other.receive_json() == {"type": "card", "card": None}
+    assert len(answers) == 1
+    assert answers[0].card_id == card_id
+    assert answers[0].yes is True
+    assert answers[0].source == "tap"
+    assert cards.current is None
+
+
+async def test_a_voice_answer_goes_through_the_same_door_as_a_tap(monkeypatch):
+    # A tool, on the executor thread, calls cards.answer(..., source="voice")
+    # when she says "yes"; the screen clears the same way.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    answers = []
+    cards.on_answer(answers.append)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            seen = await _turn_collecting_cards(ws, session)
+            card_id = seen[0]["card"]["id"]
+            loop = asyncio.get_running_loop()
+            ok = await loop.run_in_executor(
+                None, lambda: cards.answer(card_id, {"yes": False}, source="voice")
+            )
+            assert ok is True
+            assert await ws.receive_json() == {"type": "card", "card": None}
+    assert [(a.yes, a.source) for a in answers] == [(False, "voice")]
+
+
+async def test_malformed_card_answers_are_dropped_and_the_connection_lives(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            seen = await _turn_collecting_cards(ws, session)
+            card_id = seen[0]["card"]["id"]
+            await ws.send_json({"type": "card_answer", "id": 7, "answer": {"yes": True}})
+            await ws.send_json({"type": "card_answer", "id": card_id, "answer": "yes"})
+            await ws.send_json({"type": "card_answer", "id": card_id})
+            await ws.send_json({"type": "card_answer", "id": card_id, "answer": {"dismiss": True}})
+            assert await ws.receive_json() == {"type": "card", "card": None}
+    assert cards.current is None
+
+
+# -- the hold seam ---------------------------------------------------------
+
+
+async def test_a_short_press_while_a_hold_handler_is_set_does_nothing(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    fired = []
+    app, session, cards, hold, core = _cards_app(
+        hold_seconds=0.5, on_hold_complete=lambda: fired.append(None)
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            first = await ws.receive_json()  # the holding card at 0
+            assert first["type"] == "card" and first["card"]["kind"] == "holding"
+            assert first["card"]["progress"] == 0.0
+            assert first["card"]["title"] == "Hold"
+            await asyncio.sleep(0.15)
+            await ws.send_json({"type": "input", "event": "release"})
+            # Whatever progress ticks arrived, the last thing is the clear.
+            message = await ws.receive_json()
+            while message != {"type": "card", "card": None}:
+                assert message["type"] == "card" and message["card"]["progress"] < 1.0
+                message = await ws.receive_json()
+            await asyncio.sleep(0.6)  # well past the threshold: nothing fires
+    assert fired == []
+    assert core.state == State.SLEEPING  # core.py never heard the press
+    assert session.start_calls == 0
+    assert FakeCapture.instances == []
+    assert cards.current is None
+
+
+async def test_a_press_held_past_the_threshold_fires_once_with_progress_on_the_way(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    fired = []
+    app, session, cards, hold, core = _cards_app(
+        hold_seconds=0.35, on_hold_complete=lambda: fired.append(None)
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            progress = []
+            message = await ws.receive_json()
+            while message != {"type": "card", "card": None}:
+                assert message["type"] == "card"
+                progress.append(message["card"]["progress"])
+                message = await ws.receive_json()
+            assert fired == [None]
+            assert progress[0] == 0.0
+            assert progress == sorted(progress)  # monotonic
+            assert 0.0 < progress[-1] < 1.0  # completion clears rather than showing 1.0
+            # Still holding: nothing more happens, and the release is quiet.
+            await asyncio.sleep(0.2)
+            await ws.send_json({"type": "input", "event": "release"})
+            await asyncio.sleep(0.1)
+            # A second, separate hold fires a second time -- once each.
+            await ws.send_json({"type": "input", "event": "press"})
+            message = await ws.receive_json()
+            while message != {"type": "card", "card": None}:
+                message = await ws.receive_json()
+            assert fired == [None, None]
+            await ws.send_json({"type": "input", "event": "release"})
+    assert core.state == State.SLEEPING
+    assert session.start_calls == 0
+
+
+async def test_with_the_hold_handler_cleared_the_spacebar_is_a_spacebar_again(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    app, session, cards, hold, core = _cards_app(hold_seconds=1.0)
+    hold.clear()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    assert core.state == State.LISTENING
+    assert session.start_calls == 1
