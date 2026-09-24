@@ -11,3 +11,6 @@ __pycache__/
 # in here for testing.
 gcp.json
 *.gcp.json
+
+# Claude Code agent worktrees: local scratch checkouts, never part of the repo
+.claude/worktrees/
