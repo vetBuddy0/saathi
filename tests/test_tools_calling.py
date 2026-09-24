@@ -235,7 +235,7 @@ def test_unsure_shows_a_choice_and_dials_nothing_until_she_answers(tmp_path):
     result = call.handler(contact="Meena")
     assert result["status"] == "unsure" and client.created == []
     card = cards.current
-    assert card.kind == "choice" and set(card.options) == {"Meena", "Mina"}
+    assert card.kind == "choice" and {o.label for o in card.options} == {"Meena", "Mina"}
     assert card.spoken in result["note"] and "the first" in card.spoken
     chosen = card.options[0]
     picked = answer.handler(choice=1)  # "the first one"

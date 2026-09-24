@@ -132,9 +132,14 @@ def test_only_the_card_on_screen_can_be_answered(setup):
 def test_card_builders_match_screens_contract():
     with pytest.raises(TooManyOptions):
         choice("Who?", ["a", "b", "c", "d"])
-    card = readback("Priya's number", "+65 9123 4567")
-    assert card.spoken == "Priya's number: six five nine one two three four five six seven. " \
-        "Is that right?"
+    # Rewritten at reconciliation: this used to pin the stub's invented
+    # default wording. The real builder's default is "plus 6 5, ..." -- and
+    # calling never relies on it: SaveFlow passes its own spoken text and
+    # asks for yes/no, with the caller's grouping kept.
+    card = readback("Priya's number", "+65 9123 4567", spoken="Is that right?",
+                    confirm=True, group=False)
+    assert card.value == "+65 9123 4567" and card.spoken == "Is that right?"
+    assert card.as_message()["confirm"] is True
 
 
 def test_choice_answers_are_one_based_like_screens_cards():

@@ -161,7 +161,7 @@ class SaveFlow:
             if part
         )
         title = f"{_possessive(display_name)} number"
-        card = readback(title, group_for_display(resolved.e164), spoken=spoken)
+        card = readback(title, group_for_display(resolved.e164), spoken=spoken, confirm=True, group=False)
         card_id = self._cards.show(card)
         with self._lock:
             self._pending = {card_id: pending}  # only the card on screen can be answered

@@ -80,6 +80,9 @@ class Card:
     options: tuple[Option, ...] = ()
     value: str | None = None  # readback: the grouped digits / short value
     progress: float | None = None  # holding: 0..1
+    # readback only: the value is a question ("is that right?") answered
+    # yes/no by tap or voice, not just acknowledged. See readback().
+    confirmable: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def as_message(self) -> dict[str, Any]:
@@ -95,6 +98,8 @@ class Card:
             message["value"] = self.value
         if self.progress is not None:
             message["progress"] = self.progress
+        if self.kind == "readback" and self.confirmable:
+            message["confirm"] = True
         return message
 
 
@@ -121,14 +126,39 @@ def confirm(statement: str, spoken: str | None = None) -> Card:
     return Card(kind="confirm", title=statement, spoken=(spoken or statement).strip())
 
 
-def readback(title: str, value: str, spoken: str | None = None) -> Card:
+def readback(
+    title: str,
+    value: str,
+    spoken: str | None = None,
+    *,
+    confirm: bool = False,
+    group: bool = True,
+) -> Card:
     """A single value shown very large. Digits are grouped for the eye;
     `spoken` defaults to the digits read one at a time with a pause at
-    each group, which is how a person reads a number back."""
-    grouped = group_digits(value)
+    each group, which is how a person reads a number back.
+
+    `confirm=True` makes the read-back a question: Yes/No on screen,
+    `{"yes": bool}` accepted by `answer()`. Added at reconciliation for
+    Calling, whose read-back before saving a number IS the question --
+    the option that lost was a Confirm card carrying the number as its
+    statement, which drops the very-large grouped digits a read-back
+    exists for. Off by default: a plain read-back is only acknowledged.
+
+    `group=False`: the caller has grouped the value itself and knows its
+    structure ("+65 9123 4567" -- country code apart); regrouping in threes
+    would give "+659 123 4567". Added at reconciliation for Calling;
+    `group_digits` itself keeps normalising, as its own tests require."""
+    grouped = group_digits(value) if group else " ".join(str(value).split())
     if spoken is None:
         spoken = f"{title.strip()} {speak_value(grouped)}"
-    return Card(kind="readback", title=title.strip(), spoken=spoken.strip(), value=grouped)
+    return Card(
+        kind="readback",
+        title=title.strip(),
+        spoken=spoken.strip(),
+        value=grouped,
+        confirmable=confirm,
+    )
 
 
 def holding(label: str, progress: float = 0.0, card_id: str | None = None) -> Card:
@@ -229,7 +259,12 @@ def validate_answer(card: Card, answer: Any) -> dict[str, Any] | None:
         if isinstance(yes, bool):
             return {"yes": yes}
         return None
-    return None  # readback and holding only take dismiss
+    if card.kind == "readback" and card.confirmable:
+        yes = answer.get("yes")
+        if isinstance(yes, bool):
+            return {"yes": yes}
+        return None
+    return None  # a plain readback and holding only take dismiss
 
 
 class CardController:

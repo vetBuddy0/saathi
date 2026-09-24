@@ -383,3 +383,22 @@ def test_no_timer_anywhere_in_the_cards_module():
     assert "Timer(" not in source
     assert "sleep(" not in source
     assert "call_later" not in source
+
+
+def test_a_confirmable_readback_takes_yes_or_no_and_a_plain_one_does_not():
+    # Reconciliation: Calling's read-back before saving a number is a
+    # question. A plain read-back is still only acknowledged.
+    from saathi.screen.cards import CardController, readback
+
+    cards = CardController()
+    seen = []
+    cards.on_answer(seen.append)
+    plain = readback("Temperature", "37.5")
+    cards.show(plain)
+    assert not cards.answer(plain.id, {"yes": True})
+    asking = readback("Priya's number", "+65 9123 4567", confirm=True, group=False)
+    assert asking.value == "+65 9123 4567"  # caller's grouping kept
+    cards.show(asking)
+    assert not cards.answer(asking.id, {"yes": "yes"})  # never guessed at
+    assert cards.answer(asking.id, {"yes": False}, source="tap")
+    assert seen[-1].yes is False
