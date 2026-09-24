@@ -9,7 +9,9 @@ labels; 4+ raises `TooManyOptions`), `confirm(statement, spoken=None)`,
 `readback(title, value, spoken=None)`; a `CardController` with
 `show(card) -> id`, `clear()`, `answer(id, payload, *, source) -> bool`,
 `on_answer(callback) -> unsubscribe`; and `Answer` with `.card_id .kind
-.choice .yes .dismissed .source`. At merge: replace
+.choice .yes .dismissed .source`. Checked against PR #3 on 2026-09-25:
+callbacks run synchronously on the answering thread after the lock is
+released, and `choice` is **1-based** (`1 <= n <= len(options)`). At merge: replace
 `from saathi.call.cards import ...` with
 `from saathi.screen.cards import ...` and delete this file.
 
@@ -58,7 +60,7 @@ class Card:
 class Answer:
     card_id: str
     kind: str
-    choice: int | None = None
+    choice: int | None = None  # 1-based, as numbered on screen and in speech
     yes: bool | None = None
     dismissed: bool = False
     source: str = "tap"  # "tap" | "voice"
@@ -91,6 +93,19 @@ def readback(title: str, value: str, spoken: str | None = None) -> Card:
     return Card(kind="readback", title=title, spoken=spoken, value=value)
 
 
+def validate_answer(card: Card, payload: dict) -> bool:
+    """PR #3's rule for a choice: `1 <= n <= len(card.options)` — options
+    are numbered from 1 on screen and in speech, and `Answer.choice`
+    carries that same number. `{"choice": 0}` or one past the end is
+    rejected: `answer()` returns False and nothing happens."""
+    if "choice" in payload:
+        n = payload["choice"]
+        if card.kind != "choice" or isinstance(n, bool) or not isinstance(n, int):
+            return False
+        return 1 <= n <= len(card.options)
+    return True
+
+
 class CardController(Protocol):
     def show(self, card: Card) -> str: ...
 
@@ -104,7 +119,9 @@ class CardController(Protocol):
 class FakeCardController:
     """Behaves like the real controller as far as calling can observe:
     one card at a time (`show` replaces), `answer` only for the card on
-    screen, callbacks run synchronously inside `answer`."""
+    screen and only with a valid payload (`validate_answer`), callbacks
+    run synchronously on the answering thread after the lock is
+    released."""
 
     def __init__(self) -> None:
         self.current: Card | None = None
@@ -125,7 +142,7 @@ class FakeCardController:
     def answer(self, card_id: str, payload: dict, *, source: str = "tap") -> bool:
         with self._lock:
             card = self.current
-            if card is None or card.id != card_id:
+            if card is None or card.id != card_id or not validate_answer(card, payload):
                 return False
             self.current = None
             callbacks = list(self._callbacks)

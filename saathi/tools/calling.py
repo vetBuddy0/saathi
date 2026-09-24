@@ -197,7 +197,7 @@ def make_answer_card_tool(cards: CardController, flows: list[_CardFlow]) -> Tool
                 if yes is not None:
                     payload["yes"] = bool(yes)
                 if choice is not None:
-                    payload["choice"] = int(choice) - 1  # she says "first"; cards count from 0
+                    payload["choice"] = int(choice)  # "the first one" is 1, same as the card
                 if not payload:
                     continue
                 if cards.answer(card_id, payload, source="voice"):

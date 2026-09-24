@@ -494,7 +494,7 @@ external consequence; placing a call has one. `answer_card` can finish
 a save or (Stage 3) choose who to ring, so it takes the stronger scope.
 Both are granted in `cli.py` (a proposed diff, not applied).
 
-**2026-09-25 — Cards are a local stub shaped exactly like PR #3's
+~~**2026-09-25 — Cards are a local stub shaped exactly like PR #3's
 `saathi/screen/cards.py`, not an import from `batch/youtube`.** Same
 builders, same `show`/`clear`/`answer`/`on_answer`, same `Answer`
 fields; the swap at merge is one import line. Calling never calls
@@ -502,4 +502,20 @@ fields; the swap at merge is one import line. Calling never calls
 handler. Assumed, to confirm against PR #3: `answer()` runs `on_answer`
 callbacks synchronously, and `{"choice": n}` is zero-based.
 `answer_card` is calling's own voice-answer tool; if SCREEN ships one,
-it wins at merge.
+it wins at merge.~~
+
+
+**2026-09-25 — Correction: card choices are 1-based, not 0-based.**
+Supersedes the stub-assumption entry above. Checked against PR #3's
+`saathi/screen/cards.py`: `validate_answer` accepts only
+`1 <= n <= len(card.options)`, options are numbered 1..3 on screen and
+in speech, and `Answer.choice` carries that same number. My stub
+assumed 0-based and `answer_card` subtracted one — "the first one"
+would have been sent as `{"choice": 0}`, which the real controller
+rejects. Now the stub validates exactly as PR #3 does (`{"choice": 0}`
+and one past the end are refused, nothing happens), `answer_card`
+passes her number through unchanged, and a regression test pins it.
+The other assumption held: `answer()` runs `on_answer` callbacks
+synchronously on the answering thread, after its lock is released.
+Cards remain a local stub of PR #3's shape; calling never calls `ask()`;
+if SCREEN ships its own voice-answer tool it replaces `answer_card`.

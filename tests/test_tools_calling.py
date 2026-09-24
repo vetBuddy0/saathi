@@ -178,3 +178,23 @@ def test_answer_card_with_nothing_pending(tmp_path):
     cards = FakeCardController()
     flow = SaveFlow(_store(tmp_path), cards, lambda: "SG")
     assert make_answer_card_tool(cards, [flow]).handler(yes=True)["status"] == "no_card"
+
+
+def test_answer_card_passes_the_first_one_as_choice_1(tmp_path):
+    from saathi.call.cards import choice as _choice
+
+    cards = FakeCardController()
+    card = _choice("Who?", ["Basudeb", "Vasudev"])
+
+    class _Flow:
+        def pending_card_ids(self):
+            return {card.id}
+
+        def outcome(self, card_id):
+            return None
+
+    seen = []
+    cards.on_answer(seen.append)
+    cards.show(card)
+    result = make_answer_card_tool(cards, [_Flow()]).handler(choice=1)
+    assert result["status"] == "answered" and seen[0].choice == 1

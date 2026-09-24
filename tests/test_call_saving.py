@@ -135,3 +135,23 @@ def test_card_builders_match_screens_contract():
     card = readback("Priya's number", "+65 9123 4567")
     assert card.spoken == "Priya's number: six five nine one two three four five six seven. " \
         "Is that right?"
+
+
+def test_choice_answers_are_one_based_like_screens_cards():
+    cards = FakeCardController()
+    seen = []
+    cards.on_answer(seen.append)
+    card = choice("Who?", ["Basudeb", "Vasudev"])
+    cards.show(card)
+    assert not cards.answer(card.id, {"choice": 0})  # regression: 0 was once "first"
+    assert not cards.answer(card.id, {"choice": 3})  # one past the end
+    assert seen == [] and cards.current is card
+    assert cards.answer(card.id, {"choice": 1}, source="voice")
+    assert seen[0].choice == 1 and seen[0].source == "voice"
+
+
+def test_a_choice_payload_on_a_readback_card_is_rejected():
+    cards = FakeCardController()
+    card = readback("Priya's number", "+65 9123 4567")
+    cards.show(card)
+    assert not cards.answer(card.id, {"choice": 1})
