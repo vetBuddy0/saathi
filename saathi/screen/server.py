@@ -25,7 +25,8 @@ lowers the player's volume on the `state` it already receives
 
 Cards (same day): `{"type": "card", "card": {...} | null}` (server ->
 browser: show this one card, or clear it; emitted by `screen/cards.py`'s
-CardController through the same seam, never on connect) and
+CardController through the same seam, and re-sent to a fresh connection
+while one is up -- see the last paragraph) and
 `{"type": "card_answer", "id": ..., "answer": {...}}` (browser -> server:
 a tap). A voice answer never crosses this socket: it arrives as a tool
 call and the tool calls the same `CardController.answer()`. The hold

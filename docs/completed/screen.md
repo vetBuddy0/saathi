@@ -389,3 +389,35 @@ only, in a panel beside the face"); calls stay out. In the interfaces
 table: `Tool | builtin, stubs, media`. Under "Audio": "AEC covers a
 browser's audio only if its stream is routed through the echo-cancel
 sink; the default sink is set to it for that reason."
+
+
+## Fixed later (2026-09-26)
+
+Reported after the live run: cards vanished, taps didn't register, she
+kept talking after a pick, the player never appeared, titles were
+unreadable. Reproduced in a real headless Chromium against the real
+page and server (node Playwright driving the pre-installed Chromium;
+YouTube itself is unreachable from the build container, so the IFrame
+API and the embed page were stand-ins speaking the same postMessage
+protocol). What was found and changed:
+
+- A tap on the offer card while the three titles were still being read
+  cleared the card and started the video, and the reading carried on.
+  An accepted tap on a card shown by the live turn now ends that turn
+  (`server.py`, `end_turn_answered_on_screen`).
+- A re-search replaces the card with a new id; a tap on the old one is
+  stale and was dropped silently. It is now logged, and the media card's
+  id is the tool's before `show()` (TODO M9).
+- The card was not re-sent on connect, so a reload lost the question.
+- `play` by voice came back through the model with "say one short
+  thing"; it now returns `say: ""` and the turn ends with nothing said.
+- `[hidden]` lost to `.media-results { display: flex }` in the real
+  stylesheet.
+- The panel could wait forever for an API script that loaded but never
+  announced itself, or a wrapper that never called `onReady`; both now
+  fail by deadline with a code, and the next play starts fresh.
+- Search candidates are checked with `videos.list` for
+  `status.embeddable`; a video the player still can't play is
+  re-offered without it, on the card.
+- Titles are cleaned (`clean_title`) and each sentence is read by the
+  voice of its own script.
