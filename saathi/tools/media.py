@@ -6,8 +6,7 @@ swaps an implementation rather than inventing plumbing". This is that
 swap. It keeps the same `Tool` shape, the same registry, the same
 `"music"` permission gate, and replaces the handler. The stub itself is
 left untouched (it is still what `stubs.register()` installs); `cli.py`
-is to register this tool instead -- the exact diff is in
-`docs/completed/screen.md`, not yet applied (cross-territory).
+registers this tool instead.
 
 Why a controller object and not a bare handler: search results have to
 stay referenceable for the rest of the conversation. "Play the second
@@ -48,6 +47,39 @@ Why `urllib` and not `aiohttp` here: the handler is synchronous by
 contract and already off the loop thread; a blocking GET is the simple,
 correct thing. Spinning up an event loop inside the executor to use
 aiohttp would be plumbing for its own sake.
+
+Why a search is two requests, not one (2026-09-26): `search.list`'s
+`videoEmbeddable=true` is a hint the API does not honour reliably --
+the first live run offered a video whose owner had disabled embedding,
+and the player failed on it with nothing on screen to say why. The
+search now asks for ten candidates and checks them with one
+`videos.list?part=status,contentDetails` call (one quota unit), keeping
+only videos that report `embeddable`, aren't private and aren't
+age-restricted (an age-restricted embed demands a sign-in the kiosk
+can't give), then offers the first three. If the status call itself
+fails, the search's own filter is what's left and the fallback is
+logged, not hidden.
+
+Why a play ends the turn with nothing said (2026-09-26): "the second
+one" used to come back through the model with a note asking for one
+short sentence, and the model kept talking over the start of the song.
+Once she has picked, the only right answer is to play it; the tool's
+result now carries `say: ""`, which `cascade.py` treats as "the
+exchange is over, speak nothing" -- no second model call, no sentence.
+The exchange is still recorded (`did`) so the next turn knows what is
+playing. A tap needs nothing here: `screen/server.py` ends the turn
+that was still reading the options when the tap lands.
+
+Why titles are cleaned as hard as they are (2026-09-26): the first live
+search returned "推荐50多岁以上的人真正喜欢的歌曲 ♣ 50首70、80、90年代唱遍
+大街小巷的歌曲今天给大家推荐 , 林淑容 , 李茂山 , 李茂山" and a track listing
+with semicolons, read in full in the English voice. `clean_title` drops
+bracketed runs, symbols and emoji, "(Official Video)"-style boilerplate
+in English and Chinese, track lists, and repeated segments, then caps
+the *width* (a CJK character counts double, as it does on screen and in
+the ear). Which voice reads a title is decided per sentence by script in
+`cascade.py` (`voice/language.py`'s `script_language`), so a Chinese
+title in an English reply is read by the Chinese voice.
 """
 
 from __future__ import annotations
@@ -57,23 +89,31 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from saathi.screen.cards import Answer, CardController, choice, confirm
+from saathi.screen.cards import Answer, Card, CardController, choice, confirm
 from saathi.tools.registry import Tool
+from saathi.voice.language import script_language
 
 logger = logging.getLogger(__name__)
 
 # Three, never more. Read aloud and shown; a fourth would be a list.
 MAX_RESULTS = 3
-# Titles on YouTube run long ("推荐50多岁以上的人真正喜欢的歌曲 ♣ 50首70、
-# 80、90年代..." was the first real result). Trimmed for both screen and
-# speech so a line stays a line and the model doesn't read a paragraph.
-MAX_TITLE_CHARS = 60
+# How many candidates a search asks for before the embeddability check
+# (see the module docstring). Ten is enough that three usually survive
+# and few enough to stay one `videos.list` call.
+SEARCH_CANDIDATES = 10
+# Titles on YouTube run long. Trimmed for both screen and speech so a
+# line stays a line and the model doesn't read a paragraph. Measured in
+# display width: a CJK character counts 2, everything else 1, so a
+# Chinese title is capped at about thirty characters and an English one
+# at sixty -- roughly the same number of syllables either way.
+MAX_TITLE_WIDTH = 60
 
 # Volume is tracked here, not in the browser, so "louder" is
 # deterministic and testable and so a reconnected browser can be told
@@ -87,6 +127,7 @@ MIN_VOLUME = 10
 MAX_VOLUME = 100
 
 _SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 _HTTP_TIMEOUT_SECONDS = 8.0
 
 ACTIONS = (
@@ -105,6 +146,10 @@ ACTIONS = (
 )
 
 CARD_TITLE = "Which one would you like?"
+# The offer again, after the player reported it could not play the one
+# she picked. Shown by the controller between turns, so nothing speaks
+# it; the model learns what happened from the next tool call.
+RETRY_CARD_TITLE = "That one won't play here. Which instead?"
 
 ORDINALS = {1: "One", 2: "Two", 3: "Three"}
 
@@ -144,6 +189,12 @@ class MediaResult:
     def spoken(self) -> str:
         return f"{ORDINALS[self.index]}: {self.title}"
 
+    @property
+    def language(self) -> str:
+        """The language the title is written in, by script: what the
+        voice that reads it should speak."""
+        return script_language(self.title, "english")
+
 
 class MediaSearchError(RuntimeError):
     """The search could not be done -- no key, network, quota, bad
@@ -151,26 +202,118 @@ class MediaSearchError(RuntimeError):
     the model; the technical detail goes to the log."""
 
 
-def clean_title(raw: str) -> str:
-    """Unescape the API's HTML entities (`&amp;`, `&#39;`), collapse
-    whitespace, and trim to `MAX_TITLE_CHARS` at a word boundary where
-    one exists (CJK titles have none; a hard cut is fine there)."""
-    text = html.unescape(raw or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= MAX_TITLE_CHARS:
+# -- titles ---------------------------------------------------------------
+
+# Bracketed runs, ASCII and full-width: "(Official Video)", "[MV]",
+# "【高清】", "（内附歌詞）". Dropped with their contents. Quote-like marks
+# (《》「」『』) wrap the song's own name in Chinese titles, so only the
+# marks go and the words stay.
+_BRACKETED = re.compile(r"[(\[{（［【〔]\s*[^()\[\]{}（）［］【】〔〕]*?\s*[)\]}）］】〕]")
+_QUOTE_MARKS = re.compile(r"[《》〈〉「」『』“”\"]")
+_LATIN_BOILERPLATE = re.compile(
+    r"\b("
+    r"official\s+(?:music\s+)?(?:video|audio|mv|lyrics?\s+video)|official|"
+    r"lyrics?\s+video|with\s+lyrics|lyrics|"
+    r"mv|hd|hq|4k|8k|1080p|720p|"
+    r"full\s+(?:album|song|version)|remaster(?:ed)?|high\s+quality"
+    r")\b",
+    re.IGNORECASE,
+)
+_CJK_BOILERPLATE = re.compile(
+    r"動態歌詞|动态歌词|附歌詞|附歌词|歌詞版|歌词版|字幕版|歌詞|歌词|字幕|"
+    r"高音質|高音质|無損|无损|純音樂|纯音乐|完整版|高清|超清|官方"
+)
+# A track listing: "01 你怎麽説；02 小城故事；03 …", "1. Song 2. Song". A
+# one- or two-digit number, optional mark, whitespace, then something
+# that isn't another digit -- "50首70、80、90年代" has no whitespace after
+# its numbers and is left alone. Two markers make a list; the title is
+# cut before the first one, unless the list is all there is.
+_TRACK_MARKER = re.compile(r"(?<![\w\d])(?:0\d|[1-9]\d?)\s*[.、:：)]?\s+(?=[^\d\s])")
+_SEPARATORS = ",，、;；:："
+# Where a capped title may be cut: a space or a clause break, not "、",
+# which only separates items in a run ("70、80、90年代").
+_STRONG_SEPARATORS = ",，;；:：。"
+_KEEP_PUNCTUATION = set("-,.'&:!?" + _SEPARATORS + "。")
+
+
+def _strip_symbols(text: str) -> str:
+    """Letters, digits, combining marks and spaces stay; so does the
+    punctuation a title needs ("Rock & Roll", "37.5", "Teresa - Live").
+    Everything else -- ♣, ♪, emoji, |, /, ~, #, * -- becomes a space."""
+    out = []
+    for ch in text:
+        category = unicodedata.category(ch)
+        if category[0] in "LNM" or category == "Zs" or ch in _KEEP_PUNCTUATION:
+            out.append(ch)
+        else:
+            out.append(" ")
+    return "".join(out)
+
+
+def _dedupe_segments(text: str) -> str:
+    """"林淑容 , 李茂山 , 李茂山" -> "林淑容, 李茂山"."""
+    parts = [p.strip() for p in re.split(r"\s*[,，;；]\s*", text)]
+    kept: list[str] = []
+    for part in parts:
+        if part and (not kept or part != kept[-1]):
+            kept.append(part)
+    return ", ".join(kept)
+
+
+def title_width(text: str) -> int:
+    """Display width: a wide (CJK) character counts 2."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _cap_width(text: str, max_width: int) -> str:
+    if title_width(text) <= max_width:
         return text
-    cut = text[:MAX_TITLE_CHARS]
-    space = cut.rfind(" ")
-    if space >= MAX_TITLE_CHARS // 2:
-        cut = cut[:space]
-    return cut.rstrip(" ,;:-|–—·♣♧") + "…"
+    width = 0
+    cut = 0
+    for i, ch in enumerate(text):
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if width > max_width:
+            break
+        cut = i + 1
+    head = text[:cut]
+    # Prefer a boundary (a space or a separator) in the second half so a
+    # word or a name isn't sliced through; CJK runs have no spaces and a
+    # hard cut is fine there.
+    boundary = max(head.rfind(ch) for ch in " " + _STRONG_SEPARATORS)
+    if boundary > 0 and title_width(head[:boundary]) >= max_width // 2:
+        head = head[:boundary]
+    return head.rstrip(" " + _SEPARATORS + "。-") + "…"
 
 
-def parse_search_response(body: dict[str, Any]) -> list[MediaResult]:
-    """`search.list` -> at most three `MediaResult`s, numbered from one.
-    Anything that isn't a video with an id and a title is skipped, not
-    an error -- the API's own filtering (`type=video`,
-    `videoEmbeddable=true`) is what's relied on for the rest."""
+def clean_title(raw: str, max_width: int = MAX_TITLE_WIDTH) -> str:
+    """A YouTube title as a person would say it: entities unescaped,
+    bracketed junk, symbols, boilerplate and track lists gone, repeats
+    folded, whitespace collapsed, width capped at a boundary."""
+    text = html.unescape(raw or "")
+    text = _BRACKETED.sub(" ", text)
+    text = _QUOTE_MARKS.sub(" ", text)
+    text = _LATIN_BOILERPLATE.sub(" ", text)
+    text = _CJK_BOILERPLATE.sub(" ", text)
+    text = _strip_symbols(text)
+    markers = list(_TRACK_MARKER.finditer(text))
+    if len(markers) >= 2 and text[: markers[0].start()].strip(" " + _SEPARATORS):
+        text = text[: markers[0].start()]
+    text = _dedupe_segments(text)
+    text = re.sub(r"\s*([,，;；:：])\s*", r"\1 ", text)
+    text = re.sub(r"\s*、\s*", "、", text)  # the enumeration comma takes no space
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.strip(" " + _SEPARATORS + "-|")
+    text = re.sub(r"\s+", " ", text).strip()
+    return _cap_width(text, max_width)
+
+
+# -- the API -----------------------------------------------------------------
+
+
+def parse_search_response(body: dict[str, Any], limit: int = MAX_RESULTS) -> list[MediaResult]:
+    """`search.list` -> at most `limit` `MediaResult`s, numbered from
+    one. Anything that isn't a video with an id and a title is skipped,
+    not an error."""
     results: list[MediaResult] = []
     for item in body.get("items", []):
         video_id = (item.get("id") or {}).get("videoId")
@@ -178,41 +321,99 @@ def parse_search_response(body: dict[str, Any]) -> list[MediaResult]:
         if not video_id or not title:
             continue
         results.append(MediaResult(index=len(results) + 1, video_id=video_id, title=title))
-        if len(results) == MAX_RESULTS:
+        if len(results) == limit:
             break
     return results
 
 
+def playable_video_ids(body: dict[str, Any]) -> list[str]:
+    """`videos.list?part=status,contentDetails` -> the ids the embedded
+    player can be expected to play: `status.embeddable`, not private,
+    not still processing, not age-restricted. A video the response
+    doesn't mention isn't playable either (deleted between the two
+    calls)."""
+    playable: list[str] = []
+    for item in body.get("items", []):
+        video_id = item.get("id")
+        status = item.get("status") or {}
+        details = item.get("contentDetails") or {}
+        rating = details.get("contentRating") or {}
+        if not isinstance(video_id, str):
+            continue
+        if status.get("embeddable") is not True:
+            continue
+        if status.get("privacyStatus") == "private":
+            continue
+        if status.get("uploadStatus") not in (None, "processed"):
+            continue
+        if rating.get("ytRating") == "ytAgeRestricted":
+            continue
+        playable.append(video_id)
+    return playable
+
+
+def _get_json(url: str, what: str) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # The URL carries the key; log the status, never the URL.
+        logger.error("youtube %s failed: HTTP %s", what, exc.code)
+        raise MediaSearchError("YouTube didn't answer just now.") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        logger.error("youtube %s failed: %s", what, type(exc).__name__)
+        raise MediaSearchError("YouTube couldn't be reached just now.") from None
+    if not isinstance(body, dict):
+        logger.error("youtube %s returned a non-object body", what)
+        raise MediaSearchError("YouTube didn't answer just now.")
+    return body
+
+
 def youtube_search(query: str, api_key: str | None = None) -> list[MediaResult]:
-    """One `search.list` GET (100 quota units). Blocking on purpose --
-    see the module docstring."""
+    """One `search.list` GET (100 quota units) for `SEARCH_CANDIDATES`
+    videos, one `videos.list` GET (1 unit) to keep the embeddable ones,
+    the first `MAX_RESULTS` of those. Blocking on purpose -- see the
+    module docstring."""
     key = api_key if api_key is not None else os.environ.get("YOUTUBE_API_KEY")
     if not key:
         raise MediaSearchError("YouTube isn't set up on this device yet.")
     params = {
         "part": "snippet",
         "type": "video",
-        "maxResults": str(MAX_RESULTS),
+        "maxResults": str(SEARCH_CANDIDATES),
         "videoEmbeddable": "true",
         "safeSearch": "moderate",
         "q": query,
         "key": key,
     }
-    url = f"{_SEARCH_URL}?{urllib.parse.urlencode(params)}"
+    body = _get_json(f"{_SEARCH_URL}?{urllib.parse.urlencode(params)}", "search")
+    candidates = parse_search_response(body, limit=SEARCH_CANDIDATES)
+    if not candidates:
+        return []
+    status_params = {
+        "part": "status,contentDetails",
+        "id": ",".join(c.video_id for c in candidates),
+        "key": key,
+    }
     try:
-        with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT_SECONDS) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        # The URL carries the key; log the status, never the URL.
-        logger.error("youtube search failed: HTTP %s", exc.code)
-        raise MediaSearchError("YouTube didn't answer just now.") from None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        logger.error("youtube search failed: %s", type(exc).__name__)
-        raise MediaSearchError("YouTube couldn't be reached just now.") from None
-    if not isinstance(body, dict):
-        logger.error("youtube search returned a non-object body")
-        raise MediaSearchError("YouTube didn't answer just now.")
-    return parse_search_response(body)
+        status_body = _get_json(
+            f"{_VIDEOS_URL}?{urllib.parse.urlencode(status_params)}", "videos.list"
+        )
+    except MediaSearchError:
+        # The search worked; its own videoEmbeddable filter is what's
+        # left. Said in the log so a later "that one won't play" can be
+        # traced here rather than blamed on the player.
+        logger.warning("embeddability check unavailable; offering unchecked search results")
+        playable = [c.video_id for c in candidates]
+    else:
+        playable = playable_video_ids(status_body)
+        dropped = [c.video_id for c in candidates if c.video_id not in playable]
+        if dropped:
+            logger.info("search dropped %d non-embeddable video(s): %s", len(dropped), dropped)
+    kept = [c for c in candidates if c.video_id in playable][:MAX_RESULTS]
+    return [
+        MediaResult(index=i + 1, video_id=c.video_id, title=c.title) for i, c in enumerate(kept)
+    ]
 
 
 Broadcast = Callable[[dict[str, Any]], None]
@@ -257,10 +458,10 @@ class MediaController:
         self.volume = DEFAULT_VOLUME
         self.fullscreen = False
         # Videos the player reported it could not play (region-blocked,
-        # embedding disabled despite videoEmbeddable=true -- common).
-        # Without this, "carry on" after an error re-emits the same
-        # unplayable video forever, each time telling the model "it's
-        # starting now".
+        # embedding disabled despite the status check -- rare now, not
+        # impossible). Without this, "carry on" after an error re-emits
+        # the same unplayable video forever, each time telling the model
+        # "it's starting now".
         self.unplayable: set[str] = set()
 
     def set_broadcast(self, broadcast: Broadcast | None) -> None:
@@ -274,6 +475,25 @@ class MediaController:
         or None. Exposed for the server tests and for whoever needs to
         know a media card is up."""
         return self._card_id
+
+    def _offer_card(self, title: str) -> Card:
+        """Show `last_results` as a card (Choice for two or three, Confirm
+        for one) and return it. The id is remembered *before* `show()`:
+        a tap can land the moment the screen draws the card, and the
+        dismiss `show()` reports for the card it replaces must not be
+        mistaken for the new card's answer (TODO M9, found in review of
+        the calling stream, same shape here)."""
+        results = self.last_results
+        if len(results) >= 2:
+            card = choice(title, [r.title for r in results])
+        else:
+            # One result is a yes/no, not a choice of one (choice()
+            # refuses it, rightly). Found in review: this raised.
+            card = confirm(f"Play {results[0].title}?")
+        self._card_id = card.id
+        assert self._cards is not None
+        self._cards.show(card)
+        return card
 
     def _on_card_answer(self, answer: Answer) -> None:
         """A tap on the media Choice card (or its dismissal, from a tap
@@ -317,23 +537,48 @@ class MediaController:
 
     # -- the browser reporting back ------------------------------------
 
-    def on_browser_event(self, event: str, video_id: str | None = None) -> None:
+    def on_browser_event(
+        self, event: str, video_id: str | None = None, code: str | int | None = None
+    ) -> None:
         """`ended`/`error`/`reset` from the browser. The browser reports,
         it doesn't decide: the controller is the one place media state
         lives, so "play that again" after a video ended still knows
         what "that" was. `reset` is a freshly loaded page saying it has
         no player -- whatever was playing isn't any more; the memory of
         what was offered and last played is kept, so "carry on" starts
-        it again instead of insisting it's already on."""
+        it again instead of insisting it's already on.
+
+        An `error` is never silent: it is logged with the player's
+        code, the video is never offered again, and if it was one of
+        the results on offer, the rest are put back on the card so she
+        sees the device noticed and can pick another -- by tap, or by
+        number on the next turn."""
         if event == "error":
             self.playing = False
             self.paused = False
             failed = video_id or (self.now_playing.video_id if self.now_playing else None)
+            logger.warning("player could not play %s (code %s)", failed, code)
             if failed:
                 self.unplayable.add(failed)
+                self._reoffer_without(failed)
         elif event in ("ended", "reset"):
             self.playing = False
             self.paused = False
+
+    def _reoffer_without(self, failed: str) -> None:
+        if self._cards is None or failed not in {r.video_id for r in self.last_results}:
+            return
+        remaining = [r for r in self.last_results if r.video_id not in self.unplayable]
+        self.last_results = [
+            MediaResult(index=i + 1, video_id=r.video_id, title=r.title)
+            for i, r in enumerate(remaining)
+        ]
+        if self.now_playing is not None and self.now_playing.video_id == failed:
+            self.now_playing = None
+        if self.last_results:
+            self._offer_card(RETRY_CARD_TITLE)
+        else:
+            self._settle_card(None)  # nothing left to offer: no card pretending otherwise
 
     # -- the handler -----------------------------------------------------
 
@@ -392,16 +637,7 @@ class MediaController:
             # it is in media-panel.js without cards): say stop outright.
             self._emit("stop")
         if self._cards is not None:
-            # A replacing show() dismisses any earlier card (including
-            # an earlier media card) through on_answer; stale ids are
-            # ignored there, so set the new id after showing.
-            if len(results) >= 2:
-                card = choice(CARD_TITLE, [r.title for r in results])
-            else:
-                # One result is a yes/no, not a choice of one (choice()
-                # refuses it, rightly). Found in review: this raised.
-                card = confirm(f"Play {results[0].title}?")
-            self._card_id = self._cards.show(card)
+            card = self._offer_card(CARD_TITLE)
             return {
                 "status": "ok",
                 "query": query,
@@ -471,10 +707,12 @@ class MediaController:
         return {
             "status": "ok",
             "playing": result.spoken,
-            "note": (
-                "It's starting now on the screen. Say one short thing, naming it, and "
-                "then stop talking so she can listen."
-            ),
+            # She picked; it plays; nothing needs saying. `say: ""` ends
+            # the turn without a second model call (see the module
+            # docstring); `did` is what the conversation remembers.
+            "say": "",
+            "did": f"Started playing {result.spoken} on the screen.",
+            "note": "It's starting on the screen now. Nothing more is said this turn.",
         }
 
     def _do_play(self, choice: int | None) -> dict[str, Any]:

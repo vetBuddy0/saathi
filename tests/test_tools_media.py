@@ -12,9 +12,10 @@ import pytest
 from saathi.tools import media as media_module
 from saathi.tools.media import (
     DEFAULT_VOLUME,
-    MAX_TITLE_CHARS,
+    MAX_TITLE_WIDTH,
     MAX_VOLUME,
     MIN_VOLUME,
+    RETRY_CARD_TITLE,
     VOLUME_STEP,
     MediaController,
     MediaResult,
@@ -22,16 +23,24 @@ from saathi.tools.media import (
     clean_title,
     make_media_tool,
     parse_search_response,
+    playable_video_ids,
+    title_width,
     youtube_search,
 )
 from saathi.tools.registry import PermissionDenied, Registry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "youtube_search_old_chinese_songs.json"
+VIDEOS_FIXTURE = Path(__file__).parent / "fixtures" / "youtube_videos_status.json"
 
 
 @pytest.fixture
 def fixture_body() -> dict:
     return json.loads(FIXTURE.read_text())
+
+
+@pytest.fixture
+def videos_body() -> dict:
+    return json.loads(VIDEOS_FIXTURE.read_text())
 
 
 @pytest.fixture
@@ -76,14 +85,47 @@ def test_clean_title_unescapes_entities_collapses_whitespace_and_trims():
     assert clean_title("Rock &amp; Roll  \n Hits &#39;60s") == "Rock & Roll Hits '60s"
     long = "word " * 40
     cleaned = clean_title(long)
-    assert len(cleaned) <= MAX_TITLE_CHARS + 1
+    assert title_width(cleaned) <= MAX_TITLE_WIDTH + 1
     assert cleaned.endswith("…")
     assert not cleaned[:-1].endswith(" ")
 
 
-def test_clean_title_trims_a_long_cjk_title_without_a_word_boundary(results):
-    assert len(results[0].title) <= MAX_TITLE_CHARS + 1
+def test_clean_title_caps_a_cjk_title_by_width_so_it_is_as_short_to_say_as_an_english_one(
+    results,
+):
+    # A CJK character is twice as wide on screen and about a syllable
+    # each; the cap is on width, so a Chinese title gets fewer characters.
+    assert title_width(results[0].title) <= MAX_TITLE_WIDTH + 1
+    assert len(results[0].title) <= MAX_TITLE_WIDTH // 2 + 1
     assert results[0].title.endswith("…")
+    assert results[0].title == "推荐50多岁以上的人真正喜欢的歌曲…"  # cut at the space, not mid-run
+
+
+def test_clean_title_strips_bracketed_junk_symbols_and_boilerplate():
+    assert (
+        clean_title("Teresa Teng - The Moon Represents My Heart (Official Video) [HD]")
+        == "Teresa Teng - The Moon Represents My Heart"
+    )
+    assert clean_title("月亮代表我的心 - 鄧麗君【高清】 (内附歌詞)") == "月亮代表我的心 - 鄧麗君"
+    assert clean_title("♪ Old Songs ♣ 50首 ★ 🎵") == "Old Songs 50首"
+    assert clean_title("鄧麗君《月亮代表我的心》官方 MV") == "鄧麗君 月亮代表我的心"
+    assert clean_title("Song Title | Lyrics | Official Music Video") == "Song Title"
+    assert clean_title("Audiophile Mix ~ 4K") == "Audiophile Mix"  # "audio" inside a word stays
+
+
+def test_clean_title_cuts_a_track_listing_and_folds_repeated_names(fixture_body):
+    titles = [clean_title(item["snippet"]["title"]) for item in fixture_body["items"]]
+    assert titles[2] == "鄧麗君傳唱金曲"  # the "(2) (内附歌詞) 01 …；02 …" tail is gone
+    assert titles[1] == "The Moon Represents My Heart - Teresa Teng"  # untouched
+    assert "♣" not in titles[0] and "李茂山, 李茂山" not in titles[0]
+    assert clean_title("林淑容 , 李茂山 , 李茂山", max_width=200) == "林淑容, 李茂山"
+    assert clean_title("Top 10 songs of 1980") == "Top 10 songs of 1980"  # one number: no list
+    assert clean_title("1. Song A 2. Song B") == "1. Song A 2. Song B"  # a list is all there is
+
+
+def test_a_results_language_is_the_language_of_its_title(results):
+    assert results[0].language == "chinese"
+    assert results[1].language == "english"
 
 
 # -- the search call -----------------------------------------------------
@@ -107,32 +149,86 @@ def test_search_http_error_is_a_plain_reason_and_never_logs_the_url(monkeypatch,
     assert "403" in caplog.text
 
 
-def test_search_builds_the_documented_request(monkeypatch, fixture_body):
-    seen = {}
+class _Response:
+    def __init__(self, body):
+        self._body = body
 
-    class Response:
-        def __enter__(self):
-            return self
+    def __enter__(self):
+        return self
 
-        def __exit__(self, *exc):
-            return False
+    def __exit__(self, *exc):
+        return False
 
-        def read(self):
-            return json.dumps(fixture_body).encode()
+    def read(self):
+        return json.dumps(self._body).encode()
+
+
+def _fake_api(monkeypatch, search_body, videos_body):
+    """`urlopen` serving the search fixture to `search.list` and the
+    status fixture to `videos.list`; returns the URLs asked for."""
+    seen: list[str] = []
 
     def fake_urlopen(url, timeout):
-        seen["url"] = url
-        return Response()
+        seen.append(url)
+        if url.startswith(media_module._VIDEOS_URL):
+            if isinstance(videos_body, Exception):
+                raise videos_body
+            return _Response(videos_body)
+        return _Response(search_body)
 
     monkeypatch.setattr(media_module.urllib.request, "urlopen", fake_urlopen)
+    return seen
+
+
+def test_search_builds_the_documented_requests(monkeypatch, fixture_body, videos_body):
+    seen = _fake_api(monkeypatch, fixture_body, videos_body)
     found = youtube_search("old Chinese songs", api_key="k")
-    assert len(found) == 3
-    url = seen["url"]
-    assert url.startswith("https://www.googleapis.com/youtube/v3/search?")
-    assert "maxResults=3" in url
-    assert "type=video" in url
-    assert "videoEmbeddable=true" in url
-    assert "q=old+Chinese+songs" in url
+    assert len(seen) == 2
+    search, videos = seen
+    assert search.startswith("https://www.googleapis.com/youtube/v3/search?")
+    assert "maxResults=10" in search  # candidates, before the embeddability check
+    assert "type=video" in search
+    assert "videoEmbeddable=true" in search
+    assert "q=old+Chinese+songs" in search
+    assert videos.startswith("https://www.googleapis.com/youtube/v3/videos?")
+    assert "part=status%2CcontentDetails" in videos
+    for item in fixture_body["items"]:
+        assert item["id"]["videoId"] in videos
+    assert "key=k" in videos
+    # The status fixture says the first search result has embedding
+    # disabled: it is dropped, the rest renumbered from one.
+    assert [r.video_id for r in found] == ["bv_cEeDlop0", "UB2p17H30ng"]
+    assert [r.index for r in found] == [1, 2]
+
+
+def test_playable_video_ids_keeps_only_what_the_embedded_player_can_play(videos_body):
+    assert playable_video_ids(videos_body) == ["bv_cEeDlop0", "UB2p17H30ng", "embeddable2"]
+    assert playable_video_ids({}) == []
+
+
+def test_search_offers_at_most_three_of_the_playable_candidates(monkeypatch, fixture_body):
+    fixture_body["items"] = fixture_body["items"] * 4  # twelve candidates, ten asked for
+    ids = [item["id"]["videoId"] for item in fixture_body["items"]]
+    status = {
+        "items": [
+            {"id": i, "status": {"embeddable": True, "privacyStatus": "public"}} for i in ids
+        ]
+    }
+    _fake_api(monkeypatch, fixture_body, status)
+    found = youtube_search("q", api_key="k")
+    assert [r.index for r in found] == [1, 2, 3]
+
+
+def test_search_falls_back_to_unchecked_results_when_the_status_call_fails(
+    monkeypatch, fixture_body, caplog
+):
+    error = urllib.error.HTTPError("https://x", 500, "boom", {}, None)
+    seen = _fake_api(monkeypatch, fixture_body, error)
+    found = youtube_search("q", api_key="k")
+    assert len(seen) == 2
+    assert len(found) == 3  # the search's own videoEmbeddable filter is what's left
+    assert "unchecked" in caplog.text
+    assert "key=k" not in caplog.text
 
 
 # -- the controller: results stay referenceable -----------------------------
@@ -635,3 +731,75 @@ def test_without_cards_nothing_changed(results):
     assert sent[-1]["action"] == "results"
     assert controller.card_id is None
     assert controller.handle("never_mind")["status"] == "ok"
+
+
+# -- a pick ends the exchange; a failed play is never silent -----------------
+
+
+def test_play_ends_the_turn_with_nothing_said_and_a_record_of_what_started(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    reply = controller.handle("play", choice=2)
+    assert reply["status"] == "ok"
+    assert reply["say"] == ""  # cascade.py: the exchange is over, speak nothing
+    assert "Two: The Moon Represents My Heart - Teresa Teng" in reply["did"]
+    assert json.dumps(reply)
+    assert controller.handle("again")["say"] == ""
+    assert controller.handle("next")["say"] == ""
+
+
+def test_the_offer_card_is_the_tools_before_the_screen_is_told(results):
+    # A tap can land the instant the card is drawn (TODO M9): the id must
+    # already be the tool's, and the dismiss show() reports for the card
+    # it replaces must not be mistaken for the new card's answer.
+    from saathi.screen.cards import CardController
+
+    seen = {}
+
+    class EagerCards(CardController):
+        def show(self, card):
+            seen["at_show"] = controller.card_id
+            return super().show(card)
+
+    cards = EagerCards()
+    sent: list = []
+    cards.set_broadcast(sent.append)
+    controller = MediaController(search=lambda q: results, broadcast=sent.append, cards=cards)
+    controller.handle("search", query="q")
+    assert seen["at_show"] == controller.card_id == cards.current.id
+    first = controller.card_id
+    controller.handle("search", query="q again")  # replaces: the old card's dismiss is ignored
+    assert controller.card_id == cards.current.id != first
+
+
+def test_a_video_the_player_could_not_play_is_reoffered_not_swallowed(results, caplog):
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    cards.answer(controller.card_id, {"choice": 2}, source="tap")
+    assert sent[-1]["action"] == "play"
+    controller.on_browser_event("error", results[1].video_id, code=150)
+    assert results[1].video_id in caplog.text and "150" in caplog.text
+    card = sent[-1]["card"]
+    assert card["kind"] == "choice" and card["title"] == RETRY_CARD_TITLE
+    assert [o["label"] for o in card["options"]] == [results[0].title, results[2].title]
+    assert controller.card_id == card["id"] == cards.current.id
+    assert controller.now_playing is None and controller.playing is False
+    # A tap on the retry card plays the renumbered second one.
+    cards.answer(card["id"], {"choice": 2}, source="tap")
+    assert sent[-1]["action"] == "play" and sent[-1]["video_id"] == results[2].video_id
+    # That fails too: one left, offered as a yes/no; then nothing left, no card.
+    controller.on_browser_event("error", results[2].video_id, code="no_ready")
+    assert sent[-1]["card"]["kind"] == "confirm"
+    assert sent[-1]["card"]["title"] == f"Play {results[0].title}?"
+    controller.on_browser_event("error", results[0].video_id)
+    assert cards.current is None and controller.card_id is None
+    assert controller.last_results == []
+
+
+def test_an_error_for_a_video_not_on_offer_marks_it_and_offers_nothing(results):
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.on_browser_event("error", "some-other-video", code=100)
+    assert "some-other-video" in controller.unplayable
+    assert not [m for m in sent if m["type"] == "card" and m["card"] is not None][1:]

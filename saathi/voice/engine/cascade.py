@@ -106,7 +106,12 @@ from saathi.identity.compile import compile_context
 from saathi.identity.digest import digest_turn, write_episode
 from saathi.identity.store import IdentityStore
 from saathi.voice.conversation import ConversationMemory, Exchange
-from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve_language
+from saathi.voice.language import (
+    DEFAULT_LANGUAGE,
+    SUPPORTED_LANGUAGES,
+    resolve_language,
+    script_language,
+)
 from saathi.voice.tts import TTSBackend, split_into_sentences
 from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
@@ -241,6 +246,39 @@ def _prefetch_next_chunk(stream) -> "queue.Queue":
 
     threading.Thread(target=_run, daemon=True).start()
     return result
+
+
+@dataclass(frozen=True)
+class _ToolOutcome:
+    """What a tool call turned into: the words to speak (possibly none),
+    and the second completion's token usage (zero when the tool decided
+    the words itself -- see `_continue_after_tool_call`)."""
+
+    reply_text: str
+    silent: bool
+    did: str
+    prompt_tokens: int
+    completion_tokens: int
+
+
+def _group_by_language(sentences: list[str], default: str) -> list[tuple[str, list[str]]]:
+    """Consecutive sentences in the same language, in order."""
+    groups: list[tuple[str, list[str]]] = []
+    for sentence in sentences:
+        language = script_language(sentence, default)
+        if groups and groups[-1][0] == language:
+            groups[-1][1].append(sentence)
+        else:
+            groups.append((language, [sentence]))
+    return groups
+
+
+def _synthesize_by_language(backend: TTSBackend, groups: list[tuple[str, list[str]]]):
+    """One lazy stream over every group's `synthesize_stream`, so
+    `_prefetch_next_chunk` pipelines across a language change exactly
+    as it does within one."""
+    for language, group in groups:
+        yield from backend.synthesize_stream(language, group)
 
 
 def _default_backend_preference() -> str:
@@ -491,6 +529,7 @@ class CascadeSession:
         prompt_tokens += getattr(usage, "prompt_tokens", None) or 0
         completion_tokens += getattr(usage, "completion_tokens", None) or 0
 
+        outcome: _ToolOutcome | None = None
         if message.tool_calls:
             # "The voice engine never executes anything. It emits
             # intent; the core validates; the tool executes" (SPEC.md).
@@ -502,11 +541,10 @@ class CascadeSession:
             # set_language is this project's only real tool so far and
             # nothing exercises multi-call turns yet.
             tool_call = message.tool_calls[0]
-            reply_text, follow_up_prompt_tokens, follow_up_completion_tokens = (
-                self._continue_after_tool_call(messages, message, tool_call)
-            )
-            prompt_tokens += follow_up_prompt_tokens
-            completion_tokens += follow_up_completion_tokens
+            outcome = self._continue_after_tool_call(messages, message, tool_call)
+            reply_text = outcome.reply_text
+            prompt_tokens += outcome.prompt_tokens
+            completion_tokens += outcome.completion_tokens
         else:
             reply_text = (message.content or "").strip()
 
@@ -521,25 +559,54 @@ class CascadeSession:
             len(self._conversation.window),
             len(summary),
         )
+        if outcome is not None and outcome.silent:
+            # The tool ended the exchange itself (`say: ""` -- a song
+            # she picked is starting; there is nothing to add). No
+            # reply, so screen/server.py ends the turn without SPEAKING
+            # and say() is never called: the bookkeeping say() would
+            # have done happens here instead. The exchange is recorded
+            # with what the tool *did*, so the next turn knows.
+            self._pending_exchange = Exchange(user=heard, assistant=outcome.did)
+            self._pending_stt_ms = None
+            self._pending_first_token_ms = None
+            self._pending_prompt_tokens = None
+            self._pending_completion_tokens = None
+            self._after_turn_in_background()
+            return ""
         self._pending_exchange = Exchange(user=heard, assistant=reply_text)
         return reply_text
 
-    def _continue_after_tool_call(
-        self, messages: list[dict], message, tool_call
-    ) -> tuple[str, int, int]:
+    def _continue_after_tool_call(self, messages: list[dict], message, tool_call) -> "_ToolOutcome":
         """Emits the intent to whatever `on_intent()` registered, feeds
         the result back as a normal tool-result message, and asks the
         model once more for the actual words to speak — a tool result
         has no reply text of its own (`message.content` is `None` on the
         first call; confirmed against a real Groq response during item
-        D's bake-off). Returns `(reply_text, prompt_tokens,
-        completion_tokens)` for *this second call only* — the first
-        call's usage is already accounted for by the caller."""
+        D's bake-off). The token counts are for *this second call only*
+        — the first call's usage is already accounted for by the caller.
+
+        One exception (2026-09-26): a result carrying a string `say` has
+        already decided the words. The model is not asked again; `say`
+        is spoken verbatim, and an empty `say` means the exchange is
+        over with nothing said at all (`tools/media.py`'s `play`: she
+        picked a song, it starts, and a sentence over its opening was
+        exactly what the first live run complained about). `did` is
+        then what the conversation window records in place of a reply."""
         arguments = json.loads(tool_call.function.arguments)
         if self._intent_callback is not None:
             result = self._intent_callback(tool_call.function.name, arguments)
         else:
             result = {"status": "error", "detail": "no intent handler registered"}
+
+        say = result.get("say") if isinstance(result, dict) else None
+        if isinstance(say, str):
+            return _ToolOutcome(
+                reply_text=say.strip(),
+                silent=not say.strip(),
+                did=str(result.get("did") or ""),
+                prompt_tokens=0,
+                completion_tokens=0,
+            )
 
         messages.append(
             {
@@ -563,10 +630,12 @@ class CascadeSession:
 
         follow_up = self._client.chat.completions.create(model=_LLM_MODEL, messages=messages)
         follow_up_usage = getattr(follow_up, "usage", None)
-        return (
-            (follow_up.choices[0].message.content or "").strip(),
-            getattr(follow_up_usage, "prompt_tokens", None) or 0,
-            getattr(follow_up_usage, "completion_tokens", None) or 0,
+        return _ToolOutcome(
+            reply_text=(follow_up.choices[0].message.content or "").strip(),
+            silent=False,
+            did="",
+            prompt_tokens=getattr(follow_up_usage, "prompt_tokens", None) or 0,
+            completion_tokens=getattr(follow_up_usage, "completion_tokens", None) or 0,
         )
 
     def _speak(self, text: str) -> None:
@@ -578,7 +647,16 @@ class CascadeSession:
             return
 
         backend = self._current_backend()
-        stream = backend.synthesize_stream(self._last_language, sentences)
+        # Each sentence in the voice of the language it is written in,
+        # not the turn's language for all of them: a YouTube title in
+        # Chinese inside an English reply is read by the Chinese voice
+        # (the same speaker on Chirp; Piper's per-language voice).
+        # Consecutive sentences in one language share one synthesis
+        # stream, so an ordinary single-language reply is exactly one
+        # call, as before. See voice/language.py's script_language.
+        stream = _synthesize_by_language(
+            backend, _group_by_language(sentences, self._last_language)
+        )
         speak_started_at = time.monotonic()
         first_chunk = True
 
