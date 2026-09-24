@@ -44,6 +44,15 @@ rather than guesses:
 Next step: collect five or six real exchanges where it felt wrong,
 with what she said, before changing anything.
 
+**YouTube titles are read and shown raw.** Found in the live check
+2026-09-25: "old Chinese songs" returned titles like "推荐50多岁以上的人真正
+喜欢的歌曲 ♣ 50首70、80、90年代…" and a track listing with semicolons. She
+reads them in full, in the English voice, and they crowd the Choice card;
+the model also garbled a character when repeating one (林淑容 → 林深容).
+Titles need shortening and cleaning (strip emoji/symbols, track lists,
+"(Official Video)"-style suffixes; cap length; keep the artist) before
+they reach the card or the spoken note. `saathi/tools/media.py`.
+
 **Retrieval's relevance axis is live but weak.** ~~Every
 `episodes.embedding` is NULL~~ — resolved 2026-09-25 by PR #2: local
 MiniLM via onnxruntime, embedded between turns. Remaining: under
