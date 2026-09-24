@@ -98,6 +98,39 @@ def test_retrieve_episodes_uses_relevance_when_a_query_embedding_and_real_embedd
     assert top[0]["text"] == "relevant"
 
 
+def test_a_damaged_or_mismatched_embedding_scores_zero_rather_than_raising():
+    # compile_context runs on CascadeSession's constructor thread: one
+    # bad row (a write cut short, or a row from a different-dimension
+    # model after the files were swapped) must not stop a session.
+    query = np.array([1.0, 0.0], dtype=np.float32)
+    episodes = [
+        {"ts": NOW.isoformat(), "text": "truncated", "importance": 1.0, "embedding": b"\x00\x00"},
+        {"ts": NOW.isoformat(), "text": "empty", "importance": 1.0, "embedding": b""},
+        {
+            "ts": NOW.isoformat(),
+            "text": "wrong dimension",
+            "importance": 1.0,
+            "embedding": np.array([1.0, 0.0, 0.0], dtype=np.float32).tobytes(),
+        },
+        {"ts": NOW.isoformat(), "text": "good", "importance": 1.0, "embedding": query.tobytes()},
+    ]
+    top = retrieve_episodes(episodes, now=NOW, query_embedding=query, top_k=1)
+    assert top[0]["text"] == "good"
+
+
+def test_compile_context_survives_a_damaged_newest_embedding(store, base_persona_path):
+    store.append(
+        "episodes", ts=NOW.isoformat(), entity_id=None, text="Fine row.", importance=5.0,
+        embedding=np.array([1.0, 0.0], dtype=np.float32).tobytes(),
+    )
+    store.append(
+        "episodes", ts=(NOW + timedelta(0, 1)).isoformat(), entity_id=None, text="Cut short.",
+        importance=5.0, embedding=b"\x01\x02\x03",
+    )
+    context = compile_context(store, now=NOW, base_persona_path=base_persona_path)
+    assert "Fine row." in context and "Cut short." in context
+
+
 def test_retrieve_episodes_missing_embedding_on_one_episode_still_ranks_the_rest():
     matching = np.array([1.0, 0.0], dtype=np.float32)
     episodes = [
@@ -175,3 +208,85 @@ def test_compile_context_never_leaks_raw_confidence_or_timestamps_into_the_text(
     context = compile_context(store, now=NOW, base_persona_path=base_persona_path)
     assert "0.73" not in context
     assert NOW.isoformat() not in context
+
+
+def test_compile_context_numbers_each_rule_by_its_id_for_the_correction_tool(
+    store, base_persona_path
+):
+    # The one piece of storage that reaches the prompt on purpose: the
+    # model must be able to say *which* belief she said was wrong, and
+    # cascade honours one tool call per turn, so a list-then-retire
+    # two-step can't happen. See compile.py's module docstring.
+    first = store.append(
+        "rules", text="She takes her tablets at eight.", confidence=0.9,
+        learned_at=NOW.isoformat(), active=1,
+    )
+    second = store.append(
+        "rules", text="Her daughter visits on Saturdays.", confidence=0.9,
+        learned_at=NOW.isoformat(), active=1,
+    )
+    context = compile_context(store, now=NOW, base_persona_path=base_persona_path)
+    assert f"[memory {first}] She takes her tablets at eight." in context
+    assert f"[memory {second}] Her daughter visits on Saturdays." in context
+    assert "never say a number aloud" in context
+
+
+def test_compile_context_without_rules_sends_no_memory_number_instructions(
+    store, base_persona_path
+):
+    context = compile_context(store, now=NOW, base_persona_path=base_persona_path)
+    assert "[memory" not in context
+    assert "memory number" not in context
+
+
+def _embedded_episode(store, text, vector, ts=NOW):
+    return store.append(
+        "episodes", ts=ts.isoformat(), entity_id=None, text=text, importance=5.0,
+        embedding=np.array(vector, dtype=np.float32).tobytes(),
+    )
+
+
+def test_compile_context_uses_the_newest_episodes_embedding_as_the_query(
+    store, base_persona_path
+):
+    # No caller passes a query embedding today; "relevant to what was
+    # just discussed" is the newest episode's own vector. Three episodes
+    # of equal recency and importance; with top_k=2 the newest and the
+    # one nearest to it are sent, and the unrelated one is not.
+    _embedded_episode(store, "She likes milky tea.", [1.0, 0.0, 0.0])
+    _embedded_episode(store, "The hospital appointment is at ten.", [0.0, 1.0, 0.0])
+    _embedded_episode(store, "Her scan is on Thursday.", [0.0, 0.9, 0.1], ts=NOW + timedelta(0, 1))
+    context = compile_context(store, now=NOW, base_persona_path=base_persona_path, top_k=2)
+    assert "Her scan is on Thursday." in context
+    assert "The hospital appointment is at ten." in context
+    assert "milky tea" not in context
+
+
+def test_an_explicit_query_embedding_overrides_the_newest_episode(store, base_persona_path):
+    # Same timestamp for all three so recency is flat and only the
+    # query decides. The newest (by id) is the scan; the caller asks
+    # about tea.
+    _embedded_episode(store, "She likes milky tea.", [1.0, 0.0, 0.0])
+    _embedded_episode(store, "The hospital appointment is at ten.", [0.0, 1.0, 0.0])
+    _embedded_episode(store, "Her scan is on Thursday.", [0.0, 0.9, 0.1])
+    context = compile_context(
+        store, now=NOW, base_persona_path=base_persona_path, top_k=1,
+        query_embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+    )
+    assert "milky tea" in context
+    assert "hospital appointment" not in context
+
+
+def test_compile_context_with_a_newest_episode_lacking_an_embedding_degrades_to_no_query(
+    store, base_persona_path
+):
+    _embedded_episode(store, "She likes milky tea.", [1.0, 0.0, 0.0])
+    store.append(
+        "episodes", ts=(NOW + timedelta(0, 1)).isoformat(), entity_id=None,
+        text="Something with no vector yet.", importance=5.0, embedding=None,
+    )
+    # Must not raise, and both are still sent -- ranking on recency +
+    # importance alone, as before embeddings existed.
+    context = compile_context(store, now=NOW, base_persona_path=base_persona_path)
+    assert "milky tea" in context
+    assert "no vector yet" in context

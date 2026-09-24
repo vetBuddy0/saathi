@@ -35,13 +35,16 @@ call nobody can answer (SPEC.md).
 
 **The option that lost:** deriving importance with a heuristic —
 utterance length, keyword lists, whether a date was mentioned — to save
-the call entirely. Rejected because importance is the axis retrieval
-leans on hardest while `embedding` is still NULL everywhere (no
-embedding provider on this account, so `relevance` contributes a flat
-zero — see `compile.retrieve_episodes`). With relevance dead, a
-keyword-counting importance score would effectively *be* the retrieval
-function, and it would rank "I took my tablets" over "the scan is on
-Thursday" for no better reason than sentence length.
+the call entirely. Rejected because importance was the axis retrieval
+leaned on hardest while `embedding` was NULL everywhere (2026-09-24: no
+embedding provider on this account, relevance a flat zero). With
+relevance dead, a keyword-counting importance score would effectively
+*be* the retrieval function, and it would rank "I took my tablets" over
+"the scan is on Thursday" for no better reason than sentence length.
+Relevance is real since 2026-09-25 (`identity/embed.py`, a local ONNX
+model, computed here at write time between turns), and the model-rated
+importance is still the right call: the two axes measure different
+things.
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from saathi.identity.embed import Embedder, embed, to_blob
 from saathi.identity.store import IdentityStore
 from saathi.voice.conversation import Exchange
 
@@ -185,25 +189,36 @@ def write_episode(
     importance: float | None,
     *,
     now: datetime | None = None,
+    embedding: bytes | None = None,
+    embedder: Embedder | None = embed,
 ) -> int:
-    """Append one `episodes` row. `entity_id` and `embedding` are left
-    NULL on purpose, and neither is an oversight:
+    """Append one `episodes` row. `embedding` is the stored vector as
+    float32 bytes; when none is passed, `embedder` computes one from
+    `observation` (the default is `identity/embed.py`'s local ONNX
+    model, which returns `None` — a NULL cell — until its files are on
+    the device, and `backfill_embeddings` fills those later). Pass
+    `embedder=None` to write NULL on purpose: the correction tool does,
+    because it runs inside a turn, where a model must never load.
 
-    - `entity_id` needs entity resolution ("her daughter" -> which
-      `entities` row?), which nothing in this codebase does yet.
-      Guessing one would attach real memories to the wrong person.
-    - `embedding` needs an embedding model. This project's only model
-      provider offers none, and CLAUDE.md rules out adding a vector DB
-      or a second vendor to get one. `retrieve_episodes` already
-      documents the exact consequence — relevance contributes a flat
-      zero and ranking runs on recency + importance — so this degrades
-      along a path that module already describes rather than a new one.
+    Only the cascade's post-`say()` background thread calls this with
+    the default embedder, so the embedding is computed between turns by
+    construction — no change to `cascade.py` was needed for that.
+
+    `entity_id` is left NULL, and that is not an oversight: it needs
+    entity resolution ("her daughter" -> which `entities` row?), which
+    nothing in this codebase does yet — nothing writes `entities` or
+    `edges` at all. Guessing one would attach real memories to the wrong
+    person.
     """
+    if embedding is None and embedder is not None:
+        vector = embedder(observation)
+        if vector is not None:
+            embedding = to_blob(vector)
     return store.append(
         "episodes",
         ts=(now or datetime.now(timezone.utc)).isoformat(),
         entity_id=None,
         text=observation,
         importance=importance,
-        embedding=None,
+        embedding=embedding,
     )

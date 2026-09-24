@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 from saathi.identity.digest import TurnDigest, digest_turn, write_episode
 from saathi.identity.store import IdentityStore
 from saathi.voice.conversation import Exchange
@@ -110,7 +112,11 @@ def test_importance_is_clamped_to_the_1_to_10_scale_not_rejected():
     )
 
 
-def test_write_episode_appends_a_row_with_entity_and_embedding_left_null():
+def test_write_episode_appends_a_row_with_entity_left_null():
+    # Changed 2026-09-25: this used to also pin `embedding is None` as
+    # a deliberate gap. Embeddings are real now (identity/embed.py);
+    # with no model on the machine the default embedder yields None,
+    # which is what CI sees and what tests/conftest.py guarantees here.
     store = _tmp_store()
     now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
     row_id = write_episode(store, "She mentioned her scan is on Thursday.", 7.0, now=now)
@@ -122,9 +128,78 @@ def test_write_episode_appends_a_row_with_entity_and_embedding_left_null():
     assert rows[0]["text"] == "She mentioned her scan is on Thursday."
     assert rows[0]["importance"] == 7.0
     assert rows[0]["ts"] == now.isoformat()
-    # Not oversights -- see write_episode's docstring.
+    # Not an oversight -- see write_episode's docstring.
     assert rows[0]["entity_id"] is None
+    # No model files in the test environment: degraded, not broken.
     assert rows[0]["embedding"] is None
+
+
+def _fake_embedder(text: str) -> np.ndarray:
+    # 4-dim, deterministic: one bucket per topic word, so tests can
+    # reason about which sentence is "near" which without a model.
+    vector = np.zeros(4, dtype=np.float32)
+    for i, word in enumerate(("scan", "hospital", "tea", "garden")):
+        if word in text.lower():
+            vector[i] = 1.0
+    return vector
+
+
+def test_write_episode_stores_the_embedder_output_as_float32_bytes():
+    store = _tmp_store()
+    write_episode(store, "her scan is on Thursday", 5.0, embedder=_fake_embedder)
+    blob = store.read("episodes")[0]["embedding"]
+    store.close()
+    assert isinstance(blob, bytes)
+    assert len(blob) == 4 * 4
+    np.testing.assert_array_equal(np.frombuffer(blob, dtype=np.float32), [1.0, 0.0, 0.0, 0.0])
+
+
+def test_write_episode_with_an_explicit_embedding_does_not_call_the_embedder():
+    calls = []
+
+    def _embedder(text):
+        calls.append(text)
+        return _fake_embedder(text)
+
+    store = _tmp_store()
+    given = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32).tobytes()
+    write_episode(store, "anything", 5.0, embedding=given, embedder=_embedder)
+    assert store.read("episodes")[0]["embedding"] == given
+    store.close()
+    assert calls == []
+
+
+def test_write_episode_with_embedder_none_writes_null_on_purpose():
+    # The correction tool's path: inside a turn, no model may load.
+    store = _tmp_store()
+    write_episode(store, "anything", 5.0, embedder=None)
+    assert store.read("episodes")[0]["embedding"] is None
+    store.close()
+
+
+def test_write_episode_when_the_embedder_yields_none_writes_null():
+    store = _tmp_store()
+    write_episode(store, "anything", 5.0, embedder=lambda _text: None)
+    assert store.read("episodes")[0]["embedding"] is None
+    store.close()
+
+
+def test_stored_embeddings_make_relevance_reorder_retrieval():
+    # The reason embeddings exist: two episodes of equal recency and
+    # importance, and the one about the same topic as the query wins.
+    from saathi.identity.compile import retrieve_episodes
+
+    store = _tmp_store()
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    write_episode(store, "She likes milky tea.", 5.0, now=now, embedder=_fake_embedder)
+    write_episode(store, "Her hospital scan is Thursday.", 5.0, now=now, embedder=_fake_embedder)
+    episodes = store.read("episodes")
+    store.close()
+
+    top = retrieve_episodes(episodes, now=now, query_embedding=_fake_embedder("the scan"), top_k=1)
+    assert "scan" in top[0]["text"]
+    top = retrieve_episodes(episodes, now=now, query_embedding=_fake_embedder("her tea"), top_k=1)
+    assert "tea" in top[0]["text"]
 
 
 def test_a_written_episode_reaches_compiled_context_as_a_plain_sentence():
