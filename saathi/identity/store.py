@@ -99,6 +99,13 @@ _SCHEMA: dict[str, str] = {
     # columns left NULL (a real "we don't have this breakdown for turns
     # logged before this schema existed", not a fabricated split of the
     # old combined engine_ms).
+    #
+    # voice/tts_chars/tts_cost_usd (2026-09-25): which voice pair spoke
+    # the reply, how many characters it synthesized and what that cost,
+    # so the Ctrl+L panel can show spend per voice from real turns
+    # rather than a list price. `cost_usd` stays the LLM half; nothing
+    # sums the two. Added in place by `_migrate_turns_add_voice_usage`;
+    # NULL on every row logged before the columns existed.
     "turns": """
         CREATE TABLE IF NOT EXISTS turns (
             id INTEGER PRIMARY KEY,
@@ -112,7 +119,10 @@ _SCHEMA: dict[str, str] = {
             completion_tokens INTEGER,
             cost_usd REAL,
             handoff INTEGER,
-            engine TEXT
+            engine TEXT,
+            voice TEXT,
+            tts_chars INTEGER,
+            tts_cost_usd REAL
         )
     """,
     "initiatives": """
@@ -185,6 +195,32 @@ def _migrate_turns(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE turns_pre_migration")
 
 
+_TURNS_VOICE_USAGE_COLUMNS = (
+    ("voice", "TEXT"),
+    ("tts_chars", "INTEGER"),
+    ("tts_cost_usd", "REAL"),
+)
+
+
+def _migrate_turns_add_voice_usage(conn: sqlite3.Connection) -> None:
+    """2026-09-25: `voice`, `tts_chars`, `tts_cost_usd` added to `turns`
+    so the panel's per-voice cost comes from real usage. `ALTER TABLE
+    ADD COLUMN`, one per missing column, rather than the rename-and-copy
+    `_migrate_turns` needs -- these are purely additive and SQLite adds
+    a nullable column in place. Runs *after* `_migrate_turns`, which
+    recreates a pre-2026-09-18 table from `_SCHEMA` (already carrying
+    these columns), so a v1 file never reaches this step needing
+    anything and a v2 file gets exactly the three ALTERs. A no-op when
+    the table doesn't exist yet (fresh install: `_SCHEMA` creates it
+    whole) or already has `voice`."""
+    columns = _existing_columns(conn, "turns")
+    if not columns:
+        return
+    for column, column_type in _TURNS_VOICE_USAGE_COLUMNS:
+        if column not in columns:
+            conn.execute(f"ALTER TABLE turns ADD COLUMN {column} {column_type}")
+
+
 class IdentityStore:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
@@ -210,12 +246,14 @@ class IdentityStore:
     def create(self) -> None:
         """Create the schema. Idempotent — safe to call on every startup.
         Also migrates `preferences`/`turns` from their pre-2026-09-18
-        shapes in place, so an existing device's history survives a
-        code update rather than starting over — see
-        `_migrate_preferences`/`_migrate_turns`."""
+        shapes in place, and `turns` from its pre-2026-09-25 shape, so
+        an existing device's history survives a code update rather than
+        starting over — see `_migrate_preferences`/`_migrate_turns`/
+        `_migrate_turns_add_voice_usage`."""
         with self._conn:
             _migrate_preferences(self._conn)
             _migrate_turns(self._conn)
+            _migrate_turns_add_voice_usage(self._conn)
             for statement in _SCHEMA.values():
                 self._conn.execute(statement)
 

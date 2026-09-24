@@ -175,6 +175,15 @@ class TurnTimings:
     prompt_tokens: int | None
     completion_tokens: int | None
     cost_usd: float | None
+    # 2026-09-25, the voice picker: which voice pair spoke the reply,
+    # how many characters it synthesized, and what that cost -- the
+    # TTS half of the turn's spend (`cost_usd` above is the LLM half;
+    # nothing sums them). Optional so a session that doesn't know its
+    # voice contributes nothing rather than a guess; `identity/usage.py`
+    # is the reader.
+    voice: str | None = None
+    tts_chars: int | None = None
+    tts_cost_usd: float | None = None
 
 
 def _no_language_preference() -> str | None:

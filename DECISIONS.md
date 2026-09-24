@@ -450,3 +450,39 @@ drop.
 streaming call has no default deadline in the gapic client; a stalled
 connection would hold a sentence, and the turn, open indefinitely. Ten
 seconds against a measured 0.5–1.7 s per sentence.
+
+**2026-09-25 — A "voice" is a pair: the same speaker in every supported
+language, six entries at most, in `voice/tts/voices.py`.** The user's
+rule, and checkpoint 2's exit condition: pick a voice and she must not
+become a different person when she switches language. Chirp3-HD is the
+only backend in the registry that can offer that structurally (one
+speaker name across `en-US`/`cmn-CN`/`hi-IN`/`bn-IN`), so five of the
+six are Chirp speakers named by Google's own descriptors — Warm
+(Sulafat, the default), Soft (Achernar), Gentle (Vindemiatrix), Mature
+(Gacrux), Bright (Zephyr); all confirmed live, female, in all four
+locales. The sixth is Piper, listed as the offline fallback, not as a
+character. **Neural2 is not a voice**: Google has no Neural2 Mandarin
+voice, so that backend is `en-US-Neural2-C` + `cmn-CN-Wavenet-A`, two
+different people, and cannot meet the rule. It stays in the panel's
+backend row with its list price so the Chirp-vs-Neural2 cost comparison
+the user asked for is still visible; the brief's "compare with Neural2"
+is met there and not as a selectable voice. The option that lost:
+keying the preference by backend id plus a speaker string — that puts
+the pairing rule in JavaScript and lets a stray `tts_backend` row select
+a backend with no pair. The old `tts_backend` preference is still read,
+as a fallback, so a device that picked Chirp before voices existed keeps
+hearing Chirp.
+
+**2026-09-25 — Per-voice cost comes from three new `turns` columns
+(`voice`, `tts_chars`, `tts_cost_usd`), not from a list price.** The
+panel's backend row showed `$30 / 1M chars` and nothing else; "as with
+the backends" in the brief assumed a real-usage figure that was never
+wired (`docs/completed/C-tts-backends.md`). `cost_usd` stays the LLM
+half; nothing sums the two yet. Rows logged before the columns existed
+have `voice` NULL and are not attributed to anyone — "spent so far"
+means since the picker, and the panel says so rather than guessing.
+Added in place by `ALTER TABLE ADD COLUMN`; the aggregation is a Python
+fold in `identity/usage.py` (`IdentityStore.read` is exact-match only
+and adding SQL aggregates to one of the five interfaces is a
+conversation, not a feature). SPEC.md's `turns` line changes; that diff
+is proposed in `docs/completed/voice-picker.md`, not applied.

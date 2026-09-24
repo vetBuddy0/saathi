@@ -128,6 +128,16 @@ _LANGUAGE_CODES = {
     "bengali": "bn-IN",
 }
 
+
+def chirp3_hd_voice_name(speaker: str, language: str) -> str:
+    """Google's full voice name for one Chirp3-HD speaker in one of our
+    languages -- the one place the `<code>-Chirp3-HD-<Speaker>` shape is
+    spelled out, shared by `voice_for()` below and `voices.py`'s panel
+    labels so the two can't drift. Raises `KeyError` on a language
+    outside `_LANGUAGE_CODES`, the same "unavailable and visibly so"
+    rule as `_language_code()`."""
+    return f"{_LANGUAGE_CODES[language]}-Chirp3-HD-{speaker}"
+
 # The Chirp3-HD speaker. One name, every language: that is the whole
 # point of Chirp for this product (see module docstring). Sulafat is a
 # female voice (the persona's default gender) whose one-word descriptor
@@ -339,7 +349,7 @@ class GoogleChirp3HDBackend(_GoogleBackend):
 
     def voice_for(self, language: str) -> tuple[str, str]:
         language_code = self._language_code(language)
-        return f"{language_code}-Chirp3-HD-{self.speaker}", language_code
+        return chirp3_hd_voice_name(self.speaker, language), language_code
 
     def stream_pcm(self, language: str, sentence: str) -> Iterator[bytes]:
         """Raw 16-bit mono PCM at `sample_rate_hz`, one chunk per

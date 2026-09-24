@@ -110,3 +110,72 @@ def test_different_keys_dont_interfere(store):
     write_preference(store, "tts_backend", "piper")
     assert read_preference(store, "language") == "chinese"
     assert read_preference(store, "tts_backend") == "piper"
+
+
+# -- the voice pair (2026-09-25) -------------------------------------------
+
+
+def test_voice_preference_defaults_to_the_default_pair_when_nothing_is_set(store):
+    from saathi.identity.preferences import read_voice_preference
+    from saathi.voice.tts.voices import DEFAULT_VOICE_ID
+
+    assert read_voice_preference(store) == DEFAULT_VOICE_ID
+
+
+def test_voice_preference_round_trips(store):
+    from saathi.identity.preferences import VOICE_KEY, read_voice_preference
+
+    write_preference(store, VOICE_KEY, "soft")
+    assert read_voice_preference(store) == "soft"
+
+
+def test_a_pre_picker_tts_backend_choice_keeps_its_voice(store):
+    # A device that clicked "Google Chirp3-HD" before voices existed
+    # must not silently revert; one that picked Piper stays on Piper.
+    from saathi.identity.preferences import TTS_BACKEND_KEY, read_voice_preference
+
+    write_preference(store, TTS_BACKEND_KEY, "piper")
+    assert read_voice_preference(store) == "plain"
+    write_preference(store, TTS_BACKEND_KEY, "google-chirp3-hd")
+    assert read_voice_preference(store) == "warm"
+
+
+def test_the_voice_key_wins_over_a_legacy_tts_backend_row(store):
+    from saathi.identity.preferences import TTS_BACKEND_KEY, VOICE_KEY, read_voice_preference
+
+    write_preference(store, TTS_BACKEND_KEY, "piper")
+    write_preference(store, VOICE_KEY, "gentle")
+    assert read_voice_preference(store) == "gentle"
+
+
+def test_a_voice_id_that_no_longer_exists_falls_through_not_raises(store):
+    from saathi.identity.preferences import TTS_BACKEND_KEY, VOICE_KEY, read_voice_preference
+    from saathi.voice.tts.voices import DEFAULT_VOICE_ID
+
+    write_preference(store, VOICE_KEY, "removed-pair")
+    assert read_voice_preference(store) == DEFAULT_VOICE_ID
+    write_preference(store, TTS_BACKEND_KEY, "piper")
+    assert read_voice_preference(store) == "plain"  # legacy still consulted
+
+
+def test_threadsafe_voice_reader_works_from_another_thread(store):
+    import threading
+
+    from saathi.identity.preferences import VOICE_KEY, threadsafe_voice_reader
+
+    write_preference(store, VOICE_KEY, "mature")
+    reader = threadsafe_voice_reader(store)
+    result: list = []
+    errors: list = []
+
+    def _run():
+        try:
+            result.append(reader())
+        except Exception as exc:  # pragma: no cover - the failure this test exists to catch
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    thread.join(timeout=5)
+    assert errors == []
+    assert result == ["mature"]

@@ -117,6 +117,14 @@ def _log_turn(store, session, eou_ms: int | None) -> None:
             cost_usd=timings.cost_usd if timings else None,
             handoff=0,
             engine="cascade",
+            # getattr, not attribute access: a session's timings object
+            # predating the voice picker (or a test's own fake) lacks
+            # these, and the broad except below would otherwise swallow
+            # the *whole* row for three columns that are allowed to be
+            # NULL anyway.
+            voice=getattr(timings, "voice", None),
+            tts_chars=getattr(timings, "tts_chars", None),
+            tts_cost_usd=getattr(timings, "tts_cost_usd", None),
         )
     except Exception:
         logger.exception("failed to log turn")

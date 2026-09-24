@@ -429,6 +429,9 @@ class _Timings:
         prompt_tokens=None,
         completion_tokens=None,
         cost_usd=None,
+        voice=None,
+        tts_chars=None,
+        tts_cost_usd=None,
     ):
         self.stt_ms = stt_ms
         self.first_token_ms = first_token_ms
@@ -436,6 +439,9 @@ class _Timings:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.cost_usd = cost_usd
+        self.voice = voice
+        self.tts_chars = tts_chars
+        self.tts_cost_usd = tts_cost_usd
 
 
 async def _run_one_full_turn(ws, capture_ms=0):
@@ -462,6 +468,9 @@ async def test_a_completed_turn_is_logged_with_real_timings(monkeypatch):
             prompt_tokens=120,
             completion_tokens=30,
             cost_usd=0.00021,
+            voice="warm",
+            tts_chars=64,
+            tts_cost_usd=0.00192,
         )
     )
     app = build_app(Core(), session=session, capture_source_id="fake-aec-source", store=store)
@@ -483,6 +492,9 @@ async def test_a_completed_turn_is_logged_with_real_timings(monkeypatch):
     assert row["prompt_tokens"] == 120
     assert row["completion_tokens"] == 30
     assert row["cost_usd"] == 0.00021
+    assert row["voice"] == "warm"
+    assert row["tts_chars"] == 64
+    assert row["tts_cost_usd"] == 0.00192
     assert row["eou_ms"] is not None and row["eou_ms"] >= 20
     assert row["handoff"] == 0
 
@@ -599,3 +611,33 @@ async def test_a_silent_turn_goes_back_to_idle_without_speaking_or_logging(monke
     assert core.state == State.IDLE
     assert session.spoken == []
     assert rows == []
+
+
+async def test_a_timings_object_predating_the_voice_columns_still_logs_the_row(monkeypatch):
+    # A session whose TurnTimings has no voice/tts_chars/tts_cost_usd
+    # (a fake, or a future engine) must still land its row: `_log_turn`
+    # reads the three via getattr, because its broad except would
+    # otherwise drop the whole turn over three nullable columns.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+
+    class _OldTimings:
+        stt_ms = 10
+        first_token_ms = 20
+        first_tts_chunk_ms = 30
+        prompt_tokens = None
+        completion_tokens = None
+        cost_usd = None
+
+    store = _tmp_store()
+    session = TimedFakeSession(_OldTimings())
+    app = build_app(Core(), session=session, capture_source_id="fake-aec-source", store=store)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _run_one_full_turn(ws)
+    rows = store.read("turns")
+    store.close()
+    assert len(rows) == 1
+    assert rows[0]["stt_ms"] == 10
+    assert rows[0]["voice"] is None
