@@ -126,7 +126,7 @@ class CallController:
 
     def shutdown(self) -> None:
         if self.active:
-            self.hangup()
+            self.hangup(wait=True)
         if self._prepared:
             self._relay.stop()
             self._server.stop()
@@ -190,12 +190,25 @@ class CallController:
 
     # -- hang-up (the hold seam) -----------------------------------------------
 
-    def hangup(self) -> None:
+    def hangup(self, wait: bool = False) -> threading.Thread | None:
+        """Tears down at once (mic and sink released, state IDLE), then
+        tells Twilio on a worker thread: the hold seam fires this on the
+        screen server's event loop, which has a 100 ms face budget and
+        must not block on an HTTP request. `wait=True` joins it (tests,
+        the live script, `shutdown()`)."""
         with self._lock:
             sid = self._call_sid
             if sid is None:
-                return
+                return None
             self._teardown_locked()
+        worker = threading.Thread(target=self._complete, args=(sid,), daemon=True)
+        worker.start()
+        if wait:
+            worker.join(timeout=20.0)
+        logger.info("call ended")
+        return worker
+
+    def _complete(self, sid: str) -> None:
         try:
             self._client.complete_call(sid)
         except BaseException as exc:
@@ -203,7 +216,6 @@ class CallController:
             # failed REST hang-up is logged (sanitized) and the far end's
             # own hang-up or Twilio's socket close finishes the job.
             logger.warning("%s", sanitize("complete call", exc))
-        logger.info("call ended")
 
     def _teardown_locked(self) -> None:
         audio, self._audio = self._audio, None

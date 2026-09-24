@@ -54,6 +54,15 @@ class FakeCallAudio:
         self.stopped = True
 
 
+def _wait_for(condition, seconds: float = 2.0) -> None:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "condition not met in time"
+        time.sleep(0.01)
+
+
 @pytest.fixture
 def parts():
     FakeCallAudio.instances.clear()
@@ -126,8 +135,8 @@ def test_a_two_second_hold_hangs_up_and_a_tap_does_nothing(parts):
     assert hold.simulate_hold(0.3) is False  # a single tap during a call
     assert controller.state is CallState.IN_CALL and client.completed == []
     assert hold.simulate_hold(HANGUP_HOLD_SECONDS) is True
-    assert client.completed == [client.next_sid]
-    assert audio.stopped and controller.state is CallState.IDLE
+    assert audio.stopped and controller.state is CallState.IDLE  # torn down at once
+    _wait_for(lambda: client.completed == [client.next_sid])
     assert hold.handler is None
     controller.stream_stopped("MZ1")  # Twilio's stop arrives after: harmless
 
@@ -136,7 +145,7 @@ def test_hangup_survives_a_failing_complete_call(parts):
     controller, client, *_ = parts
     controller.dial_test_number()
     client.fail_with = RuntimeError("https://api.twilio.com/... 500")
-    controller.hangup()  # logs sanitized, does not raise
+    controller.hangup(wait=True)  # logs sanitized, does not raise
     assert controller.state is CallState.IDLE
 
 
@@ -154,7 +163,7 @@ def test_state_changes_are_observable(parts):
     controller.on_state_change = seen.append
     controller.dial_test_number()
     controller.stream_started("MZ1", "CA1", lambda _b: None)
-    controller.hangup()
+    controller.hangup(wait=True)
     assert seen == [CallState.DIALLING, CallState.IN_CALL, CallState.IDLE]
 
 
@@ -195,7 +204,26 @@ async def test_end_to_end_with_a_fake_twilio_peer(parts):
             assert base64.b64decode(message["media"]["payload"]) == outbound
 
             assert hold.simulate_hold(2.0)
-            assert client.completed == [client.next_sid]
+            _wait_for(lambda: client.completed == [client.next_sid])
             await ws.send_json({"event": "stop", "streamSid": "MZ1"})
             await ws.receive()
     assert audio.stopped and controller.state is CallState.IDLE and not controller.active
+
+
+def test_hangup_does_not_block_the_calling_thread_on_twilio(parts):
+    """The hold fires on the screen server's loop: a slow REST hang-up
+    must not hold it."""
+    import time
+
+    controller, client, *_ = parts
+    controller.dial_test_number()
+    release = threading.Event()
+    original = client.complete_call
+    client.complete_call = lambda sid: (release.wait(2.0), original(sid))
+    started = time.monotonic()
+    worker = controller.hangup()
+    assert time.monotonic() - started < 0.2
+    assert controller.state is CallState.IDLE and client.completed == []
+    release.set()
+    worker.join(2.0)
+    assert client.completed == [client.next_sid]

@@ -564,3 +564,11 @@ rings without "Calling X." being said.** The voice path can report
 screen server's loop, which must not block on a Twilio request, and
 nothing may speak outside a turn without reaching through
 `VoiceSession`; the name on the card she just tapped stands in.
+
+**2026-09-25 — Hang-up tears down at once and tells Twilio on a worker
+thread.** Found reviewing the wiring, not in a test: PR #3's
+`HoldController` fires its handler on the screen server's event loop,
+and `complete_call` is a blocking HTTP request with a 15 s timeout — a
+slow Twilio would have frozen the face. The mic and sink are released
+and the state goes IDLE synchronously; only the REST call moves off the
+thread. `hangup(wait=True)` joins it for `shutdown()` and scripts.
