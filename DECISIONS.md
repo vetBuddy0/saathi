@@ -437,3 +437,69 @@ polite "not yet" note.** Brief-given ordering: contacts are not built
 on an audio path that hasn't been heard working. The note is how the
 model is steered to say "Calling the test number." — a tool never
 speaks through `VoiceSession`.
+
+**2026-09-25 — Contacts are `entities` + `edges`, not a new table; the
+convention is recorded in `saathi/call/contacts.py`.** Brief-given, and
+the reason is the product's: the daughter she talks about and the one
+she phones must be one person. `kind="self"` (name `"self"`, lowest id
+wins) is the src of every relationship; `kind="person"` carries the
+phone as JSON in `notes` (`{"phone","country"}` — the only free field);
+`edges(self, person, relation, since, until=None)`. Nothing that builds
+the model's context reads `entities`, so numbers never reach the model.
+
+**2026-09-25 — A wrong number is superseded, not corrected: latest
+wins.** `IdentityStore` is append-only on `main` and `edges` has no id.
+A new number is a new person row with the same (normalised) name; reads
+take the highest id per name and the most recent open edge per
+relation, and a relation resolves to a person *through the name* so an
+old edge still reaches the new number. History stays. Nothing depends
+on the proposed `retire()`; when it lands, superseded edges can get
+`until`.
+
+**2026-09-25 — Country for a number without "plus": stored `country`
+preference, then the device timezone, then language only where it
+names one country (hindi -> IN).** Timezone beat language: a Mandarin
+speaker in Singapore is the case this product exists for, and English,
+Chinese and Bengali each span several countries. The inferred code is
+always *said* on the read-back ("That's a Singapore number, plus six
+five."), and a confirmed save writes the `country` preference so it's
+learned, not configured. No locale at all -> she is asked which
+country. A small country table replaced `phonenumbers` (large new
+dependency for nine countries); any other country works by saying
+"plus".
+
+**2026-09-25 — The model passes the number exactly as she said it; the
+parser does the digits.** Asking the model to normalise lost: a model
+"correcting" a digit is the silent wrong digit the read-back exists to
+prevent. Homophones ("for", "to", "won", "ate") are *not* digits — "the
+number for Priya" would gain a 4 — they are reported as unknown words,
+which lowers confidence and is said back.
+
+**2026-09-25 — Across turns, a number fragment is appended only while
+the draft is too short.** Otherwise new digits replace it (a different
+number) and a restatement from the start replaces it. Found by a test:
+the first version appended a full second number to a complete first
+one. After a "no" on the read-back, the name and relation are kept and
+the whole number is asked for again — re-saying beats naming which
+digit was wrong. Drafts expire after 10 minutes.
+
+**2026-09-25 — A save needs a name *or* a relation, not both.** "Save
+my daughter's number" is complete: the relation is stored as the name
+until she gives one. Asking for a name she didn't volunteer would break
+"ask only for what's actually missing".
+
+**2026-09-25 — `save_contact` needs a new `"contacts"` permission;
+`answer_card` uses `"calls"`.** Saving writes her memory with no
+external consequence; placing a call has one. `answer_card` can finish
+a save or (Stage 3) choose who to ring, so it takes the stronger scope.
+Both are granted in `cli.py` (a proposed diff, not applied).
+
+**2026-09-25 — Cards are a local stub shaped exactly like PR #3's
+`saathi/screen/cards.py`, not an import from `batch/youtube`.** Same
+builders, same `show`/`clear`/`answer`/`on_answer`, same `Answer`
+fields; the swap at merge is one import line. Calling never calls
+`ask()` — it would hold THINKING with the mic closed inside a tool
+handler. Assumed, to confirm against PR #3: `answer()` runs `on_answer`
+callbacks synchronously, and `{"choice": n}` is zero-based.
+`answer_card` is calling's own voice-answer tool; if SCREEN ships one,
+it wins at merge.

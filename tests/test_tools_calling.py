@@ -107,3 +107,74 @@ def test_handler_works_from_a_worker_thread():
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         result = pool.submit(tool.handler, contact="the test number").result(timeout=2.0)
     assert result["status"] == "calling" and len(client.created) == 1
+
+
+# -- Stage 2 -----------------------------------------------------------------
+
+from saathi.call import contacts as _contacts  # noqa: E402
+from saathi.call.cards import FakeCardController  # noqa: E402
+from saathi.call.saving import SaveFlow  # noqa: E402
+from saathi.identity.store import IdentityStore  # noqa: E402
+from saathi.tools.calling import (  # noqa: E402
+    ANSWER_CARD_DESCRIPTION,
+    SAVE_CONTACT_DESCRIPTION,
+    make_answer_card_tool,
+    make_save_contact_tool,
+)
+
+
+def _store(tmp_path):
+    path = tmp_path / "identity.sqlite3"
+    with IdentityStore(path) as store:
+        store.create()
+    return path
+
+
+def test_call_my_daughter_dials_her_saved_number_and_says_her_name(tmp_path):
+    path = _store(tmp_path)
+    _contacts.save_contact(path, "Priya", "+65" + "9123" + "4567", "SG", "daughter")
+    controller, client = _controller()
+    result = make_call_tool(controller, path).handler(contact="my daughter")
+    assert result["status"] == "calling"
+    assert "Calling Priya." in result["note"]
+    assert client.created[0][0] == "+65" + "9123" + "4567"
+    assert not _SECRET_SHAPES.search(repr(result))
+
+
+def test_an_exact_name_dials(tmp_path):
+    path = _store(tmp_path)
+    _contacts.save_contact(path, "Ravi", "+65" + "9876" + "5432", "SG", None)
+    controller, client = _controller()
+    assert make_call_tool(controller, path).handler(contact="ravi")["status"] == "calling"
+
+
+def test_no_match_never_dials_and_offers_to_save(tmp_path):
+    path = _store(tmp_path)
+    controller, client = _controller()
+    result = make_call_tool(controller, path).handler(contact="my sister")
+    assert result["status"] == "no_match" and "offer to save" in result["note"]
+    assert client.created == []
+
+
+def test_voice_save_flow_through_the_tools_from_worker_threads(tmp_path):
+    path = _store(tmp_path)
+    cards = FakeCardController()
+    flow = SaveFlow(path, cards, lambda: "SG")
+    save = make_save_contact_tool(flow)
+    answer = make_answer_card_tool(cards, [flow])
+    assert save.permission == "contacts" and answer.permission == "calls"
+    assert tool_to_openai_schema(save, SAVE_CONTACT_DESCRIPTION)["function"]["name"]
+    assert tool_to_openai_schema(answer, ANSWER_CARD_DESCRIPTION)["function"]["name"]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(save.handler, name="Priya", relation="daughter",
+                            number="nine one two three, four five six seven").result(5)
+        assert first["status"] == "readback" and "plus six five" in first["note"]
+        second = pool.submit(answer.handler, yes=True).result(5)
+    assert second["status"] == "saved"
+    assert _contacts.find_by_relation(path, "daughter").name == "Priya"
+
+
+def test_answer_card_with_nothing_pending(tmp_path):
+    cards = FakeCardController()
+    flow = SaveFlow(_store(tmp_path), cards, lambda: "SG")
+    assert make_answer_card_tool(cards, [flow]).handler(yes=True)["status"] == "no_card"
