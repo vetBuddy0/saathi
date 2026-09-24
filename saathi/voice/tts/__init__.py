@@ -40,8 +40,11 @@ def split_into_sentences(text: str) -> list[str]:
     text = text.strip()
     if not text:
         return []
-    parts = re.split(r"(?<=[.!?])\s+", text)
-    return [p for p in parts if p]
+    # CJK full stops (。！？) end a sentence with no space after them, so
+    # they split on their own; without this a whole Chinese reply was one
+    # chunk (one barge-in window, one voice) -- 2026-09-26.
+    parts = re.split(r"(?<=[.!?])\s+|(?<=[。！？])", text)
+    return [p.strip() for p in parts if p and p.strip()]
 
 
 class TTSBackend(ABC):

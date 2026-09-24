@@ -180,6 +180,15 @@ html, body {
   font-size: 0.9rem;
 }
 
+/* The `hidden` attribute must win over any `display:` rule below: the
+   browser's own `[hidden] { display: none }` loses to an author rule
+   like `.media-results { display: flex }`, which left the results list
+   and the player both drawn at once (found in a real headless Chromium,
+   2026-09-26). */
+[hidden] {
+  display: none !important;
+}
+
 /* Media panel (YouTube stream, 2026-09-25) — the first instance of the
    ambient content layer: search results and the title of what's playing,
    beside the face. The face is in every layout below; there is no rule

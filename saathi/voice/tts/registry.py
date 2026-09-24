@@ -18,6 +18,15 @@ from saathi.voice.tts.piper_backend import PiperBackend
 # `cascade.py` falls back to if the preferred backend is unavailable.
 DEFAULT_BACKEND_ID = "piper"
 
+# What a device with no `tts_backend` preference speaks with (2026-09-26,
+# the user's call: Chirp is the voice; Piper is what's left when Google
+# can't be reached). Two constants on purpose: the fallback is "the one
+# that always works", the default preference is "the one she should
+# hear", and they stopped being the same backend the day Chirp was
+# real. `saathi voice <backend-id>` changes an existing database's
+# preference; a fresh database needs nothing.
+DEFAULT_PREFERRED_BACKEND_ID = "google-chirp3-hd"
+
 
 def default_backends() -> dict[str, TTSBackend]:
     backends: list[TTSBackend] = [

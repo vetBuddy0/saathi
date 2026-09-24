@@ -227,7 +227,9 @@ def offline() -> dict:
 
 
 def test_an_api_script_that_fails_to_load_reports_an_error_and_frees_the_panel(offline):
-    assert offline["error_sent"] == [{"type": "media_event", "event": "error", "video_id": "vidA"}]
+    assert offline["error_sent"] == [
+        {"type": "media_event", "event": "error", "video_id": "vidA", "code": "api"}
+    ]
     assert offline["classes_after"] == []
     assert offline["iframes_after"] == 0
     assert offline["second_play_started"] is True
@@ -315,7 +317,9 @@ def test_a_real_ending_is_reported_and_clears_the_panel(ended):
 
 
 def test_an_unplayable_video_is_reported_with_its_id(ended):
-    assert ended["error_sent"] == [{"type": "media_event", "event": "error", "video_id": "vidA"}]
+    assert ended["error_sent"] == [
+        {"type": "media_event", "event": "error", "video_id": "vidA", "code": 150}
+    ]
 
 
 def test_plays_before_the_api_is_ready_are_not_swallowed(pending):
@@ -323,3 +327,215 @@ def test_plays_before_the_api_is_ready_are_not_swallowed(pending):
     assert pending["before_ready"] == []
     assert pending["after_ready"] == [["setVolume", 70], ["loadVideoById", "vidB"]]
     assert pending["third"] == [["loadVideoById", "vidC"], ["setVolume", 70], ["playVideo"]]
+
+
+# -- a player that never becomes usable fails out loud (2026-09-26) ---------
+#
+# The kiosk's report was "the play command reaches the page but no iframe
+# is visible". Two ways that happened silently: the API script arrived
+# but never announced itself, and the wrapper never called onReady --
+# `attaching` then stayed true and every later play queued behind it.
+# Both now end in a `media_event` error with a code, and the next play
+# starts fresh.
+
+_STUCK_PLAYER_SCENARIO = """
+import { createMediaPanel } from "%(panel)s";
+// A wrapper that never becomes ready.
+window.YT = { Player: class { constructor() {} setVolume() {} playVideo() {} } };
+const sent = [];
+const panel = createMediaPanel((m) => sent.push(m), { readyTimeoutMs: 50 });
+const out = {};
+const until = (pred) => new Promise((r) => {
+  const tick = () => (pred() ? r() : setTimeout(tick, 5));
+  tick();
+});
+const play = (id) => panel.onMessage({ type: "media", action: "play", video_id: id, title: id,
+  index: 1, volume: 70, fullscreen: false });
+play("vidA");
+out.iframe_while_waiting = document.querySelectorAll("iframe").length;
+await until(() => sent.some((m) => m.event === "error"));
+out.error_sent = sent.filter((m) => m.event === "error");
+out.classes_after = Array.from(document.body.classList);
+out.iframes_after = document.querySelectorAll("iframe").length;
+// A working wrapper now: the next play is not queued behind the dead one.
+window.YT = {
+  Player: class {
+    constructor(el, o) { setTimeout(() => o.events.onReady({ target: this }), 0); }
+    setVolume() {}
+    playVideo() { window.played = true; }
+    loadVideoById() {}
+  },
+};
+play("vidB");
+await until(() => window.played === true);
+out.second_play_started = true;
+out.iframes_now = document.querySelectorAll("iframe").length;
+document.body.dataset.out = JSON.stringify(out);
+"""
+
+_MUTE_API_SCENARIO = """
+import { createMediaPanel } from "%(panel)s";
+// An API script that loads (a real file) but never calls
+// onYouTubeIframeAPIReady -- a captive portal's page, a partial download.
+const sent = [];
+const panel = createMediaPanel((m) => sent.push(m), { iframeApiSrc: "%(mute)s", apiTimeoutMs: 50 });
+const out = {};
+const until = (pred) => new Promise((r) => {
+  const tick = () => (pred() ? r() : setTimeout(tick, 5));
+  tick();
+});
+panel.onMessage({ type: "media", action: "play", video_id: "vidA", title: "A", index: 1,
+  volume: 70, fullscreen: false });
+await until(() => sent.some((m) => m.event === "error"));
+out.error_sent = sent.filter((m) => m.event === "error");
+out.iframes_after = document.querySelectorAll("iframe").length;
+out.classes_after = Array.from(document.body.classList);
+document.body.dataset.out = JSON.stringify(out);
+"""
+
+_ERROR_BEFORE_READY_SCENARIO = (
+    _STUB_YT
+    + """
+import { createMediaPanel } from "%(panel)s";
+// Embedding disabled: some embeds error before they are ever ready.
+const Orig = window.YT.Player;
+let constructions = 0;
+window.YT.Player = class extends Orig {
+  constructor(el, o) {
+    constructions += 1;
+    if (constructions === 1) {
+      // The first embed errors before it is ready; later ones are fine.
+      super(el, { events: { ...o.events, onReady: () => {} } });
+      setTimeout(() => o.events.onError({ data: 150 }), 0);
+    } else {
+      super(el, o);
+    }
+  }
+};
+const sent = [];
+const panel = createMediaPanel((m) => sent.push(m));
+"""
+    + _COMMON
+    + """
+panel.onMessage(playMsg("vidA", "A", 1));
+await tick(); await tick();
+out.error_sent = sent.filter((m) => m.event === "error");
+out.iframes_after = document.querySelectorAll("iframe").length;
+window.calls.length = 0;
+panel.onMessage(playMsg("vidB", "B", 2));
+await tick(); await tick();
+out.iframes_now = document.querySelectorAll("iframe").length;
+out.second_is_fresh = window.calls.filter((c) => c[0] === "new").length;
+document.body.dataset.out = JSON.stringify(out);
+"""
+)
+
+
+@pytest.fixture(scope="module")
+def stuck() -> dict:
+    return run_module_script(_STUCK_PLAYER_SCENARIO % {"panel": module_url("media-panel.js")})
+
+
+@pytest.fixture(scope="module")
+def mute_api() -> dict:
+    return run_module_script(
+        _MUTE_API_SCENARIO
+        % {"panel": module_url("media-panel.js"), "mute": module_url("media-policy.js")}
+    )
+
+
+@pytest.fixture(scope="module")
+def error_before_ready() -> dict:
+    return run_module_script(_ERROR_BEFORE_READY_SCENARIO % {"panel": module_url("media-panel.js")})
+
+
+def test_a_player_that_never_becomes_ready_is_reported_and_the_next_play_starts_fresh(stuck):
+    assert stuck["iframe_while_waiting"] == 1
+    assert stuck["error_sent"] == [
+        {"type": "media_event", "event": "error", "video_id": "vidA", "code": "no_ready"}
+    ]
+    assert stuck["classes_after"] == []
+    assert stuck["iframes_after"] == 0
+    assert stuck["second_play_started"] is True
+    assert stuck["iframes_now"] == 1
+
+
+def test_an_api_script_that_loads_but_never_announces_itself_is_an_error_by_deadline(mute_api):
+    assert mute_api["error_sent"] == [
+        {"type": "media_event", "event": "error", "video_id": "vidA", "code": "api"}
+    ]
+    assert mute_api["iframes_after"] == 0
+    assert mute_api["classes_after"] == []
+
+
+def test_an_embed_that_errors_before_it_is_ready_is_reported_and_thrown_away(
+    error_before_ready,
+):
+    assert error_before_ready["error_sent"] == [
+        {"type": "media_event", "event": "error", "video_id": "vidA", "code": 150}
+    ]
+    assert error_before_ready["iframes_after"] == 0
+    assert error_before_ready["iframes_now"] == 1
+    assert error_before_ready["second_is_fresh"] == 1
+
+
+# -- the player has a size, beside the face, with the real stylesheet -------
+
+_SIZED_SCENARIO = (
+    _STUB_YT
+    + """
+import { createMediaPanel } from "%(panel)s";
+const panel = createMediaPanel(() => {});
+"""
+    + _COMMON
+    + """
+const rect = (sel) => { const el = document.querySelector(sel); if (!el) return null;
+  const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width,
+  height: r.height, bottom: r.bottom }; };
+const display = (sel) => getComputedStyle(document.querySelector(sel)).display;
+const results = [
+  { index: 1, label: "One", title: "A", video_id: "vidA" },
+  { index: 2, label: "Two", title: "B", video_id: "vidB" },
+  { index: 3, label: "Three", title: "C", video_id: "vidC" },
+];
+panel.onMessage({ type: "state", state: "idle" });
+panel.onMessage({ type: "media", action: "results", query: "q", results });
+out.results_view = { results: display(".media-results"), player: display(".media-player") };
+panel.onMessage(playMsg("vidA", "A", 1));
+await tick(); await tick();
+out.player_view = { results: display(".media-results"), player: display(".media-player") };
+out.iframe = rect("iframe.media-player__iframe");
+out.frame = rect(".media-player__frame");
+out.face = rect("#face-container");
+out.viewport = { width: window.innerWidth, height: window.innerHeight };
+document.body.dataset.out = JSON.stringify(out);
+"""
+)
+
+
+@pytest.fixture(scope="module")
+def sized() -> dict:
+    from tests.chromium_harness import stylesheet_link
+
+    return run_module_script(
+        _SIZED_SCENARIO % {"panel": module_url("media-panel.js")},
+        body_html=stylesheet_link() + '<div id="face-container"></div>',
+    )
+
+
+def test_the_iframe_is_created_with_a_real_size_beside_the_face(sized):
+    assert sized["viewport"]["width"] == 1920  # the kiosk's width; headless trims the height
+    iframe = sized["iframe"]
+    assert iframe is not None
+    assert iframe["width"] > 600 and iframe["height"] > 300
+    assert abs(iframe["width"] / iframe["height"] - 16 / 9) < 0.05
+    assert iframe["left"] >= 960  # the right half; the face keeps the left
+    assert iframe["bottom"] <= sized["viewport"]["height"] and iframe["top"] >= 0
+    assert sized["face"]["width"] > 0 and sized["face"]["left"] == 0
+
+
+def test_hidden_views_are_really_hidden_with_the_real_stylesheet(sized):
+    # `hidden` used to lose to `.media-results { display: flex }`: the
+    # results list and the player were both drawn at once.
+    assert sized["results_view"] == {"results": "flex", "player": "none"}
+    assert sized["player_view"] == {"results": "none", "player": "flex"}
