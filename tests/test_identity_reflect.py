@@ -145,3 +145,33 @@ def test_reflect_asks_one_insights_call_per_proposed_question(store):
     )
     reflect(store, client=client, now=NOW)
     assert len(client.calls) == 3  # 1 questions call + 2 insights calls
+
+
+def test_retired_rules_reach_the_insights_prompt_as_known_wrong(store):
+    # A correction must survive reflection: the retired rule's source
+    # episode is still there, so the model is told what she struck out.
+    _add_episode(store, "Her daughter Priya visits on Saturdays.", hours_ago=1)
+    rule_id = store.append(
+        "rules", text="Her daughter Priya visits on Saturdays.", confidence=0.9,
+        learned_at=NOW.isoformat(), source_episode=None, active=1,
+    )
+    store.retire("rules", rule_id, NOW)
+    client = FakeReflectionClient([{"questions": ["q"]}, {"insights": []}])
+    reflect(store, client=client, now=NOW)
+    insights_prompt = client.calls[1]["messages"][0]["content"]
+    assert "WRONG" in insights_prompt
+    assert "- Her daughter Priya visits on Saturdays." in insights_prompt
+    assert str(rule_id) not in insights_prompt.split("WRONG")[1]  # sentences, never ids
+
+
+def test_active_rules_are_not_listed_as_wrong(store):
+    _add_episode(store, "one", hours_ago=1)
+    store.append(
+        "rules", text="She takes her tablets at eight.", confidence=0.9,
+        learned_at=NOW.isoformat(), source_episode=None, active=1,
+    )
+    client = FakeReflectionClient([{"questions": ["q"]}, {"insights": []}])
+    reflect(store, client=client, now=NOW)
+    insights_prompt = client.calls[1]["messages"][0]["content"]
+    assert "WRONG" not in insights_prompt
+    assert "tablets" not in insights_prompt

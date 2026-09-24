@@ -1,6 +1,10 @@
 """identity/profile.py — the family-visible view over what Saathi has
-learned. list_rules()/describe_rule() are real; retract_rule() is a
-real, documented gap (RetractionNotSupported), not a silent no-op.
+learned. list_rules()/describe_rule() fold in provenance; retract_rule()
+is real since 2026-09-25 (IdentityStore.retire), where before it raised
+RetractionNotSupported. The retraction test below changed with it --
+the old one pinned "raises, and active stays 1", which was the
+behaviour then and is not the behaviour now (see
+docs/completed/memory.md, "Tests whose expectations changed").
 """
 
 import tempfile
@@ -8,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from saathi.identity.profile import RetractionNotSupported, describe_rule, list_rules, retract_rule
-from saathi.identity.store import IdentityStore
+from saathi.identity.profile import describe_rule, list_rules, retract_rule
+from saathi.identity.store import IdentityStore, UnknownRow
 
 
 @pytest.fixture
@@ -90,15 +94,19 @@ def test_describe_rule_returns_the_rule_with_provenance(store):
     assert described["source_text"] == "the source episode text"
 
 
-def test_retract_rule_raises_retraction_not_supported(store):
+def test_retract_rule_makes_the_rule_inactive_but_keeps_it_reviewable(store):
     rule_id = store.append(
         "rules", text="a rule", confidence=0.9, learned_at="now",
         source_episode=None, active=1,
     )
-    with pytest.raises(RetractionNotSupported) as exc_info:
-        retract_rule(store, rule_id)
-    assert exc_info.value.rule_id == rule_id
+    retract_rule(store, rule_id)
 
-    # And, crucially, nothing was silently changed.
-    rules = store.read("rules", id=rule_id)
-    assert rules[0]["active"] == 1
+    assert store.read("rules", id=rule_id)[0]["active"] == 0
+    # Gone from what she hears, still visible to the family.
+    assert list_rules(store) == []
+    assert [r["id"] for r in list_rules(store, include_inactive=True)] == [rule_id]
+
+
+def test_retract_rule_with_a_stale_id_raises_not_silently_succeeds(store):
+    with pytest.raises(UnknownRow):
+        retract_rule(store, 999)

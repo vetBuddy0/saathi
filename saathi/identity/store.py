@@ -1,5 +1,5 @@
 """`IdentityStore` — one of the five interfaces. SQLite, the schema from
-SPEC.md, and nothing but `create`, `append`, `read`.
+SPEC.md, and four verbs: `create`, `append`, `read`, `retire`.
 
 This is deliberately not a repository with one method per table. SPEC.md's
 "Memory" section draws the real boundary: *stored* is rows, confidence and
@@ -10,15 +10,41 @@ family-editable view (`profile.py`) all build on top of `append`/`read` —
 none of that domain logic belongs here, or checkpoint 1's "nothing but
 create, append and read" stops meaning anything.
 
+**Why `retire` exists (2026-09-25), and what it deliberately is not.**
+Checkpoints 1 through 3 ran on `create`/`append`/`read` alone, and three
+real features hit the same wall: retracting a learned rule
+(`rules.active`), silencing a reminder (`reminders.active`), and ending
+a relationship (`edges.until`). `preferences` got around it by becoming
+an append-only log where the latest row wins, but that doesn't transfer:
+a family member retracting rule #47 needs *that row* to stop being
+believed, not "the latest rule about this topic." Two shapes were on the
+table (`docs/completed/checkpoint-3.md`): (a) one narrow primitive on
+the interface, or (b) append-only event tables per flag
+(`rule_retractions`, `reminder_completions`, ...) with every reader
+computing effective state. (b) lost: it keeps the interface untouched at
+the cost of three more tables and read-side logic in every consumer
+(`compile.py`, `profile.py`, `initiative/policy.py`), and it makes the
+one question that matters — "does the device still believe this?" —
+answerable only by a join. The user chose (a). `retire(table, row_id,
+at)` is that primitive and nothing more: it marks one row as having
+stopped being true. It is not `update()`; it takes no column name and
+no value, and it refuses tables that have no notion of "no longer
+true". An append-only store that cannot be corrected is worse than one
+that forgets — a device holding a wrong belief about an elderly person
+with no way to fix it is the worst failure this product has.
+
 One SQLite file on the device, not a service — "the identity file is the
 product's asset and lives where the device is" (SPEC.md). `embedding` is
-stored as a BLOB; `sqlite-vec` or brute-force numpy cosine (checkpoint 3)
-both read it back the same way, so nothing here needs to know which.
+a BLOB of little-endian float32 (`identity/embed.py` writes it,
+`identity/compile.py` reads it back with `np.frombuffer`); `sqlite-vec`
+or brute-force numpy cosine both read it the same way, so nothing here
+needs to know which.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +170,43 @@ class UnknownTable(ValueError):
     call sites in this codebase, never from user input, but `append`/`read`
     interpolate them into SQL and a typo should fail loudly, not silently
     query nothing or open an injection seam."""
+
+
+class NotRetirable(ValueError):
+    """Raised by `retire()` for a table that exists but has no notion of
+    "stopped being true" — `episodes`, `preferences`, `turns`,
+    `initiatives`, `entities`. A silent no-op here would be exactly the
+    failure `retire` exists to prevent: a caller believing a wrong belief
+    was corrected when nothing changed."""
+
+
+class UnknownRow(LookupError):
+    """Raised by `retire()` when `row_id` matches nothing. Loud on purpose:
+    a correction aimed at a stale or mistyped id must not look like it
+    succeeded. Retiring an already-retired row is *not* an error —
+    "this stopped being true" said twice is still true."""
+
+    def __init__(self, table: str, row_id: int) -> None:
+        super().__init__(f"no row {row_id} in {table}")
+        self.table = table
+        self.row_id = row_id
+
+
+# What `retire` does per table: the SQL that sets the "no longer true"
+# marker, the key column, and whether `at` is written. The key is `id`
+# where the schema has one and SQLite's implicit `rowid` for `edges`,
+# which SPEC.md defines with no primary key. `rules`/`reminders` have no
+# column to hold *when* they were retired, so `at` is only written for
+# `edges` -- a `retired_at` column is a schema question for SPEC.md, not
+# something this primitive invents.
+_RETIREMENT: dict[str, tuple[str, str, bool]] = {
+    "rules": ("active = 0", "id", False),
+    "reminders": ("active = 0", "id", False),
+    # COALESCE: the first end date stands. Retiring an already-ended
+    # relationship again must not move when it ended, or "idempotent"
+    # would be true for the flag tables and false for this one.
+    "edges": ("until = COALESCE(until, ?)", "rowid", True),
+}
 
 
 def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -281,6 +344,38 @@ class IdentityStore:
             params = tuple(filters.values())
         rows = self._conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    def retire(self, table: str, row_id: int, at: datetime | str) -> None:
+        """Mark one row as having stopped being true. `rules` and
+        `reminders`: `active` becomes 0. `edges`: `until` becomes `at`.
+        Nothing is deleted and nothing else on the row changes — what was
+        once believed stays readable (`profile.py`'s `include_inactive`),
+        which is the point of retiring rather than deleting.
+
+        `row_id` is the row's `id` for `rules`/`reminders` and its SQLite
+        `rowid` for `edges` (no `id` column). `read()` is `SELECT *`,
+        which never includes an implicit `rowid`, so today nothing can
+        obtain an edge's row id through this interface; the branch exists
+        so the primitive is complete, and the gap is recorded in
+        `docs/completed/memory.md`.
+
+        Raises `UnknownTable` for a table outside the schema,
+        `NotRetirable` for one with nothing to retire, and `UnknownRow`
+        when `row_id` matches nothing. Idempotent otherwise.
+        """
+        if table not in _SCHEMA:
+            raise UnknownTable(table)
+        if table not in _RETIREMENT:
+            raise NotRetirable(table)
+        assignment, key_column, takes_at = _RETIREMENT[table]
+        at_text = at.isoformat() if isinstance(at, datetime) else str(at)
+        params: tuple[Any, ...] = (at_text, row_id) if takes_at else (row_id,)
+        with self._conn:
+            cursor = self._conn.execute(
+                f"UPDATE {table} SET {assignment} WHERE {key_column} = ?", params
+            )
+        if cursor.rowcount == 0:
+            raise UnknownRow(table, row_id)
 
     def close(self) -> None:
         self._conn.close()

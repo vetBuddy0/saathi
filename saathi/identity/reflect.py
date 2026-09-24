@@ -36,6 +36,17 @@ number that looks precise but isn't: `min(1.0, num_cited_episodes / 3)`
 — an insight grounded in more of the retrieved episodes gets a higher
 confidence, capped at 1.0. Simple, stated plainly, not dressed up.
 
+Since 2026-09-25 a reflection pass is also told which rules she has
+retired (`IdentityStore.retire`, via `identity/correction.py` or
+`profile.retract_rule`), as sentences in the insights prompt. Without
+that, a correction is undone by the next pass: the retired rule's source
+episode is still there and the correction episode names the wrong
+belief, so the model re-derives it as a fresh active rule. The option
+that lost: a deterministic post-filter dropping insights that overlap a
+retired rule's words — it would also drop the *corrected* version
+("Priya visits on Sundays" against a retired "Priya visits on
+Saturdays"), which is exactly the rule that should be learned next.
+
 Never runs during a turn, same rule as `compile.py` — this is
 explicitly a background/maintenance pass (`initiative/scheduler.py` or
 a future cron-like trigger calls it), not something `cascade.py` ever
@@ -80,6 +91,18 @@ Question: {question}
 
 Statements:
 {statements}
+{retired}"""
+
+# Appended to the insights prompt only when there is something to say.
+# Without it, a correction is undone by the next reflection pass: the
+# retired rule's source episode is still in `episodes`, and the
+# correction episode names the wrong belief verbatim, so the model
+# would happily re-derive it as a fresh active rule.
+_RETIRED_SECTION = """
+She has said the following are WRONG, and they have been struck out. Do not propose them \
+again, or anything that restates them -- a statement above that appears to support one of \
+these has been corrected by her since:
+{retired}
 """
 
 
@@ -111,8 +134,17 @@ def _propose_questions(client: Groq, episodes: list[dict[str, Any]]) -> list[str
     return [q for q in questions if isinstance(q, str) and q.strip()]
 
 
+def _format_retired(retired: list[str]) -> str:
+    if not retired:
+        return ""
+    return _RETIRED_SECTION.format(retired="\n".join(f"- {text}" for text in retired))
+
+
 def _propose_insights(
-    client: Groq, question: str, candidates: list[dict[str, Any]]
+    client: Groq,
+    question: str,
+    candidates: list[dict[str, Any]],
+    retired: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     completion = client.chat.completions.create(
         model=_REFLECTION_MODEL,
@@ -120,7 +152,9 @@ def _propose_insights(
             {
                 "role": "user",
                 "content": _INSIGHTS_PROMPT.format(
-                    question=question, statements=_format_statements(candidates)
+                    question=question,
+                    statements=_format_statements(candidates),
+                    retired=_format_retired(retired or []),
                 ),
             }
         ],
@@ -184,11 +218,15 @@ def reflect(
     if not episodes:
         return []
     episodes = episodes[-episode_limit:]
+    # Retired rules (identity/correction.py, profile.retract_rule) are
+    # sent as "known wrong" so a correction survives reflection -- see
+    # _RETIRED_SECTION. Sentences, not rows: the model never sees ids.
+    retired = [r["text"] for r in store.read("rules") if not r.get("active", 1) and r.get("text")]
 
     written: list[dict[str, Any]] = []
     for question in _propose_questions(client, episodes):
         relevant = retrieve_episodes(episodes, now=now, top_k=10)
-        for insight in _propose_insights(client, question, relevant):
+        for insight in _propose_insights(client, question, relevant, retired):
             cited_episodes = insight["cited_episodes"]
             confidence = min(1.0, len(cited_episodes) / 3)
             rule_id = store.append(
