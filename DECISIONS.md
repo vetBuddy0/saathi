@@ -703,3 +703,179 @@ row must not stop `compile_context` on the constructor thread; a model
 that loads but fails at `run()` must not kill the post-`say()` thread
 that also recompiles context; a first backfill over a long history
 must not build one table-sized tensor on a Pi.
+
+**2026-09-25 — `"music"` is granted in `cli.py` (proposed diff), reversing
+the 2026-09-18 "calls/music are out for v1" gate.** Explicit instruction:
+the YouTube stream's brief makes music real. The 2026-09-18 reasoning
+("real-world consequential") still holds for calls — a call reaches
+another person — but playing a song on her own screen has no consequence
+outside the room, and stopping it is one word. Granted unconditionally,
+same as `"preferences"`; `"calls"` stays ungranted. The grant itself is
+a `cli.py` edit (cross-territory), written into
+`docs/completed/youtube.md`, not applied here.
+
+**2026-09-25 — One `play_music` tool with an `action` enum, not ten
+tools.** `cascade.py` handles exactly one tool call per turn, so
+"search, then offer" has to be one call whose result carries the
+titles. Ten small tools would have put ten descriptions in front of the
+model on every turn; one tool whose vocabulary matches how she talks
+(`louder`, `bigger`, `again`, `next`) is what the real model
+(`qwen/qwen3.8-27b`) picked correctly on the first try. Name kept as
+`play_music`, permission kept as `"music"`, exactly the stub's — SPEC.md's
+"v2 swaps an implementation rather than inventing plumbing".
+
+**2026-09-25 — Search results live in the tool's controller, not in the
+model's context or the identity store.** "The second one" three turns
+later must resolve to the same video whether or not the model still has
+the list in its window; a Python list on the object the handler closes
+over is the only place that is true by construction. Not persisted:
+what was offered is conversation state, not memory, and a reboot
+forgetting it is right.
+
+**2026-09-25 — Space during playback ducks the video to 20%, held
+through thinking and speaking, restored at idle. Never pauses.** The
+brief rules out pausing. 20% over mute because a room going
+dead-silent on every press reads as broken; 20% over 50% because the
+AEC does not cover browser audio on this box (measured — see
+`docs/completed/youtube.md`), so whatever is left under her voice is
+what Whisper hears. Lives in the browser (`media-policy.js`) keyed on
+the `state` messages it already receives, so no PLAYING state was added
+to `core.py` — playback is media state, not conversation state.
+
+**2026-09-25 — A new search stops whatever was playing.** The offer has
+to be read aloud, and reading three titles over a song she has just
+asked to replace serves no one. Pausing-then-resuming-if-she-declines
+was the alternative and was rejected as state the model would have to
+reason about across turns; "carry on" after a search means "start that
+one again", which the tool does.
+
+**2026-09-25 — The screen server owns the media broadcast seam; the
+tool never sees the socket.** `build_app(media=...)` installs a
+thread-safe callable on the controller at startup
+(`loop.call_soon_threadsafe`), because the handler runs in the executor
+thread inside `end_turn()`. The alternative — the tool importing the
+server and appending to its socket set — is the "tool reaching into the
+UI" CLAUDE.md names. `media` messages are never sent on connect; the
+existing `state`-then-`settings` handshake is untouched.
+
+**2026-09-25 — Volume is tracked in the tool (70 default, steps of 15,
+floor 10, ceiling 100), not read back from the player.** Deterministic
+and testable; "quieter" never reaches silence ("stop" is the word for
+that); the browser applies the duck on top.
+
+**2026-09-25 — `media-policy.js` is tested in a headless Chromium, not
+node.** No node on the device or the dev box, and a JS runtime as a dev
+dependency for two pure functions is the kind of thing that turns into
+a build step. The face already runs in Chromium; the test skips (not
+fails) where no Chromium binary exists.
+
+**2026-09-25 — Fullscreen keeps the face at 22vw × 22vh in the
+bottom-left corner, over the video.** The face never goes away is the
+brief's rule; a corner over the picture was chosen over shrinking the
+video to leave a strip, because a letterboxed 16:9 at 1080p already
+has empty bars and a small face over the picture reads as the same
+person stepping aside, not a different screen.
+
+**2026-09-25 — Cards are a `screen/` module (`cards.py` + `cards.js`),
+not a tool and not part of any one stream.** Every stream that asks
+her something (calling, music, reminders) must ask the same way or she
+learns three dialects of "which one?". Plain HTML/CSS, no component
+library: none is built for a 75-year-old across a room, and the target
+sizes, no-hover and one-at-a-time rules would be fought rather than
+given. Cards are content and interaction, not the status text SPEC.md
+forbids — recorded in the module docstring so it isn't re-litigated.
+
+**2026-09-25 — A fourth option raises `TooManyOptions`; nothing
+truncates.** "More than that, say so and offer the best three" needs
+the caller to pick the three and to say so out loud; a silent cut would
+hide both. Same for `choice()` with one option: that's a `confirm()`.
+
+**2026-09-25 — `CardController.ask()` exists but must not be called
+inside `end_turn()`.** Blocking the turn keeps the state machine in
+THINKING with the mic closed, so she could only answer by tap —
+breaking "voice and touch always both work". Tools `show()` and return
+the card's `spoken` text as their note; her spoken answer arrives next
+turn and the tool calls `answer(id, ..., source="voice")` — the same
+door a tap uses. `ask()` is for code between turns (initiative, a
+call's own loop). Kept rather than dropped because the coordinator's
+brief asked for it and the between-turns use is real.
+
+**2026-09-25 — A replaced or cleared card is answered as a dismiss
+(`source="code"`), never silently dropped.** One card at a time means
+a `show()` can pull a question out from under an `ask()`; releasing the
+waiter with a dismiss is what keeps "nothing waits on a question she
+can no longer see" true.
+
+**2026-09-25 — While a hold handler is set, `core.py` never hears the
+press.** A short press does nothing at all (no turn, no capture); a
+hold past `seconds` fires once. The alternative — passing the press
+through and starting a turn as well — would open the mic over a live
+call. The timer lives in `server.py` (it owns the loop) and ticks at
+100 ms; `HoldController` only knows the progress and whether it fired.
+Progress is re-issued as the same card id so the browser updates the
+bar in place.
+
+**2026-09-25 — Card tap targets are 112px tall, text floors are
+40/36/32px, digits are grouped in threes.** The brief's minimums are
+100px and 32px; the extra is margin so a rounding or a font swap on
+the Pi can't drop under them. The floors are asserted from computed
+styles in a real 1080p headless Chromium, not from the CSS text.
+Contrast pairs are named tokens in `:root` so the AAA test reads the
+same values the page does.
+
+**2026-09-25 — With a `CardController`, a YouTube search offers its
+three results as a Choice card and the media panel's own results view
+is not drawn.** Two copies of the same three lines beside the face is
+the dense list the brief rules out, and the card is strictly more: the
+same numbers, tappable, dismissable, spoken from its own text. The
+panel's results view stays for a screen without cards (and the
+existing tests), which is why `MediaController(cards=None)` keeps the
+old behaviour byte for byte.
+
+**2026-09-25 — Tap and voice both reach `_play` through the card, and
+only a tap starts playback from the card's callback.** The tool
+answers its own card with `source="voice"` when she says a number, so
+the callback can tell the two apart and not start the same video
+twice. A tap is the user gesture the browser's autoplay rule wants; a
+`play` message that follows it is "from the interaction", never from
+a timer. "Never mind" (spoken → the `never_mind` action; tapped → the
+card's dismiss) clears the card and leaves the results referenceable —
+"actually, the second one" a moment later still works.
+
+**2026-09-25 — `tools/media.py` imports `screen/cards.py`.** A tool
+importing a screen module looks like reaching into the UI; it isn't:
+`cards.py` is the interface every stream is told to import, it never
+touches the socket, and the server installs its broadcast. The
+alternative — passing card builders in through `cli.py` — would have
+hidden the dependency without removing it.
+
+**2026-09-25 — A tap on the media Choice card plays without a second
+`Registry.call`.** Raised in review as "a tool called without its
+permission check". The check gates what the *engine* may execute: the
+card only exists because a permission-checked `search` put it there,
+and the tap is her answering the question that call asked, not a new
+intent from the model. Routing a tap back through the registry would
+need the browser to hold a permission grant, which is the wrong
+direction for trust. Kept as is; if `"music"` is ever withdrawn at
+runtime the search that would offer a card is what's refused.
+
+**2026-09-25 — One search result is offered as a Confirm card ("Play
+X?"), not a Choice of one.** `choice()` refuses one option, correctly;
+review found the card path raising on it. A yes/no is the honest shape
+of the question.
+
+**2026-09-25 — A video the player reported unplayable is filtered out
+of every later offer and the rest renumbered.** Review found a tap on
+such a result clearing the card and saying nothing. Not offering it is
+simpler and kinder than a second card explaining why it didn't play.
+
+**2026-09-25 — A release is routed the way its press was, not by
+`hold.active` at release time.** Review found two mirror-image leaks
+when a hold handler was set or cleared while the key was down: core
+stranded in LISTENING with the capture running, or a release with no
+press behind it. The hold timer also exits on `abandon()`, so
+`hold.clear()` mid-press no longer leaves a task ticking forever.
+
+**2026-09-25 — `readback()` only regroups phone-number shapes;
+decimals and times pass through.** Review: "37.5" was becoming "375".
+A "." or ":" now means "not a phone number".

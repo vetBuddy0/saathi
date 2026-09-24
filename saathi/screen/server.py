@@ -14,6 +14,26 @@ asks for it to be a real, if thin, settings surface (language + TTS
 backend), not just another passthrough, because it's for whoever sets
 the device up, not for her — see `static/js/settings-panel.js`.
 
+The YouTube stream (2026-09-25) added two more: `{"type": "media",
+"action": ...}` (server -> browser: results, play, pause, resume, stop,
+volume, layout — emitted by `tools/media.py`'s controller through the
+`broadcast` seam `build_app` installs on it, never on connect) and
+`{"type": "media_event", "event": ...}` (browser -> server: the player
+reporting `ended`/`error`). Ducking needs no new message: the browser
+lowers the player's volume on the `state` it already receives
+(`listening`/`thinking`/`speaking`) — see `static/js/media-policy.js`.
+
+Cards (same day): `{"type": "card", "card": {...} | null}` (server ->
+browser: show this one card, or clear it; emitted by `screen/cards.py`'s
+CardController through the same seam, never on connect) and
+`{"type": "card_answer", "id": ..., "answer": {...}}` (browser -> server:
+a tap). A voice answer never crosses this socket: it arrives as a tool
+call and the tool calls the same `CardController.answer()`. The hold
+seam (`build_app(hold=)`) is the one place this server does something
+with a press other than hand it to `core.py`: while a `HoldController`
+has a handler, press/release drive a hold timer here instead — see the
+seam's comment in `build_app`.
+
 Checkpoint 1 had no voice engine, so `release` (`LISTENING` -> `THINKING`)
 was immediately followed by a synthetic `no_response` event
 (`THINKING` -> `IDLE`) rather than waiting for a real answer — SPEC.md's
@@ -72,6 +92,9 @@ from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _CAPTURE_CHUNK_BYTES = 3200  # 100ms of 16kHz mono 16-bit PCM
+# Holding-card progress cadence: 20 updates over a 2 s hold is smooth
+# enough to read as "it's doing something" without flooding the socket.
+_HOLD_TICK_SECONDS = 0.1
 
 # Robustness pass (checkpoint 2): a 401/429/timeout/connection-reset from
 # Groq used to be an uncaught exception with nowhere good to land — the
@@ -232,21 +255,92 @@ def _settings_message(store) -> str:
 
 
 def build_app(
-    core: Core, session=None, capture_source_id: str | None = None, store=None
+    core: Core,
+    session=None,
+    capture_source_id: str | None = None,
+    store=None,
+    media=None,
+    cards=None,
+    hold=None,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
     live_capture: dict[str, Capture | None] = {"capture": None}
     turn_generation = {"value": 0}
     turn_started_at: dict[str, float | None] = {"value": None}
+    hold_task: dict[str, asyncio.Task | None] = {"task": None}
 
-    def broadcast_state(state, _event: Event) -> None:
-        message = json.dumps({"type": "state", "state": state.value})
+    def _send_all(message: str) -> None:
         for ws in list(websockets):
             if not ws.closed:
                 asyncio.ensure_future(ws.send_str(message))
 
+    def broadcast_state(state, _event: Event) -> None:
+        _send_all(json.dumps({"type": "state", "state": state.value}))
+
     core.subscribe(broadcast_state)
+
+    # The broadcast seam. `media` (tools/media.py's MediaController) and
+    # `cards` (screen/cards.py's CardController) are anything with
+    # `set_broadcast(fn)`. Their callers run on the executor thread
+    # inside `session.end_turn()`, where touching `websockets` is
+    # unsafe, so the callable they're given hops to this loop first.
+    # The server still decides nothing: the tool says what the screen
+    # shows, this only carries it. Installed on startup, not here,
+    # because there is no running loop at build time; a message before
+    # then has no screen to reach anyway and is dropped.
+    loop_holder: dict[str, asyncio.AbstractEventLoop | None] = {"loop": None}
+
+    def broadcast_threadsafe(payload: dict) -> None:
+        loop = loop_holder["loop"]
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(_send_all, json.dumps(payload))
+
+    seams = [obj for obj in (media, cards) if obj is not None]
+    if seams:
+
+        async def install_seams(_app: web.Application) -> None:
+            loop_holder["loop"] = asyncio.get_running_loop()
+            for obj in seams:
+                obj.set_broadcast(broadcast_threadsafe)
+
+        async def remove_seams(_app: web.Application) -> None:
+            for obj in seams:
+                obj.set_broadcast(None)
+            loop_holder["loop"] = None
+
+        app.on_startup.append(install_seams)
+        app.on_cleanup.append(remove_seams)
+
+    # The hold seam (screen/cards.py's HoldController). While a handler
+    # is set, the spacebar is a hold-to-confirm button and core.py never
+    # hears the press: a short press does nothing, a press held for
+    # `hold.seconds` fires the handler once. The timer is here because
+    # the loop is here; the controller only knows how far along the
+    # hold is. The browser sends exactly one press and one release per
+    # hold (main.js ignores key repeat), so progress is measured from
+    # the press timestamp, never from repeated events.
+    async def run_hold(started_at: float) -> None:
+        try:
+            # `hold.holding` goes False on abandon() -- including the
+            # abandon inside hold.clear() while a press is still down
+            # (the other party hung up first). Without this exit the
+            # task would tick forever and block every later hold.
+            while hold.holding:
+                await asyncio.sleep(_HOLD_TICK_SECONDS)
+                if hold.tick(time.monotonic() - started_at):
+                    return
+        finally:
+            hold_task["task"] = None
+
+    # Which way the press that is currently down went: "hold" or
+    # "core". A release is routed the same way as its press, whatever
+    # `hold.active` says by then -- a handler set (or cleared) while
+    # the key is down must not strand core.py in LISTENING with the
+    # capture running, or hand core.py a release it never saw a press
+    # for. Found in review.
+    press_route: dict[str, str | None] = {"value": None}
 
     async def index(_request: web.Request) -> web.FileResponse:
         return web.FileResponse(_STATIC_DIR / "index.html")
@@ -290,14 +384,51 @@ def build_app(
                             {"type": "preference_result", "key": key, "ok": True, "reason": ""}
                         )
                     )
-                    settings_message = _settings_message(store)
-                    for other_ws in list(websockets):
-                        if not other_ws.closed:
-                            asyncio.ensure_future(other_ws.send_str(settings_message))
+                    _send_all(_settings_message(store))
+                    continue
+                if payload.get("type") == "media_event":
+                    # The player reporting back ("ended", "error"). A
+                    # report, not a decision: the controller updates
+                    # what "play that again" means; nothing here does.
+                    event = payload.get("event")
+                    video_id = payload.get("video_id")
+                    if media is not None and isinstance(event, str):
+                        media.on_browser_event(
+                            event, video_id if isinstance(video_id, str) else None
+                        )
+                    continue
+                if payload.get("type") == "card_answer":
+                    # A tap. The same entry point a voice answer uses
+                    # (CardController.answer); a stale id or a malformed
+                    # answer is dropped there, not here.
+                    if cards is not None:
+                        card_id = payload.get("id")
+                        if isinstance(card_id, str):
+                            cards.answer(card_id, payload.get("answer"), source="tap")
                     continue
                 if payload.get("type") != "input":
                     continue
                 kind = payload.get("event")
+                if kind == "press":
+                    press_route["value"] = "hold" if hold is not None and hold.active else "core"
+                routed_to_hold = press_route["value"] == "hold"
+                if kind == "release":
+                    press_route["value"] = None
+                if routed_to_hold:
+                    # The button means "hold to confirm" for now; core.py
+                    # never sees this press. See the hold seam above.
+                    if kind == "press" and hold_task["task"] is None:
+                        hold.begin()
+                        hold_task["task"] = asyncio.get_running_loop().create_task(
+                            run_hold(time.monotonic())
+                        )
+                    elif kind == "release":
+                        task = hold_task["task"]
+                        if task is not None:
+                            task.cancel()
+                            hold_task["task"] = None
+                        hold.abandon()
+                    continue
                 if kind == "press":
                     # Only act if core.py actually transitioned — e.g. a
                     # press while IDLE/SLEEPING/SPEAKING with no session
@@ -356,10 +487,21 @@ def run(
     session=None,
     capture_source_id: str | None = None,
     store=None,
+    media=None,
+    cards=None,
+    hold=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
-        build_app(core, session=session, capture_source_id=capture_source_id, store=store),
+        build_app(
+            core,
+            session=session,
+            capture_source_id=capture_source_id,
+            store=store,
+            media=media,
+            cards=cards,
+            hold=hold,
+        ),
         host=host,
         port=port,
         print=None,

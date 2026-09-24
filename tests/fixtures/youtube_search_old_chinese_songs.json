@@ -1,0 +1,134 @@
+{
+  "kind": "youtube#searchListResponse",
+  "etag": "Sj9PFV5-bcLJ6pjJ_zoLqmUTgaU",
+  "nextPageToken": "CAMQAA",
+  "regionCode": "SG",
+  "pageInfo": {
+    "totalResults": 1000000,
+    "resultsPerPage": 3
+  },
+  "items": [
+    {
+      "kind": "youtube#searchResult",
+      "etag": "nS8nV6n2NKhXIuZ7cFyh5dIl4ZI",
+      "id": {
+        "kind": "youtube#video",
+        "videoId": "LfzRiMNmQTw"
+      },
+      "snippet": {
+        "publishedAt": "2023-12-08T23:30:06Z",
+        "channelId": "UC0qDRzmQ-aHWyOmslFZq0Iw",
+        "title": "推荐50多岁以上的人真正喜欢的歌曲 ♣ 50首70、80、90年代唱遍大街小巷的歌曲今天给大家推荐 , 林淑容 , 李茂山 , 李茂山",
+        "description": "推荐50多岁以上的人真正喜欢的歌曲 ♧ 50首70、80、90年代唱遍大街小巷的歌曲今天给大家推荐 , 林淑容 , 李茂山 , 李茂山 ...",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/LfzRiMNmQTw/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/LfzRiMNmQTw/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/LfzRiMNmQTw/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/LfzRiMNmQTw/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/LfzRiMNmQTw/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "Heart Warmers",
+        "liveBroadcastContent": "none",
+        "publishTime": "2023-12-08T23:30:06Z"
+      }
+    },
+    {
+      "kind": "youtube#searchResult",
+      "etag": "27GzY2Dw9l5EbEQSEGih0nZ0GOo",
+      "id": {
+        "kind": "youtube#video",
+        "videoId": "bv_cEeDlop0"
+      },
+      "snippet": {
+        "publishedAt": "2007-08-07T22:39:31Z",
+        "channelId": "UC4BBX1SihlLvBBRxvpFiwwA",
+        "title": "The Moon Represents My Heart - Teresa Teng",
+        "description": "The Moon Represents My Heart by Teresa Teng. The greatest hits of Teresa Teng in last two decades.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/bv_cEeDlop0/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/bv_cEeDlop0/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/bv_cEeDlop0/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "BlueNxT",
+        "liveBroadcastContent": "none",
+        "publishTime": "2007-08-07T22:39:31Z"
+      }
+    },
+    {
+      "kind": "youtube#searchResult",
+      "etag": "U_3EO13mEiLx50cDaws0huBBC7M",
+      "id": {
+        "kind": "youtube#video",
+        "videoId": "UB2p17H30ng"
+      },
+      "snippet": {
+        "publishedAt": "2022-10-05T05:47:51Z",
+        "channelId": "UCF2ipb6UIRpKVOHaruBBLpg",
+        "title": "鄧麗君傳唱金曲（2）（内附歌詞）01 你怎麽説；02 小城故事；03 但願人長久；04 千言萬語",
+        "description": "喜歡歌曲的感謝您點贊，訂閲和分享:) https://www.youtube.com/channel/UCF2ipb6UIRpKVOHaruBBLpg 01 你怎麽説【00:00】 ...",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/UB2p17H30ng/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/UB2p17H30ng/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/UB2p17H30ng/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/UB2p17H30ng/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/UB2p17H30ng/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "真愛音樂Music-Love-Peace-Joy",
+        "liveBroadcastContent": "none",
+        "publishTime": "2022-10-05T05:47:51Z"
+      }
+    }
+  ]
+}

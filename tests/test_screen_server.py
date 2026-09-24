@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import threading
 from pathlib import Path
@@ -641,3 +642,609 @@ async def test_a_timings_object_predating_the_voice_columns_still_logs_the_row(m
     assert len(rows) == 1
     assert rows[0]["stt_ms"] == 10
     assert rows[0]["voice"] is None
+
+# -- media (YouTube stream): the tool speaks to the screen through the seam --
+
+
+def _media_fixture_results():
+    from saathi.tools.media import parse_search_response
+
+    fixture = Path(__file__).parent / "fixtures" / "youtube_search_old_chinese_songs.json"
+    return parse_search_response(json.loads(fixture.read_text()))
+
+
+class ToolSession(FakeSession):
+    """A FakeSession whose end_turn() does what a real CascadeSession does
+    inside a turn with a tool call: invokes the registered intent handler
+    (cli.py's handle_intent shape -- permission-checked Registry.call)
+    from the executor thread, records the result, and returns a reply.
+    Queue one call per turn with `queue()`."""
+
+    def __init__(self, handle_intent) -> None:
+        super().__init__()
+        self._handle_intent = handle_intent
+        self._queued: list[dict] = []
+        self.results: list[dict] = []
+
+    def queue(self, **arguments) -> None:
+        self._queued.append(arguments)
+
+    def end_turn(self) -> str:
+        if not self._queued:
+            return "reply"
+        arguments = self._queued.pop(0)
+        result = self._handle_intent("play_music", arguments)
+        self.results.append(result)
+        return "reply"
+
+
+def _media_app(granted=frozenset({"music"}), results=None):
+    """A build_app wired the way cli.py's diff wires it: a controller,
+    the tool registered, the permission granted (or not), and the
+    controller handed to build_app so the seam gets installed."""
+    from saathi.tools.media import MediaController, make_media_tool
+    from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
+
+    found = results if results is not None else _media_fixture_results()
+    controller = MediaController(search=lambda _query: found)
+    registry = Registry()
+    registry.register(make_media_tool(controller))
+
+    def handle_intent(name: str, arguments: dict) -> dict:
+        try:
+            return registry.call(name, granted, **arguments)
+        except UnknownTool:
+            return {"status": "error", "detail": f"no such tool: {name}"}
+        except PermissionDenied as exc:
+            return {"status": "denied", "detail": str(exc)}
+
+    session = ToolSession(handle_intent)
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source", media=controller)
+    return app, session, controller, found
+
+
+async def _turn_collecting_media(ws, session, **call) -> list[dict]:
+    """One full turn with `call` queued for the tool; returns every
+    `media` message that arrived before the turn's `idle`."""
+    session.queue(**call)
+    await ws.send_json({"type": "input", "event": "press"})
+    assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    await ws.send_json({"type": "input", "event": "release"})
+    assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+    media = []
+    states = []
+    while True:
+        message = await ws.receive_json()
+        if message["type"] == "media":
+            media.append(message)
+            continue
+        states.append(message["state"])
+        if message["state"] == "idle":
+            break
+    assert states == ["speaking", "idle"]
+    return media
+
+
+async def test_connecting_with_a_media_controller_still_yields_exactly_state_then_settings(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, _ = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="old Chinese songs")
+            assert controller.last_results  # a search has happened...
+        async with client.ws_connect("/ws") as fresh:
+            # ...and a fresh connection is still state, settings, nothing
+            # else. No `media` on connect, ever.
+            assert (await _connect(fresh))["type"] == "state"
+            await fresh.send_json({"type": "input", "event": "press"})
+            assert await fresh.receive_json() == {"type": "state", "state": "listening"}
+
+
+async def test_a_search_turn_broadcasts_three_results_to_every_client_and_returns_spoken_titles(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            media = await _turn_collecting_media(
+                ws, session, action="search", query="old Chinese songs"
+            )
+            seen_by_other = await other.receive_json()
+            while seen_by_other["type"] != "media":
+                seen_by_other = await other.receive_json()
+
+    assert len(media) == 1
+    assert media[0]["action"] == "results"
+    assert len(media[0]["results"]) == 3
+    assert media[0]["results"][0]["index"] == 1
+    assert seen_by_other == media[0]
+
+    result = session.results[0]
+    assert result["status"] == "ok"
+    assert [r[:6] for r in result["results"]] == ["One: 推", "Two: T", "Three:"]
+    assert "note" in result
+    json.dumps(result)
+
+
+async def test_the_second_one_that_one_and_again_resolve_across_turns(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="old Chinese songs")
+
+            # "the second one"
+            media = await _turn_collecting_media(ws, session, action="play", choice=2)
+            assert media == [
+                {
+                    "type": "media",
+                    "action": "play",
+                    "video_id": found[1].video_id,
+                    "title": found[1].title,
+                    "index": 2,
+                    "volume": 70,
+                    "fullscreen": False,
+                }
+            ]
+            assert session.results[-1]["playing"].startswith("Two: ")
+
+            # "that one" -- no choice: the one she most recently meant
+            media = await _turn_collecting_media(ws, session, action="play")
+            assert media[0]["video_id"] == found[1].video_id
+
+            # "play that again"
+            media = await _turn_collecting_media(ws, session, action="again")
+            assert media[0]["action"] == "play"
+            assert media[0]["video_id"] == found[1].video_id
+
+            # "the first one", several turns later
+            media = await _turn_collecting_media(ws, session, action="play", choice=1)
+            assert media[0]["video_id"] == found[0].video_id
+
+
+async def test_every_transport_and_layout_action_broadcasts_its_message(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="q")
+            await _turn_collecting_media(ws, session, action="play", choice=1)
+
+            expected = {
+                "quieter": {"type": "media", "action": "volume", "level": 55},
+                "louder": {"type": "media", "action": "volume", "level": 70},
+                "pause": {"type": "media", "action": "pause"},
+                "resume": {"type": "media", "action": "resume"},
+                "bigger": {"type": "media", "action": "layout", "mode": "fullscreen"},
+                "smaller": {"type": "media", "action": "layout", "mode": "panel"},
+                "stop": {"type": "media", "action": "stop"},
+            }
+            for action, message in expected.items():
+                media = await _turn_collecting_media(ws, session, action=action)
+                assert media == [message], action
+
+
+async def test_without_the_music_permission_the_tool_is_denied_and_nothing_is_shown(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, _ = _media_app(granted=frozenset({"preferences"}))
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            media = await _turn_collecting_media(ws, session, action="search", query="q")
+    assert media == []
+    assert session.results[0]["status"] == "denied"
+    assert controller.last_results == []
+
+
+async def test_the_browser_reporting_ended_updates_what_carry_on_means(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="q")
+            await _turn_collecting_media(ws, session, action="play", choice=3)
+            assert controller.playing is True
+
+            await ws.send_json({"type": "media_event", "event": "ended"})
+            await ws.send_json({"type": "media_event", "event": 42})  # malformed: dropped
+            # A well-formed turn right after proves both were consumed.
+            media = await _turn_collecting_media(ws, session, action="resume")
+
+    assert controller.playing is True
+    assert media[0]["action"] == "play"  # carrying on after it ended starts it over
+    assert media[0]["video_id"] == found[2].video_id
+
+
+async def test_a_media_message_emitted_off_the_loop_thread_reaches_the_client(monkeypatch):
+    # The seam's whole reason to exist: the handler runs in the executor
+    # thread, where the socket set must not be touched directly.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    _, session, controller, _ = _media_app()
+    thread_names = []
+
+    class ThreadRecordingSession(ToolSession):
+        def end_turn(self) -> str:
+            thread_names.append(threading.current_thread().name)
+            return super().end_turn()
+
+    recording = ThreadRecordingSession(session._handle_intent)
+    app = build_app(Core(), session=recording, capture_source_id="fake", media=controller)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            media = await _turn_collecting_media(ws, recording, action="search", query="q")
+    assert media and media[0]["action"] == "results"
+    assert thread_names and "MainThread" not in thread_names
+
+
+# -- media + cards: the offer is a card; a tap starts playback ------------
+
+
+async def test_a_search_offers_a_card_and_a_tap_on_it_broadcasts_play(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    from saathi.screen.cards import CardController
+    from saathi.tools.media import MediaController, make_media_tool
+    from saathi.tools.registry import Registry
+
+    found = _media_fixture_results()
+    cards = CardController()
+    controller = MediaController(search=lambda _q: found, cards=cards)
+    registry = Registry()
+    registry.register(make_media_tool(controller))
+    session = ToolSession(lambda name, args: registry.call(name, frozenset({"music"}), **args))
+    app = build_app(
+        Core(), session=session, capture_source_id="fake", media=controller, cards=cards
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            session.queue(action="search", query="old Chinese songs")
+            await ws.send_json({"type": "input", "event": "press"})
+            await ws.send_json({"type": "input", "event": "release"})
+            seen = []
+            message = await ws.receive_json()
+            while message != {"type": "state", "state": "idle"}:
+                seen.append(message)
+                message = await ws.receive_json()
+            cards_seen = [m for m in seen if m["type"] == "card"]
+            assert [m for m in seen if m["type"] == "media"] == []  # no panel results view
+            assert len(cards_seen) == 1
+            card = cards_seen[0]["card"]
+            assert card["kind"] == "choice" and len(card["options"]) == 3
+            assert session.results[0]["spoken"] == card["spoken"]
+            while (await other.receive_json()).get("state") != "idle":
+                pass
+
+            # She taps the second one on the other screen.
+            await other.send_json(
+                {"type": "card_answer", "id": card["id"], "answer": {"choice": 2}}
+            )
+            assert await ws.receive_json() == {"type": "card", "card": None}
+            play = await ws.receive_json()
+            assert play["type"] == "media" and play["action"] == "play"
+            assert play["video_id"] == found[1].video_id
+            assert await other.receive_json() == {"type": "card", "card": None}
+            assert (await other.receive_json())["action"] == "play"
+    assert controller.now_playing == found[1]
+    assert cards.current is None
+
+
+# -- cards: shown by a tool through the seam, answered by tap or voice -----
+
+
+def _cards_app(hold_seconds=None, on_hold_complete=None):
+    from saathi.screen.cards import CardController, HoldController, confirm
+
+    cards = CardController()
+    hold = None
+    if hold_seconds is not None:
+        hold = HoldController(cards)
+        hold.set_handler(on_hold_complete or (lambda: None), seconds=hold_seconds, label="Hold")
+
+    class CardSession(FakeSession):
+        """end_turn() shows a card, as a tool would from the executor
+        thread, and returns what the tool would tell the model to say."""
+
+        shown: list[str] = []
+
+        def end_turn(self) -> str:
+            card = confirm("Call Priya, your daughter?")
+            CardSession.shown.append(cards.show(card))
+            return card.spoken
+
+    session = CardSession()
+    CardSession.shown = []
+    core = Core()
+    app = build_app(
+        core,
+        session=session,
+        capture_source_id="fake-aec-source",
+        cards=cards,
+        hold=hold,
+    )
+    return app, session, cards, hold, core
+
+
+async def _turn_collecting_cards(ws, session) -> list[dict]:
+    await ws.send_json({"type": "input", "event": "press"})
+    assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    await ws.send_json({"type": "input", "event": "release"})
+    assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+    cards_seen = []
+    while True:
+        message = await ws.receive_json()
+        if message["type"] == "card":
+            cards_seen.append(message)
+            continue
+        if message["state"] == "idle":
+            break
+    return cards_seen
+
+
+async def test_connecting_with_cards_and_hold_still_yields_exactly_state_then_settings(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, hold, _ = _cards_app(hold_seconds=None)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_cards(ws, session)
+            assert cards.current is not None  # a card is up...
+        async with client.ws_connect("/ws") as fresh:
+            # ...and a fresh connection still gets state, settings, nothing
+            # else -- no card on connect.
+            assert (await _connect(fresh))["type"] == "state"
+            await fresh.send_json({"type": "input", "event": "press"})
+            assert await fresh.receive_json() == {"type": "state", "state": "listening"}
+
+
+async def test_a_card_shown_from_a_turn_reaches_every_client_and_carries_spoken(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            seen = await _turn_collecting_cards(ws, session)
+            seen_by_other = await other.receive_json()
+            while seen_by_other["type"] != "card":
+                seen_by_other = await other.receive_json()
+    assert len(seen) == 1
+    card = seen[0]["card"]
+    assert card["kind"] == "confirm"
+    assert card["id"] == session.shown[0]
+    assert card["title"] == card["spoken"] == "Call Priya, your daughter?"
+    assert seen_by_other == seen[0]
+    assert session.spoken == [card["spoken"]]  # the engine said what the screen shows
+
+
+async def test_a_tap_answers_the_card_clears_it_everywhere_and_reaches_on_answer(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    answers = []
+    cards.on_answer(answers.append)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            seen = await _turn_collecting_cards(ws, session)
+            card_id = seen[0]["card"]["id"]
+            # drain the other client's copy of the whole turn
+            while (await other.receive_json()).get("state") != "idle":
+                pass
+
+            await other.send_json({"type": "card_answer", "id": "stale", "answer": {"yes": True}})
+            await other.send_json({"type": "card_answer", "id": card_id, "answer": {"yes": True}})
+            assert await ws.receive_json() == {"type": "card", "card": None}
+            assert await other.receive_json() == {"type": "card", "card": None}
+    assert len(answers) == 1
+    assert answers[0].card_id == card_id
+    assert answers[0].yes is True
+    assert answers[0].source == "tap"
+    assert cards.current is None
+
+
+async def test_a_voice_answer_goes_through_the_same_door_as_a_tap(monkeypatch):
+    # A tool, on the executor thread, calls cards.answer(..., source="voice")
+    # when she says "yes"; the screen clears the same way.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    answers = []
+    cards.on_answer(answers.append)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            seen = await _turn_collecting_cards(ws, session)
+            card_id = seen[0]["card"]["id"]
+            loop = asyncio.get_running_loop()
+            ok = await loop.run_in_executor(
+                None, lambda: cards.answer(card_id, {"yes": False}, source="voice")
+            )
+            assert ok is True
+            assert await ws.receive_json() == {"type": "card", "card": None}
+    assert [(a.yes, a.source) for a in answers] == [(False, "voice")]
+
+
+async def test_malformed_card_answers_are_dropped_and_the_connection_lives(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, _, _ = _cards_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            seen = await _turn_collecting_cards(ws, session)
+            card_id = seen[0]["card"]["id"]
+            await ws.send_json({"type": "card_answer", "id": 7, "answer": {"yes": True}})
+            await ws.send_json({"type": "card_answer", "id": card_id, "answer": "yes"})
+            await ws.send_json({"type": "card_answer", "id": card_id})
+            await ws.send_json({"type": "card_answer", "id": card_id, "answer": {"dismiss": True}})
+            assert await ws.receive_json() == {"type": "card", "card": None}
+    assert cards.current is None
+
+
+# -- the hold seam ---------------------------------------------------------
+
+
+async def test_a_short_press_while_a_hold_handler_is_set_does_nothing(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    fired = []
+    app, session, cards, hold, core = _cards_app(
+        hold_seconds=0.5, on_hold_complete=lambda: fired.append(None)
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            first = await ws.receive_json()  # the holding card at 0
+            assert first["type"] == "card" and first["card"]["kind"] == "holding"
+            assert first["card"]["progress"] == 0.0
+            assert first["card"]["title"] == "Hold"
+            await asyncio.sleep(0.15)
+            await ws.send_json({"type": "input", "event": "release"})
+            # Whatever progress ticks arrived, the last thing is the clear.
+            message = await ws.receive_json()
+            while message != {"type": "card", "card": None}:
+                assert message["type"] == "card" and message["card"]["progress"] < 1.0
+                message = await ws.receive_json()
+            await asyncio.sleep(0.6)  # well past the threshold: nothing fires
+    assert fired == []
+    assert core.state == State.SLEEPING  # core.py never heard the press
+    assert session.start_calls == 0
+    assert FakeCapture.instances == []
+    assert cards.current is None
+
+
+async def test_a_press_held_past_the_threshold_fires_once_with_progress_on_the_way(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    fired = []
+    app, session, cards, hold, core = _cards_app(
+        hold_seconds=0.35, on_hold_complete=lambda: fired.append(None)
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            progress = []
+            message = await ws.receive_json()
+            while message != {"type": "card", "card": None}:
+                assert message["type"] == "card"
+                progress.append(message["card"]["progress"])
+                message = await ws.receive_json()
+            assert fired == [None]
+            assert progress[0] == 0.0
+            assert progress == sorted(progress)  # monotonic
+            assert 0.0 < progress[-1] < 1.0  # completion clears rather than showing 1.0
+            # Still holding: nothing more happens, and the release is quiet.
+            await asyncio.sleep(0.2)
+            await ws.send_json({"type": "input", "event": "release"})
+            await asyncio.sleep(0.1)
+            # A second, separate hold fires a second time -- once each.
+            await ws.send_json({"type": "input", "event": "press"})
+            message = await ws.receive_json()
+            while message != {"type": "card", "card": None}:
+                message = await ws.receive_json()
+            assert fired == [None, None]
+            await ws.send_json({"type": "input", "event": "release"})
+    assert core.state == State.SLEEPING
+    assert session.start_calls == 0
+
+
+async def test_a_handler_set_while_the_key_is_down_does_not_swallow_the_release(monkeypatch):
+    # Found in review: the press went to core.py, a call connected and
+    # set the hold handler, and the release then hit the hold branch --
+    # core stuck in LISTENING with the capture running forever.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    app, session, cards, hold, core = _cards_app(hold_seconds=1.0)
+    hold.clear()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            hold.set_handler(lambda: None, seconds=1.0)  # a call connects mid-press
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            # (the harness's fake turn shows a card of its own on the way)
+            states = []
+            while "idle" not in states:
+                message = await ws.receive_json()
+                if message["type"] == "state":
+                    states.append(message["state"])
+            assert states == ["speaking", "idle"]
+            # And the next press is a hold, as the handler asked.
+            await ws.send_json({"type": "input", "event": "press"})
+            first = await ws.receive_json()
+            assert first["type"] == "card" and first["card"]["kind"] == "holding"
+            await ws.send_json({"type": "input", "event": "release"})
+    assert core.state == State.IDLE
+    assert FakeCapture.instances[0].stopped is True
+
+
+async def test_clearing_the_handler_mid_hold_ends_the_timer_and_the_next_hold_still_works(
+    monkeypatch,
+):
+    # Found in review: hold.clear() during a press left the tick task
+    # running forever and every later hold press was ignored.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    fired = []
+    app, session, cards, hold, core = _cards_app(
+        hold_seconds=0.3, on_hold_complete=lambda: fired.append(None)
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert (await ws.receive_json())["card"]["kind"] == "holding"
+            hold.clear()  # the other party hung up first
+            message = await ws.receive_json()
+            while message != {"type": "card", "card": None}:
+                message = await ws.receive_json()
+            await asyncio.sleep(0.5)  # past the threshold: nothing fires
+            assert fired == []
+            await ws.send_json({"type": "input", "event": "release"})
+            # core.py never saw that press, so the release goes nowhere.
+            await asyncio.sleep(0.05)
+            assert core.state == State.SLEEPING
+
+            hold.set_handler(lambda: fired.append(None), seconds=0.2)
+            await ws.send_json({"type": "input", "event": "press"})
+            message = await ws.receive_json()
+            assert message["card"]["kind"] == "holding"
+            while message != {"type": "card", "card": None}:
+                message = await ws.receive_json()
+            assert fired == [None]
+            await ws.send_json({"type": "input", "event": "release"})
+    assert session.start_calls == 0
+
+
+async def test_with_the_hold_handler_cleared_the_spacebar_is_a_spacebar_again(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    app, session, cards, hold, core = _cards_app(hold_seconds=1.0)
+    hold.clear()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    assert core.state == State.LISTENING
+    assert session.start_calls == 1
