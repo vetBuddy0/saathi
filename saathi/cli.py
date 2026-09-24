@@ -60,13 +60,26 @@ def _run() -> int:
     from saathi.config import Config
     from saathi.core import Core
     from saathi.identity.store import IdentityStore
+    from saathi.screen.cards import CardController, HoldController
     from saathi.screen.server import run
+    from saathi.tools.media import MediaController
 
     config = Config.load()
     core = Core()
 
     store = IdentityStore(config.identity_db_path)
     store.create()
+
+    # Beside the face: the one card controller every tool asks through,
+    # the hold seam (spacebar held to confirm), and the media panel.
+    # Built once, before the session, so tools close over the same
+    # instances the screen server installs its broadcast on -- two
+    # controllers would mean a card a tool shows never reaches the
+    # screen. Calling (PR #4) is parked; it will take `cards`/`hold`
+    # from here rather than build its own.
+    cards = CardController()
+    hold = HoldController(cards)
+    media = MediaController(cards=cards)
 
     session = None
     capture_source_id = None
@@ -76,6 +89,10 @@ def _run() -> int:
         # fake press/release path in screen/server.py unchanged.
         from saathi.audio.aec import EchoCancelHandles, ensure_echo_cancellation
         from saathi.audio.devices import DeviceManager, PulseAudioBackend
+        from saathi.identity.correction import (
+            CORRECT_MEMORY_DESCRIPTION,
+            make_correct_memory_tool,
+        )
         from saathi.identity.preferences import (
             LANGUAGE_KEY,
             TTS_BACKEND_KEY,
@@ -83,6 +100,7 @@ def _run() -> int:
         )
         from saathi.tools.language import SET_LANGUAGE_DESCRIPTION, make_set_language_tool
         from saathi.tools.llm_schema import tool_to_openai_schema
+        from saathi.tools.media import MEDIA_DESCRIPTION, make_media_tool
         from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
         from saathi.voice.engine.cascade import CascadeSession
         from saathi.voice.tts.registry import DEFAULT_BACKEND_ID
@@ -97,7 +115,17 @@ def _run() -> int:
         registry = Registry()
         set_language_tool = make_set_language_tool(store)
         registry.register(set_language_tool)
-        granted_permissions = frozenset({"preferences"})
+        # correct_memory: her own way to fix a wrong belief; no consequence
+        # outside the device (DECISIONS 2026-09-25, "memory" scope).
+        correct_memory_tool = make_correct_memory_tool(store)
+        registry.register(correct_memory_tool)
+        # play_music: a song on her own screen has no consequence outside
+        # the room (DECISIONS 2026-09-25, reversing 2026-09-18's "music
+        # is out for v1"). "calls"/"contacts" stay ungranted: Calling is
+        # parked on its branch with four serious review findings (TODO.md).
+        media_tool = make_media_tool(media)
+        registry.register(media_tool)
+        granted_permissions = frozenset({"preferences", "memory", "music"})
 
         def handle_intent(name: str, arguments: dict) -> dict:
             try:
@@ -107,7 +135,11 @@ def _run() -> int:
             except PermissionDenied as exc:
                 return {"status": "denied", "detail": str(exc)}
 
-        tool_schemas = [tool_to_openai_schema(set_language_tool, SET_LANGUAGE_DESCRIPTION)]
+        tool_schemas = [
+            tool_to_openai_schema(set_language_tool, SET_LANGUAGE_DESCRIPTION),
+            tool_to_openai_schema(correct_memory_tool, CORRECT_MEMORY_DESCRIPTION),
+            tool_to_openai_schema(media_tool, MEDIA_DESCRIPTION),
+        ]
 
         manager = DeviceManager(PulseAudioBackend())
         mic, speaker = manager.choose("input"), manager.choose("output")
@@ -143,6 +175,9 @@ def _run() -> int:
         session=session,
         capture_source_id=capture_source_id,
         store=store,
+        media=media,
+        cards=cards,
+        hold=hold,
     )
     return 0
 

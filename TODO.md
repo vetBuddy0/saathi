@@ -44,12 +44,14 @@ rather than guesses:
 Next step: collect five or six real exchanges where it felt wrong,
 with what she said, before changing anything.
 
-**Retrieval's relevance axis is dead.** Every `episodes.embedding` is
-NULL: Groq offers no embedding model, and CLAUDE.md rules out a vector
-DB or a second vendor. `retrieve_episodes` degrades to recency +
-importance, as its docstring says — but SPEC.md's "recency + importance
-+ relevance" is currently two out of three. Needs an embedding source
-decided (a vendor question — the user's).
+**Retrieval's relevance axis is live but weak.** ~~Every
+`episodes.embedding` is NULL~~ — resolved 2026-09-25 by PR #2: local
+MiniLM via onnxruntime, embedded between turns. Remaining: under
+equal-weight min-max, relevance lifts an episode into the sent set but
+rarely beats recency + importance (numbers in DECISIONS.md). Not
+retuned — retuning changes what she hears, so it's the user's call.
+`backfill_embeddings` is not yet invoked between turns (cascade.py diff
+in `docs/completed/memory.md`).
 
 **Latency budget is red.** 1213 ms p95 vs 1200 ms. Left deliberately
 (DECISIONS.md, 2026-09-19) until Google streaming TTS is unblocked;
@@ -64,23 +66,82 @@ stops silence from reaching STT; a cough or a chair scrape that Silero
 counts as ~96 ms of voice still goes through and may come back as
 "Thank you." Rarer, not gone.
 
+## Calling (PR #4) — parked on `batch/calling`, not on main
+
+Parked 2026-09-25 after review. The integration of #4 against the real
+cards is preserved on `reconcile/calling` (one test still failing
+there). S1 alone would break the whole device on stage, not just
+calling. Fix S1–S4 before #4 merges.
+
+**S1 — A missed call jams calling AND the spacebar.** An unanswered,
+declined or busy call leaves `CallController` in DIALLING forever
+(`saathi/call/controller.py:137-155`, `:184-189`). DIALLING is left
+only by `stream_stopped`, and a Media Stream opens only after the call
+is answered; there is no StatusCallback, no timeout, and `fetch_call`
+is never used. Meanwhile the hold handler stays registered, so a short
+spacebar tap does nothing (`hangup.py:259-262`).
+*Repro:* dial the test number and don't answer (or decline). Then
+"call X" → "A call is already in progress" (`tools/calling.py:362-366`)
+and every short spacebar tap is swallowed until a 2 s hold. Same if the
+tunnel has died (Twilio can't fetch `/twiml`, no stream ever opens).
+*Fix:* poll `fetch_call(sid)` on a worker thread while DIALLING, or a
+~45 s ring timeout; tear down on no-answer / busy / failed / canceled.
+
+**S2 — A name one letter off dials without asking.** Confident band is
+≥0.93 plus a 0.05 margin (`saathi/call/match.py:43-47`, `:146-147`);
+the margin only protects her when both people are saved.
+*Repro (measured):* only Deepak saved, she says "call Deepa" → 0.960,
+rings with "Calling Deepak." Also Arun→Aruna 0.960, Amit→Amita 0.960,
+Mohan→Mohana 0.967, Vijay→Vijaya 0.967, Ram→Rama / Raj→Raju / Jun→June /
+Ali→Alia 0.942; Tan→Tang and Chen→Cheng fold to 1.000.
+*Fix:* confident only when the folded forms are identical (or equal
+length); anything else → unsure → a Confirm card.
+
+**S3 — Two different people with the same name merge.** Relations are
+attached by normalised name and moved onto the latest row for that
+name; the edge's own `dst` is ignored (`saathi/call/contacts.py:315-324`).
+*Repro (reproduced by script):* save Priya +6591111111 as daughter,
+then Priya +6592222222 as neighbour → `find_by_relation("my daughter")`
+returns the neighbour's number, relations ('daughter', 'neighbour').
+"Call Priya" also dials the latest Priya without asking.
+*Fix:* resolve a relation through the edge's `dst` entity; latest-wins
+only among rows for the same person; ask when a same-name save carries
+a different relation.
+
+**S4 — Two people with the same relation: the newest wins, silently.**
+`_latest_edges` keeps one `dst` per relation, so a new edge is treated
+as a correction (`contacts.py:335-346`, `tools/calling.py:439-442`),
+and the relation path dials straight away without the choice flow.
+*Repro:* save daughter Priya, later save daughter Anita → "call my
+daughter" always rings Anita; Priya is unreachable by relation.
+*Fix:* several current edges for one relation → `ChoiceFlow.offer`;
+only a same-person re-save replaces an edge.
+
+Minor (same review; details in the PR #4 thread): M1 teardown still
+stops parec/pacat on the screen loop; M2 an exception in `audio.stop()`
+leaves the controller in IN_CALL (try/finally); M3 a failed REST
+hang-up leaves the far end on silence (close the media socket too);
+M4 `stream_started` doesn't check callSid, so a late stream from a
+previous call can take the live mic; M5 `dial()` holds the lock
+through tunnel/REST work and `RelayError` escapes untranslated; M6
+pending cards never expire, so a stale "Call Deepak?" can be answered
+by an unrelated later "yes"; M7 a mismatched voice answer is reported
+to the model as "no card" while the card is still up; M8 the save on a
+tapped "yes" runs SQLite on the screen loop and can fail silently; M9
+a tap landing between `show()` and registration is lost.
+
 ## Open decisions (waiting on the user)
 
-- **`IdentityStore.retire(table, row_id, at)`** — one narrow "this is
-  no longer true" primitive (flips `rules.active`/`reminders.active`,
-  sets `edges.until`). One of the five interfaces, so not decided
-  alone. Blocks the correction tool ("no, that was my sister") and
-  making `edges.since/until` real. See `identity/profile.py`'s
-  docstring for the same block, hit earlier.
+- ~~**`IdentityStore.retire(table, row_id, at)`**~~ — decided by the
+  user and merged 2026-09-25 (PR #2), with the correction tool.
 - **Nothing writes `entities` or `edges` at all.** Making `since/until`
   real means building entity resolution from turns first, not just
   filling two columns.
 - **SPEC.md Memory-section diff** (three layers, silent turns, real
   prompt-token count) — proposed 2026-09-24, not applied. The user
   applies spec edits.
-- **Where a correction is recorded** — an `episodes` row with high
-  importance, or a `corrections(id, ts, rule_id, said)` table (a
-  schema diff).
+- ~~**Where a correction is recorded**~~ — decided: a high-importance
+  `episodes` row, no new table (PR #2).
 
 ## Dev-machine notes
 
