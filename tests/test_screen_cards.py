@@ -74,6 +74,35 @@ def test_readback_groups_digits_and_speaks_them_one_at_a_time():
     assert card.spoken == "Priya's number 0 4 1, 2 3 4, 5 6 7 8"
 
 
+def test_an_international_number_is_spoken_with_the_word_plus_not_its_letters():
+    # Found in review: "+61…" was being read as "p l u s, 6 1 4, …".
+    card = readback("Priya's number", "+61412345678")
+    assert card.value == "+614 123 456 78"
+    assert card.spoken == "Priya's number plus 6 1 4, 1 2 3, 4 5 6, 7 8"
+
+
+def test_a_decimal_or_a_time_is_not_regrouped_as_a_phone_number():
+    # Found in review: "37.5" was becoming "375" on screen and "3 7 5" aloud.
+    assert group_digits("37.5") == "37.5"
+    assert group_digits("10:30") == "10:30"
+    assert group_digits("10.30") == "10.30"
+    assert speak_value("37.5") == "37.5"
+    assert readback("Temperature", "37.5").spoken == "Temperature 37.5"
+
+
+def test_the_screen_is_told_in_the_order_the_current_card_changed():
+    # _emit runs under the lock: whatever `current` settles on is the
+    # last thing broadcast. Sequential here; the race it guards is a
+    # show() from the executor thread against one from the loop.
+    controller, sent = _controller()
+    a, b = choice("A?", ["x", "y"]), confirm("B?")
+    controller.show(a)
+    controller.show(b)
+    controller.answer(b.id, {"yes": True})
+    assert [m["card"] and m["card"]["id"] for m in sent] == [a.id, b.id, None]
+    assert controller.current is None
+
+
 def test_group_digits_handles_the_shapes_a_phone_number_takes():
     assert group_digits("0412345678") == "041 234 5678"
     assert group_digits("+61 412 345 678") == group_digits("+61412345678")

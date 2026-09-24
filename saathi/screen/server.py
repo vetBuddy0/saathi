@@ -315,12 +315,24 @@ def build_app(
     # the press timestamp, never from repeated events.
     async def run_hold(started_at: float) -> None:
         try:
-            while True:
+            # `hold.holding` goes False on abandon() -- including the
+            # abandon inside hold.clear() while a press is still down
+            # (the other party hung up first). Without this exit the
+            # task would tick forever and block every later hold.
+            while hold.holding:
                 await asyncio.sleep(_HOLD_TICK_SECONDS)
                 if hold.tick(time.monotonic() - started_at):
                     return
         finally:
             hold_task["task"] = None
+
+    # Which way the press that is currently down went: "hold" or
+    # "core". A release is routed the same way as its press, whatever
+    # `hold.active` says by then -- a handler set (or cleared) while
+    # the key is down must not strand core.py in LISTENING with the
+    # capture running, or hand core.py a release it never saw a press
+    # for. Found in review.
+    press_route: dict[str, str | None] = {"value": None}
 
     async def index(_request: web.Request) -> web.FileResponse:
         return web.FileResponse(_STATIC_DIR / "index.html")
@@ -389,7 +401,12 @@ def build_app(
                 if payload.get("type") != "input":
                     continue
                 kind = payload.get("event")
-                if hold is not None and hold.active:
+                if kind == "press":
+                    press_route["value"] = "hold" if hold is not None and hold.active else "core"
+                routed_to_hold = press_route["value"] == "hold"
+                if kind == "release":
+                    press_route["value"] = None
+                if routed_to_hold:
                     # The button means "hold to confirm" for now; core.py
                     # never sees this press. See the hold seam above.
                     if kind == "press" and hold_task["task"] is None:

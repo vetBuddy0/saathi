@@ -141,13 +141,18 @@ def holding(label: str, progress: float = 0.0, card_id: str | None = None) -> Ca
     return card
 
 
-_DIGITS_ONLY = re.compile(r"^[+\d\s\-().]+$")
+# A phone-number shape: digits with the spacing/punctuation numbers are
+# written with. A "." or ":" means a decimal or a time ("37.5",
+# "10:30"), which must pass through untouched -- found in review:
+# "37.5" was becoming "375".
+_DIGITS_ONLY = re.compile(r"^\+?[\d\s\-()]+$")
 
 
 def group_digits(value: str) -> str:
-    """"0412345678" -> "041 234 5678". Non-numeric values pass through
-    untouched. Groups of three from the left; a trailing single digit
-    joins the group before it (no "… 567 8")."""
+    """"0412345678" -> "041 234 5678". Anything that isn't a phone-number
+    shape (a decimal, a time, a name) passes through untouched. Groups
+    of three from the left; a trailing single digit joins the group
+    before it (no "… 567 8")."""
     text = str(value).strip()
     if not text or not _DIGITS_ONLY.match(text):
         return text
@@ -167,8 +172,12 @@ def speak_value(grouped: str) -> str:
     if not _DIGITS_ONLY.match(grouped):
         return grouped
     parts = []
-    for group in grouped.replace("+", "plus ").split():
-        parts.append(" ".join(group))
+    for group in grouped.split():
+        if group.startswith("+"):
+            # "plus" is a word, not four letters -- found in review.
+            parts.append(("plus " + " ".join(group[1:])).strip())
+        else:
+            parts.append(" ".join(group))
     return ", ".join(parts)
 
 
@@ -259,13 +268,18 @@ class CardController:
             raise ValueError(f"unknown card kind {card.kind!r}")
         if not card.spoken:
             raise ValueError("every card must have something to say")
+        # The broadcast happens under the lock so the screen is told
+        # in the same order `_current` changed -- two shows racing from
+        # the executor and loop threads must not leave the screen on a
+        # card whose taps are then rejected as stale (found in review).
+        # Callbacks run outside it: one may show() a card of its own.
         with self._lock:
             previous = self._current
             self._current = card
             replaced = None
             if previous is not None and previous.id != card.id:
                 replaced = self._release(previous, {"dismiss": True}, "code")
-        self._emit(card)
+            self._emit(card)
         if replaced is not None:
             self._notify(replaced)
         return card.id
@@ -275,7 +289,7 @@ class CardController:
             previous = self._current
             self._current = None
             released = self._release(previous, {"dismiss": True}, "code") if previous else None
-        self._emit(None)
+            self._emit(None)
         if released is not None:
             self._notify(released)
 
@@ -293,7 +307,7 @@ class CardController:
                 return False
             self._current = None
             result = self._release(card, valid, source)
-        self._emit(None)
+            self._emit(None)
         self._notify(result)
         return True
 

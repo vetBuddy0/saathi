@@ -62,17 +62,26 @@ const DEMO_RESULTS = [
   },
 ];
 
-function loadIframeApi() {
+function loadIframeApi(src) {
   if (window.YT && window.YT.Player) return Promise.resolve();
   if (!loadIframeApi.pending) {
-    loadIframeApi.pending = new Promise((resolve) => {
+    loadIframeApi.pending = new Promise((resolve, reject) => {
       const previous = window.onYouTubeIframeAPIReady;
       window.onYouTubeIframeAPIReady = () => {
         if (typeof previous === "function") previous();
         resolve();
       };
       const script = document.createElement("script");
-      script.src = IFRAME_API_SRC;
+      script.src = src;
+      // Offline, or YouTube blocked: the script never arrives. Without
+      // this the first play would wait forever and every later play
+      // would queue behind it (found in review). Failing lets the next
+      // play try again.
+      script.onerror = () => {
+        loadIframeApi.pending = null;
+        script.remove();
+        reject(new Error("iframe api failed to load"));
+      };
       document.head.appendChild(script);
     });
   }
@@ -81,6 +90,7 @@ function loadIframeApi() {
 
 export function createMediaPanel(send, options = {}) {
   const demo = options.demo || null;
+  const iframeApiSrc = options.iframeApiSrc || IFRAME_API_SRC; // tests point this elsewhere
 
   let view = "none"; // "none" | "results" | "player"
   let results = [];
@@ -218,7 +228,18 @@ export function createMediaPanel(send, options = {}) {
     iframe.setAttribute("title", "video");
     loadedVideoId = videoId;
     frameHolder.replaceChildren(iframe);
-    await loadIframeApi();
+    try {
+      await loadIframeApi(iframeApiSrc);
+    } catch (error) {
+      attaching = false;
+      pendingVideoId = null;
+      loadedVideoId = null;
+      frameHolder.replaceChildren();
+      send({ type: "media_event", event: "error", video_id: videoId });
+      view = "none";
+      render();
+      return;
+    }
     player = new window.YT.Player(iframe, {
       events: {
         onReady: onPlayerReady,

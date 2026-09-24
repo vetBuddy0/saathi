@@ -6,7 +6,8 @@ swaps an implementation rather than inventing plumbing". This is that
 swap. It keeps the same `Tool` shape, the same registry, the same
 `"music"` permission gate, and replaces the handler. The stub itself is
 left untouched (it is still what `stubs.register()` installs); `cli.py`
-registers this tool instead.
+is to register this tool instead -- the exact diff is in
+`docs/completed/screen.md`, not yet applied (cross-territory).
 
 Why a controller object and not a bare handler: search results have to
 stay referenceable for the rest of the conversation. "Play the second
@@ -62,6 +63,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from saathi.screen.cards import Answer, CardController, choice, confirm
 from saathi.tools.registry import Tool
 
 logger = logging.getLogger(__name__)
@@ -99,7 +101,10 @@ ACTIONS = (
     "smaller",
     "again",
     "next",
+    "never_mind",
 )
+
+CARD_TITLE = "Which one would you like?"
 
 ORDINALS = {1: "One", 2: "Two", 3: "Three"}
 
@@ -112,7 +117,8 @@ MEDIA_DESCRIPTION = (
     "for you to offer out loud by number. Use 'play' with choice 1, 2 or 3 when she "
     "picks one ('the second one', 'the first one'); 'play' with no choice means the one she most "
     "recently meant ('that one'). 'again' replays what last played. 'next' plays "
-    "the next result. 'pause', 'resume' ('carry on'), 'stop', 'louder', 'quieter', "
+    "the next result. 'never_mind' when she waves the offered choices away without "
+    "picking one. 'pause', 'resume' ('carry on'), 'stop', 'louder', 'quieter', "
     "'bigger' (fill the screen) and 'smaller' (back beside your face) do what "
     "they say. Never invent a title: only offer what the tool returned."
 )
@@ -224,9 +230,25 @@ class MediaController:
     dropped, not queued -- a message about a screen that isn't there
     yet has nothing to say to a screen that arrives later."""
 
-    def __init__(self, search: Search | None = None, broadcast: Broadcast | None = None) -> None:
+    def __init__(
+        self,
+        search: Search | None = None,
+        broadcast: Broadcast | None = None,
+        cards: CardController | None = None,
+    ) -> None:
         self._search: Search = search or youtube_search
         self._broadcast: Broadcast | None = broadcast
+        # With a CardController, the offer is a Choice card (screen/
+        # cards.py): the same three numbered titles, but tappable and
+        # dismissable, and spoken from the card's own text. The panel's
+        # own results view is then not drawn -- two copies of the same
+        # three lines beside the face would be the "dense list" the
+        # brief rules out. Without one (tests, a screen without cards)
+        # the panel's results view is what she sees, as before.
+        self._cards = cards
+        self._card_id: str | None = None
+        if cards is not None:
+            cards.on_answer(self._on_card_answer)
         self.last_results: list[MediaResult] = []
         self.last_query: str | None = None
         self.now_playing: MediaResult | None = None
@@ -243,6 +265,55 @@ class MediaController:
 
     def set_broadcast(self, broadcast: Broadcast | None) -> None:
         self._broadcast = broadcast
+
+    # -- the choice card ---------------------------------------------------
+
+    @property
+    def card_id(self) -> str | None:
+        """The id of the Choice card currently offering `last_results`,
+        or None. Exposed for the server tests and for whoever needs to
+        know a media card is up."""
+        return self._card_id
+
+    def _on_card_answer(self, answer: Answer) -> None:
+        """A tap on the media Choice card (or its dismissal, from a tap
+        or from a replacing `show()`). A voice answer also lands here,
+        because the tool answers the card through the same door -- but
+        the tool is already about to play, so only a tap starts
+        playback from this callback. The tap is the user gesture the
+        browser's autoplay rule wants, so playback starting here is
+        "from the interaction", not from a timer."""
+        if answer.card_id != self._card_id:
+            return
+        self._card_id = None
+        if answer.source == "voice":
+            return
+        if answer.dismissed or answer.yes is False:
+            return  # "never mind" / "no": the results stay referenceable by voice
+        if answer.yes is True and self.last_results:
+            self._play(self.last_results[0])  # the single-result Confirm card
+            return
+        n = answer.choice
+        if n is not None and 1 <= n <= len(self.last_results):
+            self._play(self.last_results[n - 1])
+
+    def _settle_card(self, result: MediaResult | None) -> None:
+        """Playback is starting (or everything is stopping): the offer
+        card, if up, is answered -- with the choice she made, when the
+        result is one of its options -- or cleared. The card's own
+        callback sees `source="voice"` and leaves the playing to us."""
+        card_id = self._card_id
+        if card_id is None or self._cards is None:
+            return
+        self._card_id = None
+        current = self._cards.current
+        if current is None or current.id != card_id:
+            return  # already replaced by someone else's card
+        if result is not None and result in self.last_results:
+            picked = {"yes": True} if current.kind == "confirm" else {"choice": result.index}
+            if self._cards.answer(card_id, picked, source="voice"):
+                return
+        self._cards.answer(card_id, {"dismiss": True}, source="voice")
 
     # -- the browser reporting back ------------------------------------
 
@@ -294,6 +365,15 @@ class MediaController:
                 "status": "unavailable",
                 "note": f"{exc} Say so plainly and briefly; don't offer any titles.",
             }
+        # A video the player already failed on is never offered again --
+        # by voice or on a card -- so a tap can't land on one. Renumbered
+        # so what she hears and taps is still One, Two, Three.
+        if self.unplayable:
+            playable = [r for r in results if r.video_id not in self.unplayable]
+            results = [
+                MediaResult(index=i + 1, video_id=r.video_id, title=r.title)
+                for i, r in enumerate(playable)
+            ]
         if not results:
             return {
                 "status": "none",
@@ -306,14 +386,42 @@ class MediaController:
         self.last_query = query
         self.playing = False
         self.paused = False
+        if self._cards is not None and self.now_playing is not None:
+            # With cards, the panel's results view isn't drawn, so the
+            # results message can't be what takes the player down (as
+            # it is in media-panel.js without cards): say stop outright.
+            self._emit("stop")
+        if self._cards is not None:
+            # A replacing show() dismisses any earlier card (including
+            # an earlier media card) through on_answer; stale ids are
+            # ignored there, so set the new id after showing.
+            if len(results) >= 2:
+                card = choice(CARD_TITLE, [r.title for r in results])
+            else:
+                # One result is a yes/no, not a choice of one (choice()
+                # refuses it, rightly). Found in review: this raised.
+                card = confirm(f"Play {results[0].title}?")
+            self._card_id = self._cards.show(card)
+            return {
+                "status": "ok",
+                "query": query,
+                "results": [r.spoken for r in results],
+                "spoken": card.spoken,
+                # The real model, asked to keep replies to two sentences,
+                # offered one of three titles when first tried (probe,
+                # 2026-09-25). She sees three; she must hear three.
+                "note": (
+                    "They are on screen as a numbered card she can tap. Say exactly this, "
+                    "all of it, one short sentence per title even though replies are "
+                    f"usually two sentences: \"{card.spoken}\" She can answer by tapping "
+                    "or by saying a number. Nothing is playing yet."
+                ),
+            }
         self._emit("results", query=query, results=[r.as_message() for r in results])
         return {
             "status": "ok",
             "query": query,
             "results": [r.spoken for r in results],
-            # The real model, asked to keep replies to two sentences,
-            # offered one of three titles when first tried (probe,
-            # 2026-09-25). She sees three; she must hear three.
             "note": (
                 "These are now on screen, numbered. Read all of them out loud, in this "
                 "order, each as its number then its title exactly as given -- one short "
@@ -348,6 +456,7 @@ class MediaController:
                        "something else.")
                 ),
             }
+        self._settle_card(result)
         self.now_playing = result
         self.playing = True
         self.paused = False
@@ -434,10 +543,20 @@ class MediaController:
         was_playing = self.playing
         self.playing = False
         self.paused = False
+        self._settle_card(None)
         self._emit("stop")
         if not was_playing:
             return {"status": "ok", "note": "Nothing was playing; the screen is clear."}
         return {"status": "ok", "note": "Stopped. One word is enough."}
+
+    def _do_never_mind(self) -> dict[str, Any]:
+        """"Never mind" said out loud: the offer card goes, nothing
+        starts, and the three results stay referenceable -- "actually,
+        the second one" a moment later still works."""
+        if self._card_id is None:
+            return {"status": "ok", "note": "Nothing was being offered. Let it go; one word."}
+        self._settle_card(None)
+        return {"status": "ok", "note": "The choices are put away. One word is enough."}
 
     def _set_volume(self, level: int) -> dict[str, Any]:
         level = max(MIN_VOLUME, min(MAX_VOLUME, level))

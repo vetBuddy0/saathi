@@ -181,6 +181,59 @@ document.body.dataset.out = JSON.stringify(out);
 """
 )
 
+_OFFLINE_SCENARIO = """
+import { createMediaPanel } from "%(panel)s";
+// No window.YT stub and an API script that cannot load: the first play
+// must fail out loud (media_event error) and free the panel for the
+// next play, not queue every later play behind a promise that never
+// resolves (found in review).
+const sent = [];
+const panel = createMediaPanel((m) => sent.push(m), { iframeApiSrc: "%(missing)s" });
+const out = {};
+const until = (pred) => new Promise((r) => {
+  const tick = () => (pred() ? r() : setTimeout(tick, 5));
+  tick();
+});
+panel.onMessage({ type: "media", action: "play", video_id: "vidA", title: "A", index: 1,
+  volume: 70, fullscreen: false });
+await until(() => sent.some((m) => m.event === "error"));
+out.error_sent = sent.filter((m) => m.event === "error");
+out.classes_after = Array.from(document.body.classList);
+out.iframes_after = document.querySelectorAll("iframe").length;
+// A later play tries again from scratch rather than being swallowed.
+window.YT = {
+  Player: class {
+    constructor(el, o) { setTimeout(() => o.events.onReady({ target: this }), 0); }
+    setVolume() {}
+    playVideo() { window.played = true; }
+    loadVideoById() {}
+  },
+};
+panel.onMessage({ type: "media", action: "play", video_id: "vidB", title: "B", index: 2,
+  volume: 70, fullscreen: false });
+await until(() => window.played === true);
+out.second_play_started = window.played === true;
+out.iframes_now = document.querySelectorAll("iframe").length;
+document.body.dataset.out = JSON.stringify(out);
+"""
+
+
+@pytest.fixture(scope="module")
+def offline() -> dict:
+    return run_module_script(
+        _OFFLINE_SCENARIO
+        % {"panel": module_url("media-panel.js"), "missing": module_url("does-not-exist.js")}
+    )
+
+
+def test_an_api_script_that_fails_to_load_reports_an_error_and_frees_the_panel(offline):
+    assert offline["error_sent"] == [{"type": "media_event", "event": "error", "video_id": "vidA"}]
+    assert offline["classes_after"] == []
+    assert offline["iframes_after"] == 0
+    assert offline["second_play_started"] is True
+    assert offline["iframes_now"] == 1
+
+
 _BODY = '<div id="face"></div>'
 
 

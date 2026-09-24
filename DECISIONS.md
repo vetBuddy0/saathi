@@ -472,3 +472,60 @@ the Pi can't drop under them. The floors are asserted from computed
 styles in a real 1080p headless Chromium, not from the CSS text.
 Contrast pairs are named tokens in `:root` so the AAA test reads the
 same values the page does.
+
+**2026-09-25 — With a `CardController`, a YouTube search offers its
+three results as a Choice card and the media panel's own results view
+is not drawn.** Two copies of the same three lines beside the face is
+the dense list the brief rules out, and the card is strictly more: the
+same numbers, tappable, dismissable, spoken from its own text. The
+panel's results view stays for a screen without cards (and the
+existing tests), which is why `MediaController(cards=None)` keeps the
+old behaviour byte for byte.
+
+**2026-09-25 — Tap and voice both reach `_play` through the card, and
+only a tap starts playback from the card's callback.** The tool
+answers its own card with `source="voice"` when she says a number, so
+the callback can tell the two apart and not start the same video
+twice. A tap is the user gesture the browser's autoplay rule wants; a
+`play` message that follows it is "from the interaction", never from
+a timer. "Never mind" (spoken → the `never_mind` action; tapped → the
+card's dismiss) clears the card and leaves the results referenceable —
+"actually, the second one" a moment later still works.
+
+**2026-09-25 — `tools/media.py` imports `screen/cards.py`.** A tool
+importing a screen module looks like reaching into the UI; it isn't:
+`cards.py` is the interface every stream is told to import, it never
+touches the socket, and the server installs its broadcast. The
+alternative — passing card builders in through `cli.py` — would have
+hidden the dependency without removing it.
+
+**2026-09-25 — A tap on the media Choice card plays without a second
+`Registry.call`.** Raised in review as "a tool called without its
+permission check". The check gates what the *engine* may execute: the
+card only exists because a permission-checked `search` put it there,
+and the tap is her answering the question that call asked, not a new
+intent from the model. Routing a tap back through the registry would
+need the browser to hold a permission grant, which is the wrong
+direction for trust. Kept as is; if `"music"` is ever withdrawn at
+runtime the search that would offer a card is what's refused.
+
+**2026-09-25 — One search result is offered as a Confirm card ("Play
+X?"), not a Choice of one.** `choice()` refuses one option, correctly;
+review found the card path raising on it. A yes/no is the honest shape
+of the question.
+
+**2026-09-25 — A video the player reported unplayable is filtered out
+of every later offer and the rest renumbered.** Review found a tap on
+such a result clearing the card and saying nothing. Not offering it is
+simpler and kinder than a second card explaining why it didn't play.
+
+**2026-09-25 — A release is routed the way its press was, not by
+`hold.active` at release time.** Review found two mirror-image leaks
+when a hold handler was set or cleared while the key was down: core
+stranded in LISTENING with the capture running, or a release with no
+press behind it. The hold timer also exits on `abandon()`, so
+`hold.clear()` mid-press no longer leaves a task ticking forever.
+
+**2026-09-25 — `readback()` only regroups phone-number shapes;
+decimals and times pass through.** Review: "37.5" was becoming "375".
+A "." or ":" now means "not a phone number".

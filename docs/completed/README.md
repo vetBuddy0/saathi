@@ -15,6 +15,9 @@ record of every substitution and judgment call across all of them.
   encoding/EOU measurement, triggered by a real over-budget sample
 - [Checkpoint 3](checkpoint-3.md) — `reflect.py`, `profile.py`,
   `initiative/scheduler.py` + `policy.py`, started, not wired to speak
+- [Screen](screen.md) — accessibility cards (the module other streams
+  import) + the YouTube panel beside the face; the AEC finding; the
+  `cli.py`/`audio/aec.py` diffs still to apply
 
 ## Google TTS — exactly what's needed when you're back
 

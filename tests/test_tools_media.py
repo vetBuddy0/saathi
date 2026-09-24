@@ -454,3 +454,184 @@ def test_search_rejects_a_non_object_body(monkeypatch):
     monkeypatch.setattr(media_module.urllib.request, "urlopen", lambda url, timeout: Response())
     with pytest.raises(MediaSearchError):
         youtube_search("x", api_key="k")
+
+
+# -- with cards: the offer is a Choice card, answered by tap or voice -------
+
+
+def _carded(results):
+    from saathi.screen.cards import CardController
+
+    sent = []
+    cards = CardController(broadcast=sent.append)
+    controller = MediaController(search=lambda q: results, broadcast=sent.append, cards=cards)
+    return controller, cards, sent
+
+
+def test_with_cards_a_search_shows_a_choice_card_instead_of_the_panels_results(results):
+    controller, cards, sent = _carded(results)
+    reply = controller.handle("search", query="old Chinese songs")
+
+    assert [m["type"] for m in sent] == ["card"]  # no media "results" message
+    card = sent[0]["card"]
+    assert card["kind"] == "choice"
+    assert card["id"] == controller.card_id == cards.current.id
+    assert [o["label"] for o in card["options"]] == [r.title for r in results]
+    assert [o["n"] for o in card["options"]] == [1, 2, 3]
+    assert reply["status"] == "ok"
+    assert reply["spoken"] == card["spoken"]
+    assert card["spoken"].startswith("Which one would you like? One: ")
+    assert card["spoken"] in reply["note"]
+    assert reply["results"][1].startswith("Two: ")
+    assert json.dumps(reply)
+
+
+def test_a_tap_on_the_card_plays_that_result_and_clears_the_card(results):
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    card_id = controller.card_id
+    assert cards.answer(card_id, {"choice": 2}, source="tap") is True
+    assert controller.card_id is None
+    assert cards.current is None
+    plays = [m for m in sent if m["type"] == "media" and m["action"] == "play"]
+    assert len(plays) == 1
+    assert plays[0]["video_id"] == results[1].video_id
+    assert controller.now_playing == results[1]
+    assert sent[-1]["action"] == "play"  # the play follows the card's clear
+
+
+def test_the_second_one_by_voice_answers_the_card_and_plays_once(results):
+    controller, cards, sent = _carded(results)
+    answers = []
+    cards.on_answer(answers.append)
+    controller.handle("search", query="q")
+    card_id = controller.card_id
+    reply = controller.handle("play", choice=2)
+    assert reply["status"] == "ok"
+    assert cards.current is None and controller.card_id is None
+    assert [(a.card_id, a.choice, a.source) for a in answers] == [(card_id, 2, "voice")]
+    plays = [m for m in sent if m["type"] == "media" and m["action"] == "play"]
+    assert len(plays) == 1  # the callback did not start it a second time
+    assert plays[0]["index"] == 2
+
+
+def test_never_mind_by_voice_or_tap_clears_the_card_and_keeps_the_results(results):
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    reply = controller.handle("never_mind")
+    assert reply["status"] == "ok"
+    assert cards.current is None and controller.card_id is None
+    assert sent[-1] == {"type": "card", "card": None}
+    assert not [m for m in sent if m["type"] == "media"]
+    # "actually, the second one" a moment later still works
+    controller.handle("play", choice=2)
+    assert sent[-1]["action"] == "play" and sent[-1]["index"] == 2
+
+    controller.handle("search", query="q")
+    card_id = controller.card_id
+    cards.answer(card_id, {"dismiss": True}, source="tap")
+    assert controller.card_id is None
+    assert controller.last_results == results
+    assert controller.handle("never_mind")["status"] == "ok"  # nothing up: harmless
+
+
+def test_a_new_search_replaces_the_card_and_stops_the_player(results):
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    first = controller.card_id
+    controller.handle("play", choice=1)
+    controller.handle("search", query="something else")
+    assert controller.card_id != first
+    assert cards.current.id == controller.card_id
+    stops = [m for m in sent if m["type"] == "media" and m["action"] == "stop"]
+    assert len(stops) == 1
+    assert controller.playing is False
+
+
+def test_stop_and_again_settle_the_card(results):
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    controller.handle("stop")
+    assert cards.current is None and controller.card_id is None
+    controller.handle("play", choice=3)
+    controller.handle("search", query="q")
+    controller.handle("again")  # replays 3, which is on the new card: answered as choice 3
+    assert cards.current is None
+    assert sent[-1]["action"] == "play" and sent[-1]["index"] == 3
+
+
+def test_an_answer_to_someone_elses_card_is_ignored_by_the_media_tool(results):
+    from saathi.screen.cards import confirm
+
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    media_card = controller.card_id
+    other = confirm("Call Priya?")
+    cards.show(other)  # replaces the media card: media forgets it
+    assert controller.card_id is None
+    cards.answer(other.id, {"yes": True}, source="tap")
+    assert not [m for m in sent if m["type"] == "media" and m["action"] == "play"]
+    assert media_card != other.id
+
+
+def test_a_tap_with_a_stale_choice_does_not_play(results):
+    controller, cards, sent = _carded(results[:2])
+    controller.handle("search", query="q")
+    assert cards.answer(controller.card_id, {"choice": 3}, source="tap") is False
+    assert not [m for m in sent if m["type"] == "media"]
+
+
+def test_a_single_result_is_offered_as_a_confirm_card_not_a_choice_of_one(results):
+    # Found in review: choice() with one option raised and took the turn
+    # down. One result is a yes/no.
+    controller, cards, sent = _carded(results[:1])
+    reply = controller.handle("search", query="q")
+    assert reply["status"] == "ok"
+    card = sent[-1]["card"]
+    assert card["kind"] == "confirm"
+    assert card["title"] == f"Play {results[0].title}?"
+    assert reply["spoken"] == card["spoken"]
+
+    # Tapping "Yes" plays it; the card goes.
+    assert cards.answer(card["id"], {"yes": True}, source="tap") is True
+    assert sent[-1]["action"] == "play" and sent[-1]["index"] == 1
+    assert controller.card_id is None
+
+    # "No" leaves it referenceable; "play it" by voice answers yes.
+    controller.handle("search", query="q")
+    cards.answer(controller.card_id, {"yes": False}, source="tap")
+    assert controller.playing is False
+    controller.handle("search", query="q")
+    answers = []
+    cards.on_answer(answers.append)
+    controller.handle("play")
+    assert answers[-1].yes is True and answers[-1].source == "voice"
+    assert sent[-1]["action"] == "play"
+    assert len([m for m in sent if m.get("action") == "play"]) == 2
+
+
+def test_an_unplayable_video_is_left_off_the_next_offer_and_the_rest_renumbered(results):
+    # Found in review: a tap on a result the player had already failed
+    # on cleared the card and said nothing. Now it's never offered.
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=2)
+    controller.on_browser_event("error", results[1].video_id)
+    reply = controller.handle("search", query="q")
+    assert [r.video_id for r in controller.last_results] == [
+        results[0].video_id,
+        results[2].video_id,
+    ]
+    assert [r.index for r in controller.last_results] == [1, 2]
+    assert [o["n"] for o in sent[-1]["card"]["options"]] == [1, 2]
+    assert reply["results"][1].startswith("Two: ")
+    controller.handle("play", choice=2)
+    assert sent[-1]["video_id"] == results[2].video_id
+
+
+def test_without_cards_nothing_changed(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    assert sent[-1]["action"] == "results"
+    assert controller.card_id is None
+    assert controller.handle("never_mind")["status"] == "ok"
