@@ -24,17 +24,49 @@ def setup(tmp_path):
     return flow, cards, path, learned, clock
 
 
-def test_a_complete_request_shows_a_readback_and_saves_nothing_yet(setup):
+def test_a_complete_request_shows_an_entry_card_and_saves_nothing_yet(setup):
+    # 2026-09-26: an Entry card (dialpad + name, both editable) replaced
+    # the Yes/No read-back at the user's request; the assertions on the
+    # kind and the shown number moved with it.
     flow, cards, path, _, _ = setup
     result = flow.propose(name="Priya", number="nine one two three four five six seven",
                           relation="my daughter")
-    assert result["status"] == "readback"
+    assert result["status"] == "entry"
     card = cards.current
-    assert card.kind == "readback" and card.value == "+65 9123 4567"
+    assert card.kind == "entry" and card.number == "+65 9123 4567" and card.name == "Priya"
     assert card.spoken.startswith("That's a Singapore number, plus six five.")
-    assert "nine one two three, four five six seven" in card.spoken
+    assert "nine one two three, four five six seven, and the name, Priya" in card.spoken
     assert card.spoken in result["note"]
     assert contacts.list_contacts(path) == []
+
+
+def test_an_edited_number_and_name_are_what_get_saved(setup):
+    flow, cards, path, _, _ = setup
+    flow.propose(name="Priya", number="nine one two three four five six seven",
+                 relation="daughter")
+    card = cards.current
+    assert cards.answer(card.id, {"number": "+659123456"}, source="tap")  # backspace
+    assert cards.answer(card.id, {"number": "+6591234568"}, source="tap")  # then an 8
+    assert cards.current.id == card.id and contacts.list_contacts(path) == []
+    assert cards.answer(card.id, {"yes": True, "number": "+6591234568", "name": "Anita"})
+    saved = contacts.find_by_relation(path, "daughter")
+    assert saved.phone == "+" + "6591234568" and saved.name == "Anita"
+    assert flow.outcome(card.id)["status"] == "saved"
+
+
+def test_a_yes_on_a_number_made_too_short_saves_nothing_and_shows_it_again(setup):
+    flow, cards, path, _, _ = setup
+    flow.propose(name="Priya", number="nine one two three four five six seven")
+    card = cards.current
+    assert cards.answer(card.id, {"yes": True, "number": "+65912345", "name": "Priya"})
+    assert contacts.list_contacts(path) == []
+    again = cards.current
+    assert again is not None and again.id != card.id and again.kind == "entry"
+    assert again.number == "+65 9123 45"  # what she tapped, not the old number
+    assert again.spoken.startswith("That number is too short.")
+    assert flow.outcome(card.id)["status"] == "check"
+    assert cards.answer(again.id, {"yes": True, "number": "+6591234567", "name": "Priya"})
+    assert contacts.find_by_exact_name(path, "Priya").phone == "+" + "6591234567"
 
 
 def test_yes_saves_and_learns_the_country(setup):
@@ -55,7 +87,7 @@ def test_no_saves_nothing_keeps_who_and_asks_only_for_the_number(setup):
     cards.answer(cards.current.id, {"yes": False}, source="voice")
     assert contacts.list_contacts(path) == []
     result = flow.propose(number="nine one two three four five six eight")
-    assert result["status"] == "readback"
+    assert result["status"] == "entry"
     assert "Priya" in cards.current.title
 
 
@@ -78,14 +110,14 @@ def test_a_pause_mid_number_across_turns_is_appended(setup):
     first = flow.propose(name="Priya", number="nine one two three")
     assert first["missing"] == ["more_digits"]
     second = flow.propose(number="four five six seven")
-    assert second["status"] == "readback" and cards.current.value == "+65 9123 4567"
+    assert second["status"] == "entry" and cards.current.number == "+65 9123 4567"
 
 
 def test_restating_from_the_start_replaces_rather_than_appends(setup):
     flow, cards, *_ = setup
     flow.propose(name="Priya", number="nine one two three")
     flow.propose(number="nine one two three four five six seven")
-    assert cards.current.value == "+65 9123 4567"
+    assert cards.current.number == "+65 9123 4567"
 
 
 def test_an_explicit_country_code_is_not_announced_as_inferred(setup):

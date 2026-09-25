@@ -54,6 +54,7 @@ from saathi.call.cards import CardController
 from saathi.call.choosing import ChoiceFlow
 from saathi.call.match import match as match_name
 from saathi.call.controller import CallController
+from saathi.call.numbers import parse_spoken_number, spell_digits
 from saathi.call.saving import SaveFlow
 from saathi.call.relay import RelayError
 from saathi.call.twilio import TwilioError
@@ -77,8 +78,12 @@ SAVE_CONTACT_DESCRIPTION = (
 )
 ANSWER_CARD_DESCRIPTION = (
     "Her spoken answer to the card on screen that you just read to her: `yes` true/false "
-    "for a read-back ('yes, that's right' / 'no'), or `choice` 1, 2 or 3 for a choice "
-    "('the first one' is 1)."
+    "('yes, save it' / 'no'), or `choice` 1, 2 or 3 for a choice ('the first one' is 1). "
+    "While a number-and-name card is up, pass a different number she says as `number` "
+    "exactly as she said it, words and all ('the number is nine one two...', 'change the "
+    "last digit to eight' -> the whole number as she now says it), and a different name "
+    "as `name` ('call her Anita', 'the name is Anita' -> 'Anita'). Never convert or "
+    "correct digits yourself."
 )
 
 _TEST_NUMBER_RE = re.compile(r"\btest\b", re.IGNORECASE)
@@ -228,11 +233,61 @@ def make_save_contact_tool(flow: SaveFlow) -> Tool:
     )
 
 
+def _spoken_edits(number: str | None, name: str | None) -> dict[str, Any] | None:
+    """A number she said, as digits (the same parser `save_contact` uses --
+    the model passes her words through); a name, trimmed. None when a
+    number was given but no digit was understood."""
+    edits: dict[str, Any] = {}
+    if number:
+        heard = parse_spoken_number(number)
+        if not heard.digits:
+            return None
+        edits["number"] = ("+" if heard.international else "") + heard.digits
+    if name and name.strip():
+        edits["name"] = name.strip()
+    return edits
+
+
+def _shown_note(cards: CardController) -> dict[str, Any]:
+    """After a voice edit: what the card shows now, for her to hear."""
+    card = cards.current
+    if card is None or card.kind != "entry":
+        return {"status": "changed", "note": "Acknowledge in a few words."}
+    parts = []
+    for group in str(card.number or "").split():
+        if group.startswith("+"):
+            parts.append(("plus " + spell_digits(group[1:])).strip())
+        else:
+            parts.append(spell_digits(group))
+    spoken = f"The number is now {', '.join(parts)}, and the name, {card.name}."
+    return {
+        "status": "changed",
+        "note": (
+            f'Nothing is saved yet. Read this to her exactly: "{spoken} Say yes to save." '
+            "Do not say the number any other way."
+        ),
+    }
+
+
 def make_answer_card_tool(cards: CardController, flows: list[_CardFlow]) -> Tool:
-    def _answer_card(yes: bool | None = None, choice: int | None = None) -> dict[str, Any]:
+    def _answer_card(
+        yes: bool | None = None,
+        choice: int | None = None,
+        number: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        edits = _spoken_edits(number, name)
+        if edits is None:
+            return {
+                "status": "not_understood",
+                "note": (
+                    "No digits were understood in what she said. Nothing changed; ask "
+                    "her to say the number again, one digit at a time."
+                ),
+            }
         for flow in flows:
             for card_id in flow.pending_card_ids():
-                payload: dict[str, Any] = {}
+                payload: dict[str, Any] = dict(edits)
                 if yes is not None:
                     payload["yes"] = bool(yes)
                 if choice is not None:
@@ -243,6 +298,8 @@ def make_answer_card_tool(cards: CardController, flows: list[_CardFlow]) -> Tool
                     result = flow.outcome(card_id)
                     if result is not None:
                         return result
+                    if "yes" not in payload and "choice" not in payload:
+                        return _shown_note(cards)  # an edit: the card is still up
                     return {"status": "answered", "note": "Acknowledge in a few words."}
         return {
             "status": "no_card",
@@ -256,6 +313,8 @@ def make_answer_card_tool(cards: CardController, flows: list[_CardFlow]) -> Tool
             "properties": {
                 "yes": {"type": "boolean"},
                 "choice": {"type": "integer", "minimum": 1, "maximum": 3},
+                "number": {"type": "string"},
+                "name": {"type": "string"},
             },
         },
         permission="calls",

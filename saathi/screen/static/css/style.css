@@ -15,6 +15,10 @@
   --card-dismiss-bg: #16151a;
   --card-dismiss-fg: #e6e2da;
   --card-progress-track: #26222c;
+  --card-key-bg: #2d2833;
+  --card-key-fg: #fbf8f2;
+  --card-save-bg: #ffce85;
+  --card-save-fg: #1a1408;
 }
 
 html, body {
@@ -538,6 +542,85 @@ body.media--fullscreen.card--open #face-container {
   height: 100%;
   width: 0;
   background: var(--card-accent);
+}
+
+/* Entry: the number over a dialpad, the name and the decisions beside
+   it. Keys are 120px squares at 1080p (the 100px floor with room), digits
+   never under 40px; the number is smaller than a read-back's so a full
+   international number fits on one line beside the face. */
+.card__value--entry {
+  font-size: clamp(48px, 4.2vw, 96px);
+  letter-spacing: 0.04em;
+  min-height: 1.1em;
+}
+.card__entry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2vw;
+  align-items: flex-start;
+}
+.card__dialpad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  flex: 0 0 auto;
+  width: 420px;
+}
+.card__key {
+  min-height: 120px;
+  min-width: 120px;
+  border: 0;
+  border-radius: 2vh;
+  background: var(--card-key-bg);
+  color: var(--card-key-fg);
+  font: inherit;
+  font-size: clamp(40px, 3vw, 64px);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+.card__key:active {
+  background: var(--card-accent);
+  color: var(--card-bg);
+}
+.card__entry-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.card__entry-side .card__option,
+.card__entry-side .card__dismiss {
+  justify-content: center;
+  text-align: center;
+}
+.card__name {
+  font-size: clamp(36px, 2.2vw, 48px);
+  line-height: 1.2;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.card__name-text {
+  color: var(--card-accent);
+  font-weight: 700;
+}
+.card__hint {
+  font-size: clamp(32px, 2vw, 44px);
+  line-height: 1.2;
+}
+.card__option--save {
+  background: var(--card-save-bg);
+  color: var(--card-save-fg);
+  font-weight: 700;
+}
+.card__option--save:active {
+  background: var(--card-button-bg);
+  color: var(--card-button-fg);
 }
 
 
