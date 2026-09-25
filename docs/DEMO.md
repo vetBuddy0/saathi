@@ -65,6 +65,17 @@ released (Groq was ~1.3 s but rate-limited; see TODO.md).
 
 Hold nothing — tap space, speak, and it answers.
 
+**Commands that work instantly** (no model in the loop; `voice/router.py`)
+- Once a search has shown titles: "pause", "hold on", "carry on",
+  "stop", "close YouTube", "volume up" / "down", "make it bigger" /
+  "smaller", "another one", "play it again", "never mind", "the second
+  one" / "number two" / "two".
+- Always: "call my son", "ring Priya", "call the test number".
+- While a calling card is up: "yes", "no", "the first one".
+- Say the command as its own sentence; a trailing "please" is fine. If
+  it isn't matched it simply goes to the model as before. Turn the
+  router off with `SAATHI_COMMAND_ROUTER=off` to compare.
+
 **Music / video** (YouTube, in a panel beside the face)
 - "Play some old Chinese songs" / "play Ed Sheeran Perfect" → a card with
   up to three titles, read aloud. Tap one or say "the second one".
