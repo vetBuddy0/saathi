@@ -135,12 +135,24 @@ def provider_from_env(
         key = environ.get(_key_name(name))
         if not key:
             raise ProviderUnavailable(f"{_key_name(name)} is not set in the environment")
+        # IPv4 only. Found live 2026-09-25: this network advertises IPv6
+        # addresses for api.openai.com but can't route IPv6, so every new
+        # connection burned seconds on dead addresses before falling back
+        # (STT 2-5 s, replies up to 5 s, retries). Binding the local side
+        # to 0.0.0.0 makes httpx skip AAAA records entirely. Cheap to
+        # remove when the network is fixed; nothing else here depends on it.
+        import httpx
+
+        http_client = httpx.Client(
+            transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=1),
+            timeout=httpx.Timeout(20.0, connect=5.0),
+        )
         if name == "openai":
             from openai import OpenAI
 
-            client = OpenAI(api_key=key)
+            client = OpenAI(api_key=key, http_client=http_client, max_retries=1)
         else:
             from groq import Groq
 
-            client = Groq(api_key=key)
+            client = Groq(api_key=key, http_client=http_client, max_retries=1)
     return AIProvider(name=name, client=client, llm_model=llm, stt_model=stt)

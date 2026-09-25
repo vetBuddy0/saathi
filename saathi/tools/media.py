@@ -232,6 +232,9 @@ class MediaResult:
     index: int  # 1-based, the number she hears and sees
     video_id: str
     title: str
+    # YouTube's 320x180 thumbnail, shown beside the number on the card so
+    # she can pick by picture as well as by title (user's request 2026-09-25).
+    thumbnail: str | None = None
 
     def as_message(self) -> dict[str, Any]:
         # `label` is the word she hears ("Two"), sent so the screen shows
@@ -241,6 +244,7 @@ class MediaResult:
             "label": ORDINALS[self.index],
             "video_id": self.video_id,
             "title": self.title,
+            "thumbnail": self.thumbnail,
         }
 
     @property
@@ -375,10 +379,16 @@ def parse_search_response(body: dict[str, Any], limit: int = MAX_RESULTS) -> lis
     results: list[MediaResult] = []
     for item in body.get("items", []):
         video_id = (item.get("id") or {}).get("videoId")
-        title = clean_title((item.get("snippet") or {}).get("title", ""))
+        snippet = item.get("snippet") or {}
+        title = clean_title(snippet.get("title", ""))
+        thumbs = snippet.get("thumbnails") or {}
+        thumbnail = ((thumbs.get("medium") or thumbs.get("high") or thumbs.get("default") or {})
+                     .get("url"))
         if not video_id or not title:
             continue
-        results.append(MediaResult(index=len(results) + 1, video_id=video_id, title=title))
+        results.append(
+            MediaResult(index=len(results) + 1, video_id=video_id, title=title, thumbnail=thumbnail)
+        )
         if len(results) == limit:
             break
     return results
@@ -547,7 +557,7 @@ class MediaController:
         the calling stream, same shape here)."""
         results = self.last_results
         if len(results) >= 2:
-            card = choice(title, [r.title for r in results])
+            card = choice(title, [r.title for r in results], images=[r.thumbnail for r in results])
         else:
             # One result is a yes/no, not a choice of one (choice()
             # refuses it, rightly). Found in review: this raised.
@@ -620,7 +630,13 @@ class MediaController:
             self.paused = False
             failed = video_id or (self.now_playing.video_id if self.now_playing else None)
             logger.warning("player could not play %s (code %s)", failed, code)
-            if failed:
+            # The embed's verdicts (numeric player codes, or a player that
+            # never became ready) mean the video can't be offered again.
+            # "stream" is the direct player's transient failure -- the page
+            # has already fallen back to the embed for it, and a network
+            # blip must not erase the most popular result for the session
+            # (found live 2026-09-25 with "Ed Sheeran - Perfect").
+            if failed and code != "stream":
                 self.unplayable.add(failed)
                 self._reoffer_without(failed)
         elif event in ("ended", "reset"):

@@ -481,3 +481,14 @@ body.media--fullscreen.card--open #face-container {
 .captions__line--her .captions__who {
   color: #a9c7ff;
 }
+
+/* Choice card: an optional picture per option (a video thumbnail). Sized so
+   the row stays a big tap target and the picture reads from across a room. */
+.card__image {
+  flex: 0 0 auto;
+  width: 22vh;
+  height: 12.4vh;
+  object-fit: cover;
+  border-radius: 1.2vh;
+  background: #000;
+}

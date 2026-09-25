@@ -92,7 +92,16 @@ export function createCards(send, options = {}) {
       const label = document.createElement("span");
       label.className = "card__label";
       label.textContent = option.label;
-      el.replaceChildren(number, label);
+      if (option.image) {
+        // A picture she can recognise before she can read the title.
+        const pic = document.createElement("img");
+        pic.className = "card__image";
+        pic.src = option.image;
+        pic.alt = "";
+        el.replaceChildren(number, pic, label);
+      } else {
+        el.replaceChildren(number, label);
+      }
       list.appendChild(el);
     }
     into.appendChild(list);

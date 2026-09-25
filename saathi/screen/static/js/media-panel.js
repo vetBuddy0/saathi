@@ -294,7 +294,16 @@ export function createMediaPanel(send, options = {}) {
       render();
     });
     audio.addEventListener("error", () => {
-      if (view === "player" && player && player.kind === "direct") reportError(videoId, "stream");
+      // The direct stream failed (a network blip, an expired URL): fall
+      // back to the official embed for this video rather than declaring
+      // it unplayable -- found live 2026-09-25, when one transient failure
+      // made "Ed Sheeran - Perfect" vanish from every later search.
+      if (view !== "player" || !player || player.kind !== "direct") return;
+      player.stopVideo();
+      player = null;
+      playerReady = false;
+      frameHolder.replaceChildren();
+      startPlayback(videoId);
     });
     player = {
       kind: "direct",

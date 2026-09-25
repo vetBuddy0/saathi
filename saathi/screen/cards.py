@@ -66,6 +66,7 @@ class TooManyOptions(ValueError):
 class Option:
     n: int  # 1-based; the number she hears and taps
     label: str
+    image: str | None = None  # optional picture (a video thumbnail); never spoken
 
     @property
     def spoken(self) -> str:
@@ -93,7 +94,10 @@ class Card:
             "spoken": self.spoken,
         }
         if self.kind == "choice":
-            message["options"] = [{"n": o.n, "label": o.label} for o in self.options]
+            message["options"] = [
+                {"n": o.n, "label": o.label, **({"image": o.image} if o.image else {})}
+                for o in self.options
+            ]
         if self.value is not None:
             message["value"] = self.value
         if self.progress is not None:
@@ -106,7 +110,12 @@ class Card:
 # -- builders -------------------------------------------------------------
 
 
-def choice(title: str, options: list[str] | tuple[str, ...], spoken: str | None = None) -> Card:
+def choice(
+    title: str,
+    options: list[str] | tuple[str, ...],
+    spoken: str | None = None,
+    images: list[str | None] | None = None,
+) -> Card:
     """Two or three numbered options. `spoken` defaults to the title
     followed by each option as "One: …" — exactly what is on screen."""
     labels = [str(label).strip() for label in options if str(label).strip()]
@@ -114,7 +123,11 @@ def choice(title: str, options: list[str] | tuple[str, ...], spoken: str | None 
         raise TooManyOptions(f"{len(labels)} options; the most a card may carry is {MAX_OPTIONS}")
     if len(labels) < 2:
         raise ValueError("a choice needs two or three options; use confirm() for one")
-    opts = tuple(Option(n=i + 1, label=label) for i, label in enumerate(labels))
+    pics = list(images or [])
+    opts = tuple(
+        Option(n=i + 1, label=label, image=(pics[i] if i < len(pics) else None))
+        for i, label in enumerate(labels)
+    )
     if spoken is None:
         spoken = f"{title.strip()} " + " ".join(f"{o.spoken}." for o in opts)
     return Card(kind="choice", title=title.strip(), spoken=spoken.strip(), options=opts)
