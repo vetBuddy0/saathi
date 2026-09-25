@@ -55,6 +55,7 @@ from saathi.call.choosing import ChoiceFlow
 from saathi.call.match import match as match_name
 from saathi.call.controller import CallController
 from saathi.call.saving import SaveFlow
+from saathi.call.relay import RelayError
 from saathi.call.twilio import TwilioError
 from saathi.tools.registry import Tool
 
@@ -94,7 +95,9 @@ def _dial(controller: CallController, number: str, who: str) -> dict[str, Any]:
         }
     try:
         controller.dial(number)
-    except TwilioError as exc:
+    except (TwilioError, RelayError) as exc:
+        # RelayError too (TODO M5): a tunnel that died is a plain "not
+        # just now", never a turn lost to an untranslated exception.
         return {
             "status": "error",
             "detail": str(exc),  # sanitized by construction (call/twilio.py)
@@ -139,7 +142,7 @@ def make_call_tool(
                 return _dial(controller, "", "the test number")
             try:
                 controller.dial_test_number()
-            except TwilioError as exc:
+            except (TwilioError, RelayError) as exc:
                 return {
                     "status": "error",
                     "detail": str(exc),

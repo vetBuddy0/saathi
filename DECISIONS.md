@@ -1195,3 +1195,21 @@ end stops ringing). A StatusCallback would need another public route on
 the relay and would never arrive if the tunnel is what died -- the
 timeout covers that case too. The watcher stops the moment the stream
 opens; an answered call is still ended by its stream.
+
+**2026-09-26 — Calling is wired into `saathi run` on `cloud/demo`; the
+relay comes up at boot on its own thread, and "unavailable" is a tool
+answer, never a crash.** `cli.py`'s `_build_calling` follows the diff in
+`docs/completed/calling.md`: `call_contact`, `save_contact` and
+`answer_card` registered, "calls" and "contacts" granted, the
+echo-cancelled source/sink from `aec.py` threaded into the call audio,
+the screen's `HoldController` as the hang-up seam. The quick tunnel's
+hostname took ~84 s to resolve on the first live run, so `prepare()`
+(media server + cloudflared) runs on a daemon thread at boot with a
+150 s budget; until it sets `ready`, `call_contact` answers "still
+starting up". Missing Twilio variables, no cloudflared, no echo-cancel
+pair, or a tunnel that never resolves all leave a `call_contact` that
+answers "unavailable" with the reason, and the rest of the device runs
+as before. Rejected: starting the tunnel at the first dial (a minute of
+silence after "call Priya") and blocking boot on it (the face waits).
+The two audio diffs in that doc (`play_stream`, making the echo-cancel
+pair Pulse's default) are not applied here.

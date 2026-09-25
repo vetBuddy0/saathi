@@ -291,6 +291,11 @@ five interfaces.
 
 ### `saathi/cli.py`: register, grant, thread ids, wire cards and hold
 
+*Applied on `cloud/demo` 2026-09-26 as `_build_calling` in `cli.py`, with
+two changes: `prepare()` runs on a background thread at boot (the tunnel
+took ~84 s), and a missing credential/binary/pair or a failed tunnel
+registers an "unavailable" `call_contact` instead of returning `None`.*
+
 Assumes PR #3 is merged (`saathi/screen/cards.py`, and
 `build_app(..., cards=, hold=)`); confirm the exact kwarg names against
 PR #3.

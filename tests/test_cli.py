@@ -72,7 +72,7 @@ def wired(seams):
 
 def test_every_tool_is_registered_with_a_schema_and_its_permission_granted(wired):
     names = {tool.name for tool in wired.registry}
-    assert names == {"set_language", "correct_memory", "play_music"}
+    assert names == {"set_language", "correct_memory", "play_music", "call_contact"}
     for tool in wired.registry:
         assert tool.permission in cli.GRANTED_PERMISSIONS, tool.name
     assert {schema["function"]["name"] for schema in wired.tool_schemas} == names
@@ -90,9 +90,9 @@ def test_the_intent_handler_runs_a_tool_through_the_grant(wired):
     from saathi.tools.registry import Tool
 
     wired.registry.register(
-        Tool(name="call_contact", schema={}, permission="calls", handler=lambda **_: 1)
+        Tool(name="pay_bill", schema={}, permission="money", handler=lambda **_: 1)
     )
-    assert handle("call_contact", {})["status"] == "denied"
+    assert handle("pay_bill", {})["status"] == "denied"
 
 
 def test_the_controllers_are_built_once_and_the_tools_close_over_them(wired):
@@ -159,14 +159,16 @@ def test_without_a_microphone_or_echo_cancel_the_device_runs_without_the_engine(
     seams["found"]["input"] = False
     runtime = cli.build_runtime()
     assert runtime.session is None
-    assert runtime.notes == ["No microphone/speaker found; running without the voice engine."]
+    assert runtime.notes[0] == "No microphone/speaker found; running without the voice engine."
     assert runtime.registry is not None  # the tools exist; there is just no session to offer them
 
     seams["found"]["input"] = True
     seams["handles"]["value"] = None
     runtime = cli.build_runtime()
     assert runtime.session is None
-    assert runtime.notes == ["No system echo-cancel available; running without the voice engine."]
+    assert runtime.notes[0] == (
+        "No system echo-cancel available; running without the voice engine."
+    )
 
 
 # -- saathi voice -----------------------------------------------------------
@@ -198,3 +200,163 @@ def test_voice_refuses_an_unknown_backend(seams, capsys):
     assert cli.main(["voice", "bogus"]) == 2
     assert "unknown backend" in capsys.readouterr().out
     assert _stored_backend(seams["data_dir"]) is None
+
+
+# -- calling (cloud/demo, 2026-09-26) ----------------------------------------
+
+TWILIO_ENV = {
+    "TWILIO_ACCOUNT_SID": "AC" + "0" * 32,
+    "TWILIO_API_KEY": "SK" + "1" * 32,
+    "TWILIO_API_SECRET": "s",
+    "TWILIO_FROM_NUMBER": "+10000000000",
+    "TWILIO_TEST_NUMBER": "+10000000001",
+}
+
+
+class FakeTunnel:
+    """Stands in for CloudflaredQuickTunnel: `start()` blocks until
+    released (the ~84 s the real hostname took), or raises."""
+
+    release = None
+    fail = None
+    instances: list["FakeTunnel"] = []
+
+    def __init__(self, local_port, startup_timeout=30.0):
+        self.local_port = local_port
+        self.startup_timeout = startup_timeout
+        self.started = 0
+        FakeTunnel.instances.append(self)
+
+    @property
+    def public_url(self):
+        return "https://relay.example.test"
+
+    def start(self):
+        if FakeTunnel.release is not None:
+            FakeTunnel.release.wait(2.0)
+        if FakeTunnel.fail is not None:
+            raise FakeTunnel.fail
+        self.started += 1
+
+    def stop(self):
+        pass
+
+
+class FakeMediaServer:
+    def __init__(self, handler, ws_url, host="127.0.0.1", port=0):
+        self.port = port
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+@pytest.fixture
+def calling_seams(seams, monkeypatch):
+    import threading
+
+    from saathi.call import media, relay
+    from saathi.call.twilio import FakeTwilioClient
+
+    for name, value in TWILIO_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(relay, "find_cloudflared", lambda: "/usr/local/bin/cloudflared")
+    monkeypatch.setattr(relay, "CloudflaredQuickTunnel", FakeTunnel)
+    monkeypatch.setattr(media, "MediaServer", FakeMediaServer)
+    client = FakeTwilioClient()
+    client.call_resource = {"status": "ringing"}
+    monkeypatch.setattr(cli, "_twilio_client", lambda creds: client)
+    FakeTunnel.instances.clear()
+    FakeTunnel.release = threading.Event()
+    FakeTunnel.fail = None
+    yield {"client": client, "release": FakeTunnel.release, "handles": seams["handles"]}
+    FakeTunnel.release.set()
+
+
+def _wait(condition, seconds=2.0):
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_calling_registers_its_three_tools_and_grants_calls_and_contacts(calling_seams):
+    runtime = cli.build_runtime()
+    names = {tool.name for tool in runtime.registry}
+    assert {"call_contact", "save_contact", "answer_card"} <= names
+    for tool in runtime.registry:
+        assert tool.permission in cli.GRANTED_PERMISSIONS, tool.name
+    assert {"calls", "contacts"} <= cli.GRANTED_PERMISSIONS
+    assert {s["function"]["name"] for s in runtime.tool_schemas} == names
+    assert runtime.calling is not None
+    assert runtime.calling.audio_ids == ("aec-src", "aec-sink")  # the echo-cancelled pair
+    assert runtime.calling.controller._hold is runtime.hold  # the spacebar's hold seam
+
+
+def test_the_relay_comes_up_at_boot_on_its_own_thread_not_at_the_first_dial(calling_seams):
+    runtime = cli.build_runtime()  # returns at once: the tunnel is still resolving
+    tunnel = FakeTunnel.instances[-1]
+    assert tunnel.started == 0 and tunnel.startup_timeout == cli.RELAY_STARTUP_SECONDS
+    assert not runtime.calling.ready.is_set()
+    # A dial before it is up is an honest "starting up", not a wait or a crash.
+    reply = runtime.handle_intent("call_contact", {"contact": "the test number"})
+    assert reply["status"] == "unavailable" and "starting up" in reply["note"]
+    assert calling_seams["client"].created == []
+    calling_seams["release"].set()
+    _wait(runtime.calling.ready.is_set)
+    assert tunnel.started == 1
+    reply = runtime.handle_intent("call_contact", {"contact": "the test number"})
+    assert reply["status"] == "calling"
+    assert calling_seams["client"].created[0][2] == "https://relay.example.test/twiml"
+    assert runtime.hold.active  # the spacebar now means "hold to hang up"
+    runtime.calling.controller.hangup(wait=True)
+    assert not runtime.hold.active
+
+
+def test_a_tunnel_that_fails_leaves_calling_unavailable_and_the_app_running(calling_seams):
+    from saathi.call.relay import RelayError
+
+    FakeTunnel.fail = RelayError("cloudflared printed no tunnel URL within 150s")
+    calling_seams["release"].set()
+    runtime = cli.build_runtime()
+    _wait(lambda: runtime.calling.failed)
+    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
+    assert reply["status"] == "unavailable" and "no tunnel URL" in reply["note"]
+    assert any("Calling off" in note for note in runtime.notes)
+    assert runtime.session is not None  # the rest of the device is untouched
+
+
+def test_without_twilio_variables_calling_is_unavailable_not_a_crash(seams, monkeypatch):
+    for name in TWILIO_ENV:
+        monkeypatch.delenv(name, raising=False)
+    runtime = cli.build_runtime()
+    assert runtime.calling is None
+    assert runtime.session is not None
+    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
+    assert reply["status"] == "unavailable" and "TWILIO_ACCOUNT_SID" in reply["note"]
+    assert any(note.startswith("Calling off: missing") for note in runtime.notes)
+    assert "save_contact" not in {tool.name for tool in runtime.registry}
+
+
+def test_without_cloudflared_calling_is_unavailable_not_a_crash(calling_seams, monkeypatch):
+    from saathi.call import relay
+
+    monkeypatch.setattr(relay, "find_cloudflared", lambda: None)
+    runtime = cli.build_runtime()
+    assert runtime.calling is None
+    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
+    assert reply["status"] == "unavailable" and "cloudflared" in reply["note"]
+    assert FakeTunnel.instances == []
+
+
+def test_without_an_echo_cancelled_pair_calling_is_unavailable(calling_seams):
+    calling_seams["release"].set()
+    calling_seams["handles"]["value"] = None
+    runtime = cli.build_runtime()
+    assert runtime.calling is None and runtime.session is None
+    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
+    assert reply["status"] == "unavailable" and "echo-cancel" in reply["note"]

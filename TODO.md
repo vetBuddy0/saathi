@@ -75,6 +75,11 @@ counts as ~96 ms of voice still goes through and may come back as
 
 ## Calling (PR #4) — parked on `batch/calling`, not on main
 
+(`cloud/demo`, 2026-09-26: `reconcile/calling` merged with `cloud/bug-fix`,
+S1 fixed, and calling wired into `saathi run` with the relay started at
+boot and an "unavailable" answer when Twilio/cloudflared are missing.
+S2–S4 below are still open there.)
+
 Parked 2026-09-25 after review. The integration of #4 against the real
 cards is preserved on `reconcile/calling` (one test still failing
 there). S1 alone would break the whole device on stage, not just
