@@ -1279,3 +1279,27 @@ the official embed. YouTube no longer serves any combined audio+video
 file (checked with a JS runtime too), so the page plays a muted
 <video> and an <audio> in step, audio as the clock. New dependencies:
 yt-dlp (Unlicense), deno (MIT, the JS runtime yt-dlp needs).
+
+**2026-09-26 — A fifth card primitive, Entry, at the user's request
+(the brief said four).** Saving a contact shows the number on a
+dialpad and the name, both editable before Save. The Yes/No read-back
+made her repeat the whole number to fix one digit. Edits (`{"number"}`
+/ `{"name"}`) update the card in place with the same id, like a hold
+advancing; the yes carries the values shown. `readback` stays for
+other uses.
+
+**2026-09-26 — The name is changed by voice, not an on-screen
+keyboard.** "Change name" shows "Say the new name."; the next thing she
+says reaches the card through `answer_card(name=…)`. 26 keys beside the
+face would each be a third the size of the 100px floor, and spelling by
+tap is the hardest thing for this audience.
+
+**2026-09-26 — Dialpad keys are 120px squares, digits 57px at 1080p,
+the number 80px; ⌫ / 0 / + on the bottom row.** Above the brief's
+floors (100px, 32px, 40px digits), and the whole card still fits beside
+the face with the decisions in a column to its right. ⌫ rather than the
+word "Delete": it is what her phone shows, and the word would not fit a
+key at 40px. On a tap there is no turn, so a re-shown card (a number
+made too short) is seen, not heard; on the voice path the reason is
+spoken. An edited number is resolved again before writing, and a "+"
+dropped by tap does not let a country be inferred unheard.

@@ -168,10 +168,30 @@ def test_voice_save_flow_through_the_tools_from_worker_threads(tmp_path):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         first = pool.submit(save.handler, name="Priya", relation="daughter",
                             number="nine one two three, four five six seven").result(5)
-        assert first["status"] == "readback" and "plus six five" in first["note"]
+        assert first["status"] == "entry" and "plus six five" in first["note"]
         second = pool.submit(answer.handler, yes=True).result(5)
     assert second["status"] == "saved"
     assert _contacts.find_by_relation(path, "daughter").name == "Priya"
+
+
+def test_a_spoken_number_or_name_edits_the_entry_card_and_yes_saves_the_edit(tmp_path):
+    path = _store(tmp_path)
+    cards = FakeCardController()
+    flow = SaveFlow(path, cards, lambda: "SG")
+    save = make_save_contact_tool(flow)
+    answer = make_answer_card_tool(cards, [flow])
+    save.handler(name="Priya", relation="daughter", number="nine one two three four five six seven")
+    card = cards.current
+    changed = answer.handler(number="nine one two three, four five six eight")
+    assert changed["status"] == "changed" and "four five six eight" in changed["note"]
+    # Shown as she said it (no country code); resolved again on the yes.
+    assert cards.current.id == card.id and cards.current.number == "9123 4568"
+    assert answer.handler(name="Anita")["status"] == "changed"
+    assert cards.current.name == "Anita"
+    assert answer.handler(number="um, er")["status"] == "not_understood"
+    assert answer.handler(yes=True)["status"] == "saved"
+    saved = _contacts.find_by_relation(path, "daughter")
+    assert saved.name == "Anita" and saved.phone == "+65" + "9123" + "4568"
 
 
 def test_answer_card_with_nothing_pending(tmp_path):

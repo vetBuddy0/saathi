@@ -45,6 +45,8 @@ PAIRS = [
     ("card-dismiss-fg", "card-dismiss-bg"),  # "Never mind" / "Okay"
     ("card-bg", "card-accent"),  # an option while pressed (:active)
     ("card-accent", "card-progress-track"),  # the holding bar's fill on its track
+    ("card-key-fg", "card-key-bg"),  # a dialpad key (entry)
+    ("card-save-fg", "card-save-bg"),  # the Save button (entry)
 ]
 
 

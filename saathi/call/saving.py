@@ -9,14 +9,20 @@ number. The flow is:
    *draft* (so she's asked only for what's actually missing — never the
    name again because the number was incomplete).
 2. Anything missing -> a note asking for exactly that, nothing shown.
-3. Complete -> a Read-back card (`cards.readback`) is shown and its
-   spoken text is returned as the tool's note. If the country code was
-   inferred, that sentence leads: "That's a Singapore number, plus six
-   five." Never silent.
+3. Complete -> an Entry card (`cards.entry`: the number on a dialpad,
+   the name, both editable) is shown and its spoken text is returned as
+   the tool's note. If the country code was inferred, that sentence
+   leads: "That's a Singapore number, plus six five." Never silent.
+   (Was a Read-back with Yes/No until 2026-09-26; the user asked for
+   the dialpad so one wrong digit doesn't cost her the whole number.)
 4. Her yes/no arrives later — a tap on the card, or the next turn's
-   `answer_card` tool call — through `on_answer`. Yes writes the
-   contact (and learns the country); no keeps the name and relation and
-   asks for the number again.
+   `answer_card` tool call — through `on_answer`. Yes carries whatever
+   number and name the card shows by then; they are resolved again
+   before writing (a tap can make a number too short, or drop a "+"
+   so the country would be inferred unheard) and, if not a complete
+   number, the card is shown again with the reason. Yes writes the
+   contact (and learns the country); no keeps the name and relation
+   and asks for the number again.
 
 Never blocks: no `ask()`, no waiting inside a tool handler (see
 `cards.py`). Pauses mid-number are handled twice: within one utterance
@@ -37,14 +43,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from saathi.call import contacts
-from saathi.call.cards import Answer, CardController, readback
-from saathi.call.numbers import SpokenNumber, parse_spoken_number
-from saathi.call.phone import (
-    country_sentence,
-    group_for_display,
-    resolve,
-    spoken_readback,
-)
+from saathi.call.cards import Answer, CardController, entry, regroup_number
+from saathi.call.numbers import SpokenNumber, parse_spoken_number, spell_digits
+from saathi.call.phone import country_sentence, group_for_display, resolve
 
 DRAFT_TTL_SECONDS = 600.0
 
@@ -150,30 +151,32 @@ class SaveFlow:
             country=resolved.country,
             country_inferred=resolved.country_inferred,
         )
-        lead = country_sentence(resolved)
+        spoken = self._show(
+            pending, group_for_display(resolved.e164), lead=country_sentence(resolved)
+        )
+        return {"status": "entry", "note": _read_note(spoken)}
+
+    def _show(self, pending: PendingSave, shown: str, *, lead: str) -> str:
+        """Show the Entry card for `pending` -- `shown` is the grouped
+        number it displays -- and remember it as the one card that can
+        be answered. Returns its spoken text."""
         spoken = " ".join(
             part
             for part in (
                 lead,
-                f"{_possessive(display_name)} number is {spoken_readback(resolved.e164)}.",
-                "Shall I save it?",
+                f"{_possessive(pending.name)} number is {_speak_shown(shown)}, "
+                f"and the name, {pending.name}.",
+                "Say yes to save, or change the number or the name.",
             )
             if part
         )
-        title = f"{_possessive(display_name)} number"
-        card = readback(
-            title, group_for_display(resolved.e164), spoken=spoken, confirm=True, group=False
+        card = entry(
+            f"{_possessive(pending.name)} number", number=shown, name=pending.name, spoken=spoken
         )
         card_id = self._cards.show(card)
         with self._lock:
             self._pending = {card_id: pending}  # only the card on screen can be answered
-        return {
-            "status": "readback",
-            "note": (
-                f"Read this to her exactly, then wait for her yes or no: \"{spoken}\" "
-                "Do not say the number any other way."
-            ),
-        }
+        return spoken
 
     def outcome(self, card_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -185,6 +188,10 @@ class SaveFlow:
         if pending is None:
             return
         if answer.yes:
+            edited = self._apply_edits(pending, answer)
+            if edited is None:
+                return  # shown again with the reason; nothing written
+            pending = edited
             contacts.save_contact(
                 self._path, pending.name, pending.e164, pending.country, pending.relation
             )
@@ -212,6 +219,75 @@ class SaveFlow:
                     f"number for {pending.name} again."
                 ),
             }
+
+
+    def _apply_edits(self, pending: PendingSave, answer: Answer) -> PendingSave | None:
+        """The yes carries the number and name as the card showed them.
+        Unchanged: save as proposed. Changed: resolve the digits again
+        (the country logic that checked the spoken number checks the
+        tapped one), and if the result isn't a complete number -- or its
+        country would now be inferred without ever having been said --
+        show the card again with the reason and return None."""
+        raw = str(answer.answer.get("number") or "")
+        name = str(answer.answer.get("name") or "").strip() or pending.name
+        if raw == pending.e164:
+            return replace(pending, name=name)
+        digits = raw.lstrip("+")
+        resolved = resolve(SpokenNumber(digits, raw.startswith("+"), 1.0), self._locale())
+        announced = pending.country if pending.country_inferred else None
+        unheard = resolved.country_inferred and resolved.country != announced
+        edited = PendingSave(
+            name=name,
+            relation=pending.relation,
+            e164=resolved.e164 or pending.e164,
+            country=resolved.country,
+            country_inferred=resolved.country_inferred,
+        )
+        if resolved.e164 is not None and not unheard:
+            return edited
+        if resolved.e164 is None:
+            # Her digits as tapped, in the grouping she was looking at.
+            shown = regroup_number(str(answer.card.number or ""), raw)
+            lead = _reason(resolved.missing)
+        else:
+            shown, lead = group_for_display(resolved.e164), country_sentence(resolved)
+        spoken = self._show(edited, shown, lead=lead)
+        with self._lock:
+            self._outcomes[answer.card_id] = {
+                "status": "check",
+                "note": f"Nothing is saved yet. {_read_note(spoken)}",
+            }
+        return None
+
+
+def _speak_shown(shown: str) -> str:
+    """The number as the card shows it, digit by digit, a pause at each
+    group; "plus" for a leading +."""
+    parts = []
+    for group in shown.split():
+        if group.startswith("+"):
+            parts.append(("plus " + spell_digits(group[1:])).strip())
+        else:
+            parts.append(spell_digits(group))
+    return ", ".join(parts)
+
+
+def _reason(missing: tuple[str, ...]) -> str:
+    if "more_digits" in missing:
+        return "That number is too short."
+    if "check_number" in missing:
+        return "That number has too many digits."
+    if "country" in missing:
+        return "I don't know which country that number is in."
+    return "That isn't a whole number yet."
+
+
+def _read_note(spoken: str) -> str:
+    return (
+        f'Read this to her exactly, then wait: "{spoken}" Do not say the number any '
+        "other way. If she gives a different number or name, pass it to answer_card; "
+        "her yes saves what the card shows."
+    )
 
 
 def _possessive(name: str) -> str:

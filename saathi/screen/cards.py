@@ -1,6 +1,16 @@
-"""On-screen cards for resolving ambiguity by tap or voice — the four
-primitives (Choice, Confirm, Read-back, Holding) and the controller that
-shows exactly one of them at a time.
+"""On-screen cards for resolving ambiguity by tap or voice — the five
+primitives (Choice, Confirm, Read-back, Holding, Entry) and the
+controller that shows exactly one of them at a time.
+
+Entry is the fifth, added 2026-09-26 at the user's request: saving a
+contact shows the number on a dialpad she can correct by tapping, and
+the name, both editable before she says yes. The brief said four; a
+read-back with Yes/No made her say the whole number again to fix one
+digit. Its answers come in two flavours: edits (`{"number": …}` /
+`{"name": …}`) update the card in place with the same id, like a
+holding card advancing; a decision (`yes`/`dismiss`) clears it as any
+card. Nobody waiting on the card is told about an edit -- the values
+travel with the yes.
 
 Why this exists as a module in `screen/` rather than inside each tool
 that needs it: a card is the one thing on the screen that asks her
@@ -47,13 +57,13 @@ import asyncio
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 MAX_OPTIONS = 3
 ORDINALS = {1: "One", 2: "Two", 3: "Three"}
 
-KINDS = ("choice", "confirm", "readback", "holding")
+KINDS = ("choice", "confirm", "readback", "holding", "entry")
 
 
 class TooManyOptions(ValueError):
@@ -83,6 +93,9 @@ class Card:
     # readback only: the value is a question ("is that right?") answered
     # yes/no by tap or voice, not just acknowledged. See readback().
     confirmable: bool = False
+    # entry only: the number as shown (grouped) and the name, both editable.
+    number: str | None = None
+    name: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def as_message(self) -> dict[str, Any]:
@@ -100,6 +113,9 @@ class Card:
             message["progress"] = self.progress
         if self.kind == "readback" and self.confirmable:
             message["confirm"] = True
+        if self.kind == "entry":
+            message["number"] = self.number or ""
+            message["name"] = self.name or ""
         return message
 
 
@@ -171,6 +187,55 @@ def holding(label: str, progress: float = 0.0, card_id: str | None = None) -> Ca
     return card
 
 
+def entry(title: str, *, number: str, name: str, spoken: str | None = None) -> Card:
+    """A number on a dialpad and a name, both hers to change before she
+    says yes. The number is shown grouped exactly as given (the caller
+    knows "+65 9123 4567" has a country code; this module doesn't).
+
+    Name editing is by voice, not an on-screen keyboard: 26 keys that
+    fit beside the face would each be far under the 100px floor, and
+    spelling by tap is the thing the audience finds hardest. She taps
+    "Change name" and says it; the flow behind the card sets it through
+    `answer()`."""
+    shown = " ".join(str(number).split())
+    name = " ".join(str(name).split())
+    if spoken is None:
+        spoken = (
+            f"{title.strip()} {speak_value(shown)}, and the name, {name}. "
+            "Say yes to save, or change the number or the name."
+        )
+    return Card(kind="entry", title=title.strip(), spoken=spoken.strip(), number=shown, name=name)
+
+
+_RAW_NUMBER = re.compile(r"^\+?\d{0,20}$")
+
+
+def regroup_number(shown: str, raw: str) -> str:
+    """The display for an edited number: the grouping she was shown is
+    kept for every leading digit that is unchanged, and digits added
+    after that go in fours -- what a tap on the dialpad does, so the
+    browser (cards.js, same function) and the server agree without the
+    screen knowing what a country code is."""
+    kept: list[str] = []
+    i = 0
+    for ch in shown:
+        if ch == " ":
+            kept.append(ch)
+            continue
+        if i < len(raw) and raw[i] == ch:
+            kept.append(ch)
+            i += 1
+        else:
+            break
+    text = "".join(kept).rstrip()
+    for ch in raw[i:]:
+        last = text.rsplit(" ", 1)[-1] if text else ""
+        if text and len(last.lstrip("+")) >= 4:
+            text += " "
+        text += ch
+    return text
+
+
 # A phone-number shape: digits with the spacing/punctuation numbers are
 # written with. A "." or ":" means a decimal or a time ("37.5",
 # "10:30"), which must pass through untouched -- found in review:
@@ -218,7 +283,9 @@ def speak_value(grouped: str) -> str:
 class Answer:
     card_id: str
     kind: str
-    answer: dict[str, Any]  # {"choice": n} | {"yes": bool} | {"dismiss": True}
+    # {"choice": n} | {"yes": bool} | {"dismiss": True}
+    # entry: {"yes": True, "number": raw, "name": str} carries her edited values
+    answer: dict[str, Any]
     source: str  # "tap" | "voice" | "hold" | "code"
     card: Card
 
@@ -264,7 +331,57 @@ def validate_answer(card: Card, answer: Any) -> dict[str, Any] | None:
         if isinstance(yes, bool):
             return {"yes": yes}
         return None
+    if card.kind == "entry":
+        return _validate_entry(card, answer)
     return None  # a plain readback and holding only take dismiss
+
+
+def _raw_number(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = "".join(value.split())
+    return raw if _RAW_NUMBER.match(raw) else None
+
+
+def _clean_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = " ".join(value.split())
+    return name or None
+
+
+def _validate_entry(card: Card, answer: dict[str, Any]) -> dict[str, Any] | None:
+    """Yes carries the values to save (hers if given, else the card's
+    current ones -- a spoken "yes" doesn't repeat them); no is just no;
+    a number and/or name without a decision is an edit."""
+    if "yes" in answer:
+        yes = answer["yes"]
+        if not isinstance(yes, bool):
+            return None
+        if yes is False:
+            return {"yes": False}
+        number = _raw_number(answer.get("number", card.number or ""))
+        name = _clean_name(answer.get("name", card.name or ""))
+        if number is None or name is None:
+            return None
+        return {"yes": True, "number": number, "name": name}
+    edit: dict[str, Any] = {}
+    if "number" in answer:
+        number = _raw_number(answer["number"])
+        if number is None:
+            return None
+        edit["number"] = number
+    if "name" in answer:
+        name = _clean_name(answer["name"])
+        if name is None:
+            return None
+        edit["name"] = name
+    return edit or None
+
+
+def is_edit(answer: dict[str, Any]) -> bool:
+    """An entry card's number and/or name without a decision."""
+    return bool(answer) and set(answer) <= {"number", "name"}
 
 
 class CardController:
@@ -340,6 +457,19 @@ class CardController:
             valid = validate_answer(card, answer)
             if valid is None:
                 return False
+            if is_edit(valid):
+                # An entry card edited, not decided: same id, new values,
+                # still up. Nobody waiting is told; the yes carries them.
+                updated = replace(
+                    card,
+                    number=regroup_number(card.number or "", valid["number"])
+                    if "number" in valid
+                    else card.number,
+                    name=valid.get("name", card.name),
+                )
+                self._current = updated
+                self._emit(updated)
+                return True
             self._current = None
             result = self._release(card, valid, source)
             self._emit(None)

@@ -82,6 +82,10 @@ Hold nothing — tap space, speak, and it answers.
 **Calling** (ready ~90 s after `saathi run` starts — the tunnel)
 - "Call my son" — rings the saved son (currently +65 …423).
 - "Call the test number"
+- "Save my daughter Priya's number, nine one two three four five six
+  seven" — a card with the number on a big dialpad and the name. Tap a
+  digit or ⌫ to correct it; tap "Change name" and say the name; tap
+  Save (or say "yes"). "Try again" asks for the number afresh.
 - Hold space 2 s to hang up; a short tap during a call does nothing; an
   unanswered call clears itself after 45 s.
 - Keep the phone away from the laptop, or it howls.
