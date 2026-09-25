@@ -508,6 +508,23 @@ out.iframe = rect("iframe.media-player__iframe");
 out.frame = rect(".media-player__frame");
 out.face = rect("#face-container");
 out.viewport = { width: window.innerWidth, height: window.innerHeight };
+// The framed shell (2026-09-26) wraps the holder, whatever is inside it.
+const px = (sel, prop) => parseFloat(getComputedStyle(document.querySelector(sel))[prop]);
+out.shell = {
+  holds_iframe: !!document.querySelector(
+    ".media-frame > .media-player__frame > iframe.media-player__iframe"),
+  border: px(".media-frame", "borderTopWidth"),
+  radius: px(".media-frame", "borderTopLeftRadius"),
+  title_px: px(".media-title", "fontSize"),
+};
+// Paused: the shell dims (after its 0.4 s transition), no word appears.
+panel.onMessage({ type: "media", action: "pause" });
+await new Promise((r) => setTimeout(r, 700));
+out.paused = {
+  cls: document.querySelector(".media-player").classList.contains("media-player--paused"),
+  opacity: px(".media-frame", "opacity"),
+  text: document.getElementById("media-panel").textContent,
+};
 document.body.dataset.out = JSON.stringify(out);
 """
 )
@@ -539,3 +556,19 @@ def test_hidden_views_are_really_hidden_with_the_real_stylesheet(sized):
     # results list and the player were both drawn at once.
     assert sized["results_view"] == {"results": "flex", "player": "none"}
     assert sized["player_view"] == {"results": "none", "player": "flex"}
+
+
+# -- the framed player (2026-09-26) -----------------------------------------
+
+
+def test_the_picture_sits_inside_one_framed_shell_with_a_large_title(sized):
+    shell = sized["shell"]
+    assert shell["holds_iframe"] is True
+    assert shell["border"] >= 2 and shell["radius"] >= 20
+    assert shell["title_px"] >= 32
+
+
+def test_paused_dims_the_frame_and_writes_no_status_word(sized):
+    assert sized["paused"]["cls"] is True
+    assert sized["paused"]["opacity"] < 1
+    assert "paus" not in sized["paused"]["text"].lower()

@@ -35,6 +35,16 @@
 // Rejected: rendering the player through a plain <iframe src=...> with
 // no API. That can't be told to pause, set a volume, or report that a
 // video ended — and "quieter" and "carry on" are half the brief.
+//
+// The frame (2026-09-26): the picture sits inside one framed shell --
+// rounded, a thin accent border with a soft glow, letterboxed on black
+// -- whether it is the YouTube embed, the direct <video>, or the demo's
+// stand-in; the shell wraps `frameHolder`, so nothing is special-cased.
+// Playback state is drawn as content and motion, never as a label:
+// paused dims the shell and softens the title (plus a large wordless
+// pause mark); loading breathes the border. "Paused" / "Loading…" text
+// was the option that lost -- CLAUDE.md's status-text rule, and a
+// person across the room reads brightness before they read a word.
 
 import {
   ALL_LAYOUT_CLASSES,
@@ -45,6 +55,8 @@ import {
 const IFRAME_API_SRC = "https://www.youtube.com/iframe_api";
 const EMBED_BASE = "https://www.youtube.com/embed/";
 const PLAYER_STATE_ENDED = 0; // YT.PlayerState.ENDED
+const PLAYER_STATE_PLAYING = 1; // YT.PlayerState.PLAYING
+const PLAYER_STATE_PAUSED = 2; // YT.PlayerState.PAUSED
 // How long a play may sit with no player before it is reported as an
 // error rather than swallowed. Found in review (2026-09-26): with the
 // API script loaded but the embed never reporting ready (blocked embed,
@@ -116,6 +128,8 @@ export function createMediaPanel(send, options = {}) {
   let baseVolume = 70;
   let fullscreen = false;
   let coreState = "sleeping";
+  let paused = false; // drawn as a dimmed frame, never as a word
+  let loading = false; // drawn as a breathing border, never as a word
 
   let player = null; // YT.Player once the API has attached
   let playerReady = false;
@@ -136,9 +150,15 @@ export function createMediaPanel(send, options = {}) {
   const playerWrap = document.createElement("div");
   playerWrap.className = "media-player";
   playerWrap.hidden = true;
+  const frameShell = document.createElement("div");
+  frameShell.className = "media-frame";
   const frameHolder = document.createElement("div");
   frameHolder.className = "media-player__frame";
-  playerWrap.appendChild(frameHolder);
+  frameShell.appendChild(frameHolder);
+  const pauseMark = document.createElement("div");
+  pauseMark.className = "media-frame__pause"; // two bars, no text
+  frameShell.appendChild(pauseMark);
+  playerWrap.appendChild(frameShell);
   const titleEl = document.createElement("div");
   titleEl.className = "media-title";
   playerWrap.appendChild(titleEl);
@@ -152,7 +172,15 @@ export function createMediaPanel(send, options = {}) {
     window.dispatchEvent(new Event("resize"));
   }
 
+  // Playback state onto the shell as classes; cheap, no layout event,
+  // safe to call from media events that fire often.
+  function syncState() {
+    playerWrap.classList.toggle("media-player--paused", paused);
+    playerWrap.classList.toggle("media-player--loading", loading && !paused);
+  }
+
   function render() {
+    syncState();
     resultsEl.hidden = view !== "results";
     playerWrap.hidden = view !== "player";
     if (view === "results") {
@@ -235,6 +263,14 @@ export function createMediaPanel(send, options = {}) {
   }
 
   function onPlayerStateChange(event) {
+    if (event.data === PLAYER_STATE_PLAYING) {
+      loading = false;
+      paused = false;
+      syncState();
+    } else if (event.data === PLAYER_STATE_PAUSED) {
+      paused = true;
+      syncState();
+    }
     // Only a video she is watching ending means anything. stopVideo()
     // (on a new search, or "stop") can surface ENDED too, and that must
     // not wipe the results just drawn or tell the server something ended.
@@ -286,6 +322,20 @@ export function createMediaPanel(send, options = {}) {
     frameHolder.replaceChildren(video, audio);
     audio.addEventListener("timeupdate", () => {
       if (Math.abs(video.currentTime - audio.currentTime) > 0.3) video.currentTime = audio.currentTime;
+    });
+    audio.addEventListener("playing", () => {
+      loading = false;
+      paused = false;
+      syncState();
+    });
+    audio.addEventListener("waiting", () => {
+      loading = true;
+      syncState();
+    });
+    audio.addEventListener("pause", () => {
+      if (audio.ended) return;
+      paused = true;
+      syncState();
     });
     audio.addEventListener("ended", () => {
       if (view !== "player") return;
@@ -380,6 +430,8 @@ export function createMediaPanel(send, options = {}) {
         if (typeof message.volume === "number") baseVolume = message.volume;
         if (typeof message.fullscreen === "boolean") fullscreen = message.fullscreen;
         view = "player";
+        paused = false;
+        loading = !demo;
         render();
         if (message.stream && message.stream.video && message.stream.audio) {
           startDirect(message.stream, message.video_id);
@@ -388,9 +440,14 @@ export function createMediaPanel(send, options = {}) {
         }
         break;
       case "pause":
+        paused = true;
+        loading = false;
+        syncState();
         if (player && playerReady) player.pauseVideo();
         break;
       case "resume":
+        paused = false;
+        syncState();
         if (player && playerReady) player.playVideo();
         break;
       case "stop":
@@ -415,9 +472,11 @@ export function createMediaPanel(send, options = {}) {
     results = DEMO_RESULTS;
     view = "results";
     render();
-  } else if (demo === "media-playing" || demo === "media-fullscreen") {
+  } else if (["media-playing", "media-paused", "media-loading", "media-fullscreen"].includes(demo)) {
     current = DEMO_RESULTS[0];
     fullscreen = demo === "media-fullscreen";
+    paused = demo === "media-paused";
+    loading = demo === "media-loading";
     view = "player";
     const fake = document.createElement("div");
     fake.className = "media-player__iframe media-player__iframe--demo";
@@ -446,7 +505,7 @@ export function createMediaPanel(send, options = {}) {
     },
     // For tests only: the state this module holds, read-only.
     _debug() {
-      return { view, fullscreen, baseVolume, coreState, playerReady, loadedVideoId };
+      return { view, fullscreen, baseVolume, coreState, playerReady, loadedVideoId, paused, loading };
     },
   };
 }
