@@ -7,6 +7,17 @@ in `DECISIONS.md` and strike it here.
 
 ## Known problems
 
+**2026-09-26 — JEV / two-model routing — next step only if fuzzy tool
+choice turns out to be the remaining failure.** Clear commands now go
+through the rule-based `voice/router.py` (DECISIONS.md); what is left
+for the model is the fuzzy tool choice ("something cheerful", "what was
+that song"). If *that* is what still misses live, the candidate is
+TypeSafe's JEV decision model via OpenRouter (~$0.042/1M input,
+70–500 ms claimed), untested here and needing an OpenRouter key we
+don't have. Also open: `cli.py` could hand the session the controllers'
+real state (titles on offer, a card up) instead of the session inferring
+it from tool results.
+
 **2026-09-25 — Official music videos often refuse to play (YouTube
 error 150).** Found in the OpenAI live check: "Ed Sheeran - Perfect" came
 back from a search that asks for `videoEmbeddable=true`, then failed in

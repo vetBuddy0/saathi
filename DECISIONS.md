@@ -1099,6 +1099,37 @@ slow Twilio would have frozen the face. The mic and sink are released
 and the state goes IDLE synchronously; only the REST call moves off the
 thread. `hangup(wait=True)` joins it for `shutdown()` and scripts.
 
+**2026-09-26 — Clear commands are routed to their tool by a rule, before
+the model; no second model.** Live, "pause", "volume up", "smaller" and
+"call my son" sometimes came back as a sentence ("I've turned up the
+volume for you") with no tool call: gpt-4.1 with six tools offered
+described the action instead of asking for it, one turn in several.
+`voice/router.py` now matches the transcript first -- pause / carry on /
+stop / louder / quieter / bigger / smaller / next / again / never mind /
+"the second one" (while titles are on offer), "call my son" / "ring
+Priya" (always), yes / no / a number while a calling card is up -- and
+`cascade.py` emits the match as an intent through the same callback and
+permission check a model's tool call goes through. The model decides
+nothing for those turns; fuzzy requests reach it unchanged. Fixed
+replies ("Paused.", "Carrying on.", "Stopped."; silence for bigger /
+smaller / never mind) apply only when the tool answers `status: "ok"`,
+and volume is always phrased by the model from the note ("already as
+loud as it goes" comes back under the same status). Media commands only
+match once a search has returned titles this session: "louder" with
+nothing playing means her own voice. "Hang up" is not routed -- calling
+has no tool for it; the two-second hold is the hang-up. Multi-clause
+utterances match on the last clause only, or not at all. The router's
+context is inferred from tool results as they pass through the session
+(titles on offer; a card shown, for one turn), because `cli.py` is not
+touched here; wiring the controllers' real state in is a later, small
+change. Kill switch: `SAATHI_COMMAND_ROUTER=off`. A routed turn logs
+`first_token_ms=0` and no prompt tokens when no model was called.
+Rejected: a second, smaller model choosing the tool (a two-model split,
+TypeSafe's JEV) -- still probabilistic on exactly the inputs that fail,
+one more network hop on every turn, and JEV needs an OpenRouter key this
+project doesn't have; it stays a next step only if fuzzy tool choice
+turns out to be the remaining failure (TODO.md).
+
 **2026-09-26 — A tap that answers a card ends the exchange; the turn
 that asked is over.** Reproduced in a real headless Chromium against
 `screen/server.py` (not by reading the code): the search turn shows the
