@@ -7,6 +7,47 @@ in `DECISIONS.md` and strike it here.
 
 ## Known problems
 
+**2026-09-26 — JEV / two-model routing — next step only if fuzzy tool
+choice turns out to be the remaining failure.** Clear commands now go
+through the rule-based `voice/router.py` (DECISIONS.md); what is left
+for the model is the fuzzy tool choice ("something cheerful", "what was
+that song"). If *that* is what still misses live, the candidate is
+TypeSafe's JEV decision model via OpenRouter (~$0.042/1M input,
+70–500 ms claimed), untested here and needing an OpenRouter key we
+don't have. Also open: `cli.py` could hand the session the controllers'
+real state (titles on offer, a card up) instead of the session inferring
+it from tool results.
+
+**2026-09-25 — Official music videos often refuse to play (YouTube
+error 150).** Found in the OpenAI live check: "Ed Sheeran - Perfect" came
+back from a search that asks for `videoEmbeddable=true`, then failed in
+the player with code 150 -- the rights owner blocks embedding outside
+youtube.com. The media tool handles it (drops the video, re-offers the
+rest), but for popular artists the first result is often unplayable. To
+try: filter results with a `videos.list` status check before offering
+them, or prefer lyric / fan uploads; measure how often 150 happens.
+
+**2026-09-25 — Revisit the OpenAI switch for cost and speed.** Speech-to-
+text and replies moved to OpenAI for the demo (`gpt-transcribe`,
+`gpt-4.1`; DECISIONS.md) — chosen for reliability, not price. To do:
+- **Latency got worse.** Measured: ~870 ms to transcribe + ~740 ms to
+  reply, vs Groq's ~350 + ~280. With Chirp's first audio (~650 ms) she
+  starts speaking ~2.2 s after the spacebar is released, vs ~1.3 s.
+  The 1200 ms budget was already red.
+- **Cost isn't tracked.** `turns.cost_usd` is left NULL for OpenAI (the
+  price table in cascade.py is Groq's); add OpenAI's per-token and
+  per-minute-of-audio prices, with the date checked.
+- **Options to measure, not guess:** `gpt-5.4-nano` (4/4 on the tool test
+  at 786 ms) or `gpt-4o-mini-transcribe` (~750 ms) for cheaper turns;
+  Groq back for transcription only (fast, and it reports the language);
+  streaming the reply so the first sentence is spoken before the rest
+  exists. `SAATHI_AI_PROVIDER` / `SAATHI_LLM_MODEL` / `SAATHI_STT_MODEL`
+  switch everything without code.
+- **Background calls still use the reply model:** the per-turn memory
+  digest runs on `gpt-4.1` too; a cheaper model would do. `reflect.py`
+  still builds its own Groq client.
+
+
 **2026-09-25 — "The feel is still missing." (user's words)**
 Reported after the three memory layers landed and were tested live:
 she works — stays quiet on silence, follows a conversation — but does
@@ -75,24 +116,24 @@ counts as ~96 ms of voice still goes through and may come back as
 
 ## Calling (PR #4) — parked on `batch/calling`, not on main
 
+(`cloud/demo`, 2026-09-26: `reconcile/calling` merged with `cloud/bug-fix`,
+S1 fixed, and calling wired into `saathi run` with the relay started at
+boot and an "unavailable" answer when Twilio/cloudflared are missing.
+S2–S4 below are still open there.)
+
 Parked 2026-09-25 after review. The integration of #4 against the real
 cards is preserved on `reconcile/calling` (one test still failing
 there). S1 alone would break the whole device on stage, not just
 calling. Fix S1–S4 before #4 merges.
 
-**S1 — A missed call jams calling AND the spacebar.** An unanswered,
-declined or busy call leaves `CallController` in DIALLING forever
-(`saathi/call/controller.py:137-155`, `:184-189`). DIALLING is left
-only by `stream_stopped`, and a Media Stream opens only after the call
-is answered; there is no StatusCallback, no timeout, and `fetch_call`
-is never used. Meanwhile the hold handler stays registered, so a short
-spacebar tap does nothing (`hangup.py:259-262`).
-*Repro:* dial the test number and don't answer (or decline). Then
-"call X" → "A call is already in progress" (`tools/calling.py:362-366`)
-and every short spacebar tap is swallowed until a 2 s hold. Same if the
-tunnel has died (Twilio can't fetch `/twiml`, no stream ever opens).
-*Fix:* poll `fetch_call(sid)` on a worker thread while DIALLING, or a
-~45 s ring timeout; tear down on no-answer / busy / failed / canceled.
+~~**S1 — A missed call jams calling AND the spacebar.**~~ Fixed
+2026-09-26 on `cloud/demo`: `CallController` polls `fetch_call(sid)` on
+a watcher thread while DIALLING (every 2 s) and tears down on a
+terminal status (no-answer, busy, failed, canceled, completed) or after
+a 45 s ring timeout, completing the call via REST in the timeout case.
+Teardown clears the hold handler, so the spacebar is a spacebar again.
+Verified in a headless browser: a tap during the ring does nothing,
+a tap after the timeout starts a turn. S2–S4 below are still open.
 
 **S2 — A name one letter off dials without asking.** Confident band is
 ≥0.93 plus a 0.05 margin (`saathi/call/match.py:43-47`, `:146-147`);

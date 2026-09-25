@@ -383,3 +383,83 @@ def test_no_timer_anywhere_in_the_cards_module():
     assert "Timer(" not in source
     assert "sleep(" not in source
     assert "call_later" not in source
+
+
+def test_entry_shows_the_number_as_given_and_the_name_and_speaks_both():
+    from saathi.screen.cards import entry
+
+    card = entry("Priya's number", number="+65 9123 4567", name="Priya")
+    assert card.kind == "entry" and card.number == "+65 9123 4567" and card.name == "Priya"
+    assert card.spoken == (
+        "Priya's number plus 6 5, 9 1 2 3, 4 5 6 7, and the name, Priya. "
+        "Say yes to save, or change the number or the name."
+    )
+    message = card.as_message()
+    assert message["kind"] == "entry"
+    assert message["number"] == "+65 9123 4567" and message["name"] == "Priya"
+
+
+def test_entry_answers_are_yes_with_values_no_dismiss_or_an_edit_and_nothing_else():
+    from saathi.screen.cards import entry
+
+    card = entry("Priya's number", number="+65 9123 4567", name="Priya")
+    # A spoken yes carries what the card shows; a tapped Save carries her edits.
+    assert validate_answer(card, {"yes": True}) == {
+        "yes": True, "number": "+6591234567", "name": "Priya"
+    }
+    assert validate_answer(card, {"yes": True, "number": "+65 9123 4568", "name": "Anita"}) == {
+        "yes": True, "number": "+6591234568", "name": "Anita"
+    }
+    assert validate_answer(card, {"yes": False}) == {"yes": False}
+    assert validate_answer(card, {"dismiss": True}) == {"dismiss": True}
+    assert validate_answer(card, {"number": "9123"}) == {"number": "9123"}
+    assert validate_answer(card, {"name": "  Anita  "}) == {"name": "Anita"}
+    assert validate_answer(card, {"number": "91a3"}) is None  # never guessed at
+    assert validate_answer(card, {"number": "91+23"}) is None
+    assert validate_answer(card, {"name": ""}) is None
+    assert validate_answer(card, {"yes": "yes"}) is None
+    assert validate_answer(card, {"choice": 1}) is None
+    assert validate_answer(card, {}) is None
+
+
+def test_an_entry_edit_updates_the_card_in_place_and_a_yes_clears_it():
+    from saathi.screen.cards import entry, regroup_number
+
+    controller, sent = _controller()
+    seen = []
+    controller.on_answer(seen.append)
+    card = entry("Priya's number", number="+65 9123 4567", name="Priya")
+    controller.show(card)
+    assert controller.answer(card.id, {"number": "+659123456"}, source="tap")
+    assert controller.current.id == card.id  # same card, still up
+    assert controller.current.number == "+65 9123 456"  # her grouping kept
+    assert sent[-1]["card"]["id"] == card.id and sent[-1]["card"]["number"] == "+65 9123 456"
+    assert seen == []  # nobody waiting is told about an edit
+    assert controller.answer(card.id, {"name": "Anita"}, source="voice")
+    assert controller.current.name == "Anita"
+    assert controller.answer(card.id, {"yes": True}, source="voice")
+    assert controller.current is None and sent[-1] == {"type": "card", "card": None}
+    assert seen[-1].answer == {"yes": True, "number": "+659123456", "name": "Anita"}
+    # New digits group in fours after the kept prefix.
+    assert regroup_number("+65 9123 4567", "+65912345678") == "+65 9123 4567 8"
+    assert regroup_number("+65 9123 4567", "9") == "9"
+    assert regroup_number("9123", "91234") == "9123 4"
+
+
+def test_a_confirmable_readback_takes_yes_or_no_and_a_plain_one_does_not():
+    # Reconciliation: Calling's read-back before saving a number is a
+    # question. A plain read-back is still only acknowledged.
+    from saathi.screen.cards import CardController, readback
+
+    cards = CardController()
+    seen = []
+    cards.on_answer(seen.append)
+    plain = readback("Temperature", "37.5")
+    cards.show(plain)
+    assert not cards.answer(plain.id, {"yes": True})
+    asking = readback("Priya's number", "+65 9123 4567", confirm=True, group=False)
+    assert asking.value == "+65 9123 4567"  # caller's grouping kept
+    cards.show(asking)
+    assert not cards.answer(asking.id, {"yes": "yes"})  # never guessed at
+    assert cards.answer(asking.id, {"yes": False}, source="tap")
+    assert seen[-1].yes is False

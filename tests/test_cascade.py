@@ -1167,3 +1167,153 @@ def test_say_in_one_language_is_still_one_synthesis_stream(no_real_playback):
 
     assert backend.synthesized == ["你好。", "今天怎么样？"]
     assert backend.languages_asked == ["chinese"]
+
+
+# --- the provider seam (voice/engine/provider.py) --------------------------
+
+
+def _openai_session(client, *, llm="gpt-4.1", stt="gpt-transcribe"):
+    from saathi.voice.engine.provider import AIProvider
+
+    return CascadeSession(
+        "fake-sink",
+        provider=AIProvider("openai", client, llm, stt),
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        speech_gate=_hears_speech,
+    )
+
+
+def test_openai_transcriber_is_asked_for_json_and_language_comes_from_the_script(
+    no_real_playback,
+):
+    # OpenAI's newer transcribers return text only; a Mandarin transcript
+    # must still switch her reply language, from its script.
+    client = FakeClient(heard="请帮我播放一首邓丽君的歌。", detected_language="english")
+    session = _openai_session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    stt = client.audio.transcriptions.calls[0]
+    assert stt["model"] == "gpt-transcribe" and stt["response_format"] == "json"
+    chat = client.chat.completions.calls[0]
+    assert chat["model"] == "gpt-4.1"
+    assert {"role": "system", "content": "Reply in chinese."} in chat["messages"]
+    assert session.last_heard == "请帮我播放一首邓丽君的歌。"
+
+
+def test_every_chat_call_bounds_its_output_and_reasoning_models_get_it_off(no_real_playback):
+    # The unbounded default made Groq reject tool turns (2048 reserved vs
+    # a 1000/min limit); OpenAI's reasoning families need reasoning off
+    # to accept tools at all.
+    client = FakeClient()
+    session = _openai_session(client, llm="gpt-6-sol")
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    call = client.chat.completions.calls[0]
+    assert call["max_completion_tokens"] == 400
+    assert call["reasoning_effort"] == "none"
+    assert "max_tokens" not in call
+
+
+def test_a_silent_turn_clears_last_heard(no_real_playback):
+    client = FakeClient(heard="hello there")
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    assert session.last_heard == "hello there"
+    session._speech_gate = lambda pcm: False
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    assert session.end_turn() == ""
+    assert session.last_heard is None
+
+
+def test_a_bare_client_keeps_the_groq_defaults(no_real_playback):
+    client = FakeClient()
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    assert client.audio.transcriptions.calls[0]["response_format"] == "verbose_json"
+    assert client.chat.completions.calls[0]["model"] == cascade_module._LLM_MODEL
+
+
+# --- the command router (voice/router.py) --------------------------------
+
+
+def _media_session(client: FakeClient):
+    """A session that has already had one music search answered, so the
+    router knows results are on offer."""
+    session, backend = _session(client)
+    intents: list = []
+
+    def handle(name, args):
+        intents.append((name, args))
+        if args.get("action") == "search":
+            return {"status": "ok", "results": ["One: A", "Two: B", "Three: C"]}
+        return {"status": "ok", "note": "Paused. One word is enough."}
+
+    session.on_intent(handle)
+    search = handle("play_music", {"action": "search", "query": "x"})
+    session._note_tool_result("play_music", search)
+    intents.clear()
+    return session, backend, intents
+
+
+def test_a_routed_command_calls_the_intent_and_makes_no_chat_completion(no_real_playback):
+    client = FakeClient(heard="Pause.")
+    session, _backend, intents = _media_session(client)
+
+    session.start()
+    reply = session.end_turn()
+
+    assert intents == [("play_music", {"action": "pause"})]
+    assert reply == "Paused."
+    assert client.chat.completions.calls == []
+    session.say(reply)
+    timings = session.pop_last_turn_timings()
+    assert timings.first_token_ms == 0 and timings.prompt_tokens == 0
+    # The exchange is still recorded, so "that one" later has context.
+    assert session._conversation.messages()[-2:] == [
+        {"role": "user", "content": "Pause."},
+        {"role": "assistant", "content": "Paused."},
+    ]
+
+
+def test_a_routed_command_whose_tool_did_not_say_ok_is_phrased_by_the_model(no_real_playback):
+    client = FakeClient(heard="Pause.", reply="Nothing is playing just now.")
+    session, _backend, _intents = _media_session(client)
+    session.on_intent(lambda name, args: {"status": "nothing_playing", "note": "Nothing to pause."})
+
+    session.start()
+    assert session.end_turn() == "Nothing is playing just now."
+    assert len(client.chat.completions.calls) == 1
+    tool_messages = [m for m in client.chat.completions.calls[0]["messages"] if m["role"] == "tool"]
+    assert json.loads(tool_messages[0]["content"])["status"] == "nothing_playing"
+
+
+def test_the_router_kill_switch_restores_the_model_path(no_real_playback, monkeypatch):
+    monkeypatch.setenv("SAATHI_COMMAND_ROUTER", "off")
+    client = FakeClient(heard="Pause.", reply="Of course.")
+    session, _backend, intents = _media_session(client)
+
+    session.start()
+    assert session.end_turn() == "Of course."
+    assert intents == []
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_call_my_son_routes_without_any_results_on_offer(no_real_playback):
+    client = FakeClient(heard="Call my son.", reply="There's no number saved for your son.")
+    session, _backend = _session(client)
+    intents = []
+    session.on_intent(lambda name, args: intents.append((name, args)) or {"status": "no_match"})
+
+    session.start()
+    assert session.end_turn() == "There's no number saved for your son."
+    assert intents == [("call_contact", {"contact": "my son"})]
+    assert len(client.chat.completions.calls) == 1  # the follow-up only, never the tool choice

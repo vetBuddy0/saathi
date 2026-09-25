@@ -1484,3 +1484,74 @@ async def test_a_player_error_is_logged_with_its_code_and_reaches_the_controller
             await asyncio.sleep(0.1)
     assert found[0].video_id in controller.unplayable
     assert found[0].video_id in caplog.text and "code 150" in caplog.text
+
+
+# -- captions: what was heard and said, only while switched on -------------
+
+
+class HeardSession(FakeSession):
+    def end_turn(self) -> str:
+        self.last_heard = "play a song by Ed Sheeran"
+        return "Here are three songs."
+
+
+async def _turn_messages(ws) -> list[dict]:
+    await ws.send_json({"type": "input", "event": "press"})
+    await ws.receive_json()  # listening
+    await ws.send_json({"type": "input", "event": "release"})
+    got = []
+    while True:
+        message = await ws.receive_json()
+        got.append(message)
+        if message == {"type": "state", "state": "idle"}:
+            return got
+
+
+async def test_captions_are_off_by_default_and_nothing_is_sent(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    store = _tmp_store()
+    app = build_app(Core(), session=HeardSession(), capture_source_id="src", store=store)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            first = await ws.receive_json()
+            settings = await ws.receive_json()
+            assert first["type"] == "state" and settings["captions"] is False
+            got = await _turn_messages(ws)
+    store.close()
+    assert not [m for m in got if m["type"] == "caption"]
+
+
+async def test_captions_on_sends_heard_then_reply_to_every_screen(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    store = _tmp_store()
+    app = build_app(Core(), session=HeardSession(), capture_source_id="src", store=store)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/ws") as other:
+            await _connect(ws)
+            await _connect(other)
+            await ws.send_json({"type": "set_preference", "key": "captions", "value": "on"})
+            assert (await ws.receive_json())["ok"] is True
+            assert (await ws.receive_json())["captions"] is True
+            assert (await other.receive_json())["captions"] is True
+            got = await _turn_messages(ws)
+            other_got = [await other.receive_json() for _ in range(len(got) + 1)]
+    store.close()
+    captions = [m for m in got if m["type"] == "caption"]
+    assert captions == [
+        {"type": "caption", "who": "her", "text": "play a song by Ed Sheeran"},
+        {"type": "caption", "who": "saathi", "text": "Here are three songs."},
+    ]
+    assert [m for m in other_got if m["type"] == "caption"] == captions
+
+
+async def test_a_captions_value_outside_on_off_is_dropped(monkeypatch):
+    store = _tmp_store()
+    app = build_app(Core(), store=store)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "set_preference", "key": "captions", "value": "yes"})
+            await ws.send_json({"type": "set_preference", "key": "language", "value": "english"})
+            reply = await ws.receive_json()
+    store.close()
+    assert reply["key"] == "language"  # the malformed one produced nothing

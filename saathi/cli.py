@@ -20,7 +20,6 @@ invisible until someone spoke to the device.
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -82,13 +81,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 # The tools `saathi run` offers the model and the permission each one
-# needs -- granted unconditionally, every one of them, because none has
-# a consequence outside the room (DECISIONS 2026-09-25): set_language
-# is device configuration, correct_memory is her own way to fix a wrong
-# belief, play_music is a song on her own screen. "calls"/"contacts"
-# stay ungranted: Calling is parked on its branch with four serious
-# review findings (TODO.md).
-GRANTED_PERMISSIONS = frozenset({"preferences", "memory", "music"})
+# needs -- granted unconditionally, every one of them: set_language is
+# device configuration, correct_memory is her own way to fix a wrong
+# belief, play_music is a song on her own screen (DECISIONS 2026-09-25),
+# "contacts" writes her memory and "calls" rings a phone (DECISIONS
+# 2026-09-25, calls in scope; wired on cloud/demo 2026-09-26 with S1
+# fixed and S2-S4 still open in TODO.md).
+GRANTED_PERMISSIONS = frozenset({"preferences", "memory", "music", "calls", "contacts"})
+
+# The quick tunnel's hostname took ~84 s to resolve on the first live
+# run, so the relay comes up at boot on its own thread, not at the
+# first dial; this is how long it may take before calling is reported
+# as unavailable.
+RELAY_STARTUP_SECONDS = 150.0
 
 
 @dataclass
@@ -110,6 +115,22 @@ class Runtime:
     session: Any = None
     capture_source_id: str | None = None
     notes: list[str] = field(default_factory=list)
+    calling: "CallingRuntime | None" = None
+
+
+@dataclass
+class CallingRuntime:
+    """Calling, when Twilio and cloudflared are both present. `ready` is
+    set once the media server and the tunnel are up (a background thread
+    at boot); until then, and if that fails, `call_contact` answers
+    "unavailable" with `reason` instead of dialling -- the rest of the
+    device never depends on it."""
+
+    controller: Any
+    ready: Any  # threading.Event
+    reason: str = "Calling is still starting up."
+    failed: bool = False
+    audio_ids: tuple[str, str] | None = None  # (echo-cancelled source, sink)
 
 
 def build_runtime() -> Runtime:
@@ -137,7 +158,16 @@ def build_runtime() -> Runtime:
     media = MediaController(cards=cards)
     runtime = Runtime(config=config, core=core, store=store, cards=cards, hold=hold, media=media)
 
-    if not os.environ.get("GROQ_API_KEY"):
+    # The voice engine needs a speech-to-text + chat provider: OpenAI if
+    # OPENAI_API_KEY is set (the demo choice), else Groq. See
+    # voice/engine/provider.py.
+    from saathi.voice.engine.provider import missing_key
+
+    missing = missing_key()
+    if missing is not None:
+        runtime.notes.append(
+            f"No AI provider ({missing} not set); running without the voice engine."
+        )
         return runtime
 
     # One-hour spike wiring (2026-09-17): only actually talks to Groq
@@ -193,11 +223,14 @@ def build_runtime() -> Runtime:
     mic, speaker = manager.choose("input"), manager.choose("output")
     if mic is None or speaker is None:
         runtime.notes.append("No microphone/speaker found; running without the voice engine.")
+        _build_calling(runtime, None)
         return runtime
     handles = ensure_echo_cancellation(mic.id, speaker.id)
     if not isinstance(handles, EchoCancelHandles):
         runtime.notes.append("No system echo-cancel available; running without the voice engine.")
+        _build_calling(runtime, None)
         return runtime
+    _build_calling(runtime, handles)
     # threadsafe_reader, not a lambda over `store`: these are called
     # from end_turn()'s executor thread and from the voice-warming
     # daemon thread, never from this one, and a sqlite3 connection
@@ -221,12 +254,177 @@ def build_runtime() -> Runtime:
     return runtime
 
 
+def _unavailable_call_tool(reason: Callable[[], str]):
+    """`call_contact` when calling can't dial: the same name and
+    permission as the real tool, answering "unavailable" with a plain
+    reason the model can say. Registered so "call Priya" gets an honest
+    sentence, not "no such tool"."""
+    from saathi.tools.registry import Tool
+
+    def _call_contact(contact: Any = None, **_ignored: Any) -> dict[str, Any]:
+        return {
+            "status": "unavailable",
+            "note": f"{reason()} Say so plainly in one short sentence; don't offer to try.",
+        }
+
+    return Tool(
+        name="call_contact",
+        schema={"type": "object", "properties": {"contact": {"type": "string"}}},
+        permission="calls",
+        handler=_call_contact,
+    )
+
+
+def _build_calling(runtime: Runtime, handles: Any) -> None:
+    """Calling, if Twilio is configured and cloudflared is installed
+    (docs/completed/calling.md's cli diff). The echo-cancel ids come
+    from aec.py here; nothing in saathi/call/ names a device. Missing
+    credentials, a missing binary, no echo-cancel pair, or a tunnel that
+    never resolves all end the same way: `call_contact` says calling is
+    unavailable and the rest of the device carries on."""
+    import threading
+
+    from saathi.call.relay import find_cloudflared
+    from saathi.call.twilio import TwilioCredentials
+    from saathi.tools.calling import CALL_CONTACT_DESCRIPTION
+    from saathi.tools.llm_schema import tool_to_openai_schema
+
+    registry = runtime.registry
+    if registry is None:
+        return
+
+    def off(reason: str) -> None:
+        runtime.notes.append(f"Calling off: {reason}")
+        tool = _unavailable_call_tool(lambda: f"Calling isn't available on this device: {reason}")
+        registry.register(tool)
+        runtime.tool_schemas.append(tool_to_openai_schema(tool, CALL_CONTACT_DESCRIPTION))
+
+    creds = TwilioCredentials.from_env()
+    if creds is None:
+        off("missing " + ", ".join(TwilioCredentials.missing_names()) + ".")
+        return
+    if find_cloudflared() is None:
+        off("cloudflared is not installed.")
+        return
+    if handles is None:
+        off("no echo-cancelled microphone and speaker for the call audio.")
+        return
+
+    from saathi.call.audio import CallAudioBridge
+    from saathi.call.choosing import ChoiceFlow
+    from saathi.call.controller import CallController
+    from saathi.call.media import DEFAULT_PORT, MediaServer
+    from saathi.call.phone import infer_country
+    from saathi.call.relay import CloudflaredQuickTunnel
+    from saathi.call.saving import SaveFlow
+    from saathi.identity.preferences import LANGUAGE_KEY, read_preference, write_preference
+    from saathi.identity.store import IdentityStore
+    from saathi.tools.calling import (
+        ANSWER_CARD_DESCRIPTION,
+        SAVE_CONTACT_DESCRIPTION,
+        make_answer_card_tool,
+        make_call_tool,
+        make_contact_dialer,
+        make_save_contact_tool,
+    )
+    from saathi.tools.registry import Tool
+
+    path = runtime.store.path
+
+    def locale():
+        with IdentityStore(path) as own:  # handler threads: own connection
+            return infer_country(
+                read_preference(own, "country"), language=read_preference(own, LANGUAGE_KEY)
+            )[0]
+
+    def learn_country(iso):
+        with IdentityStore(path) as own:
+            write_preference(own, "country", iso)
+
+    tunnel = CloudflaredQuickTunnel(DEFAULT_PORT, startup_timeout=RELAY_STARTUP_SECONDS)
+    controller = CallController(
+        creds,
+        _twilio_client(creds),
+        tunnel,
+        _NoServer(),
+        lambda: CallAudioBridge(handles.source_id, handles.sink_id),
+        runtime.hold,
+    )
+    controller._server = MediaServer(controller, controller.ws_url, port=DEFAULT_PORT)
+    calling = CallingRuntime(
+        controller=controller,
+        ready=threading.Event(),
+        audio_ids=(handles.source_id, handles.sink_id),
+    )
+    runtime.calling = calling
+
+    def bring_up() -> None:
+        # The tunnel needs a minute or more to resolve; the face must
+        # not wait for it. Until this sets `ready`, "call Priya" is
+        # answered as "still starting up".
+        try:
+            controller.prepare()
+        except Exception as exc:  # RelayError, OSError (port in use), ...
+            calling.reason = f"Calling isn't available on this device: {exc}"
+            calling.failed = True
+            runtime.notes.append(f"Calling off: {exc}")
+            return
+        calling.reason = ""
+        calling.ready.set()
+
+    threading.Thread(target=bring_up, name="saathi-relay", daemon=True).start()
+
+    saves = SaveFlow(path, runtime.cards, locale, on_country_confirmed=learn_country)
+    choices = ChoiceFlow(runtime.cards, make_contact_dialer(controller))
+    real_call = make_call_tool(controller, path, choices)
+
+    def _gated_call(**arguments: Any) -> dict[str, Any]:
+        if not calling.ready.is_set():
+            return _unavailable_call_tool(lambda: calling.reason).handler(**arguments)
+        return real_call.handler(**arguments)
+
+    gated_call = Tool(
+        name=real_call.name,
+        schema=real_call.schema,
+        permission=real_call.permission,
+        handler=_gated_call,
+    )
+    tools = [
+        (gated_call, CALL_CONTACT_DESCRIPTION),
+        (make_save_contact_tool(saves), SAVE_CONTACT_DESCRIPTION),
+        (make_answer_card_tool(runtime.cards, [saves, choices]), ANSWER_CARD_DESCRIPTION),
+    ]
+    for tool, description in tools:
+        registry.register(tool)
+        runtime.tool_schemas.append(tool_to_openai_schema(tool, description))
+
+
+class _NoServer:
+    """Placeholder until `MediaServer` (which needs the controller) is
+    built -- the follow-up in docs/completed/calling.md is to give
+    `CallController` a server factory instead."""
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
+def _twilio_client(creds):
+    from saathi.call.twilio import RestTwilioClient
+
+    return RestTwilioClient(creds)
+
+
 def _run() -> int:
     from saathi.screen.server import run
 
     runtime = build_runtime()
     for note in runtime.notes:
         print(note)
+    if runtime.calling is not None:
+        print("Calling: starting the media server and the cloudflared tunnel in the background.")
     run(
         runtime.core,
         runtime.config.screen_host,
@@ -238,6 +436,8 @@ def _run() -> int:
         cards=runtime.cards,
         hold=runtime.hold,
     )
+    if runtime.calling is not None:
+        runtime.calling.controller.shutdown()
     return 0
 
 

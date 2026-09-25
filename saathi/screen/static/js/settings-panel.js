@@ -42,6 +42,7 @@ export function createSettingsPanel(send) {
 
     root.appendChild(renderLanguageSection());
     root.appendChild(renderBackendSection());
+    root.appendChild(renderCaptionsSection());
 
     if (lastError !== null) {
       const error = document.createElement("p");
@@ -112,6 +113,34 @@ export function createSettingsPanel(send) {
         if (!backend.available) return;
         lastError = null;
         send({ type: "set_preference", key: "tts_backend", value: backend.id });
+      });
+      list.appendChild(button);
+    }
+    section.appendChild(list);
+    return section;
+  }
+
+  function renderCaptionsSection() {
+    // Captions (captions.js): what she was heard saying, and what Saathi
+    // said back, in a strip along the bottom. For whoever is setting up
+    // or demoing the device; off by default.
+    const section = document.createElement("section");
+    const heading = document.createElement("h2");
+    heading.textContent = "Captions (what it hears and says)";
+    section.appendChild(heading);
+    const list = document.createElement("div");
+    list.className = "settings-panel__options";
+    for (const [value, label] of [["on", "Show captions"], ["off", "Hide captions"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "settings-panel__option";
+      if ((settings.captions === true) === (value === "on")) {
+        button.classList.add("settings-panel__option--selected");
+      }
+      button.textContent = label;
+      button.addEventListener("click", () => {
+        lastError = null;
+        send({ type: "set_preference", key: "captions", value });
       });
       list.appendChild(button);
     }

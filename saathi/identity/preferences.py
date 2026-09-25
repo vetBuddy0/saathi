@@ -36,6 +36,10 @@ from saathi.voice.tts.voices import DEFAULT_VOICE_ID, voice_by_id, voice_from_le
 
 LANGUAGE_KEY = "language"
 TTS_BACKEND_KEY = "tts_backend"
+# "on" / "off" (absent = off): show on screen what speech-to-text heard
+# and what she replied. For whoever is setting up or demoing the device,
+# toggled from the Ctrl+L panel -- see screen/static/js/captions.js.
+CAPTIONS_KEY = "captions"
 VOICE_KEY = "voice"
 
 

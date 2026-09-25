@@ -98,6 +98,7 @@ from aiohttp import WSMsgType, web
 from saathi.audio.capture import Capture
 from saathi.core import Core, Event, State
 from saathi.identity.preferences import (
+    CAPTIONS_KEY,
     LANGUAGE_KEY,
     TTS_BACKEND_KEY,
     read_preference,
@@ -170,7 +171,13 @@ def _log_turn(store, session, eou_ms: int | None) -> None:
 
 
 async def _run_turn(
-    session, core: Core, generation: int, turn_generation: dict, store, eou_ms: int | None
+    session,
+    core: Core,
+    generation: int,
+    turn_generation: dict,
+    store,
+    eou_ms: int | None,
+    caption=None,
 ) -> None:
     """THINKING -> SPEAKING -> IDLE for one real turn. Runs the blocking
     STT/LLM/TTS work in an executor thread; every `core.handle()` call
@@ -182,14 +189,24 @@ async def _run_turn(
     been superseded and must not touch state on its way out — the press
     that superseded it already did."""
     loop = asyncio.get_running_loop()
+    caption = caption or (lambda who, text: None)
     try:
         reply_text = await loop.run_in_executor(None, session.end_turn)
     except Exception:
         logger.exception("turn failed (STT or LLM)")
+        heard = getattr(session, "last_heard", None)
+        if heard:
+            caption("her", heard)
+        caption("saathi", _FALLBACK_REPLY_TEXT)
         await _speak_and_finish(
             session, core, generation, turn_generation, _FALLBACK_REPLY_TEXT, store, eou_ms
         )
         return
+    heard = getattr(session, "last_heard", None)
+    if heard:
+        caption("her", heard)
+    if reply_text.strip():
+        caption("saathi", reply_text)
     if not reply_text.strip():
         # Nothing was said (the session's speech gate, or an empty
         # transcript -- see cascade.py's end_turn()). THINKING -> IDLE
@@ -258,9 +275,11 @@ def _settings_message(store) -> str:
     # No preference written yet means the preferred default (Chirp), the
     # same thing cli.py hands the session -- not the offline fallback.
     current_backend = DEFAULT_PREFERRED_BACKEND_ID
+    captions = False
     if store is not None:
         current_language = read_preference(store, LANGUAGE_KEY, DEFAULT_LANGUAGE)
         current_backend = read_preference(store, TTS_BACKEND_KEY, DEFAULT_PREFERRED_BACKEND_ID)
+        captions = read_preference(store, CAPTIONS_KEY, "off") == "on"
     return json.dumps(
         {
             "type": "settings",
@@ -268,6 +287,7 @@ def _settings_message(store) -> str:
             "current_language": current_language,
             "backends": backends,
             "current_backend": current_backend,
+            "captions": captions,
         }
     )
 
@@ -292,6 +312,14 @@ def build_app(
         for ws in list(websockets):
             if not ws.closed:
                 asyncio.ensure_future(ws.send_str(message))
+
+    def caption(who: str, text: str) -> None:
+        """A line of the transcript, to every screen -- only while the
+        `captions` preference is on. Content, not status: what was
+        actually heard and said, never \"Listening...\". Runs on the loop."""
+        if store is None or read_preference(store, CAPTIONS_KEY, "off") != "on":
+            return
+        _send_all(json.dumps({"type": "caption", "who": who, "text": text}))
 
     def broadcast_state(state, _event: Event) -> None:
         _send_all(json.dumps({"type": "state", "state": state.value}))
@@ -410,7 +438,12 @@ def build_app(
                 if payload.get("type") == "set_preference":
                     key = payload.get("key")
                     value = payload.get("value")
-                    if key not in (LANGUAGE_KEY, TTS_BACKEND_KEY) or not isinstance(value, str):
+                    if key not in (LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY) or not isinstance(
+                        value, str
+                    ):
+                        logger.warning("dropped malformed set_preference: %r", payload)
+                        continue
+                    if key == CAPTIONS_KEY and value not in ("on", "off"):
                         logger.warning("dropped malformed set_preference: %r", payload)
                         continue
                     if store is None:
@@ -534,7 +567,15 @@ def build_app(
                             turn_generation["value"] += 1
                             generation = turn_generation["value"]
                             asyncio.get_running_loop().create_task(
-                                _run_turn(session, core, generation, turn_generation, store, eou_ms)
+                                _run_turn(
+                                    session,
+                                    core,
+                                    generation,
+                                    turn_generation,
+                                    store,
+                                    eou_ms,
+                                    caption=caption,
+                                )
                             )
         finally:
             websockets.discard(ws)
