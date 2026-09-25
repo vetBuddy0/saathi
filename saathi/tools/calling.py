@@ -62,8 +62,11 @@ from saathi.tools.registry import Tool
 CALL_CONTACT_DESCRIPTION = (
     "Place a phone call for her, when she asks to call someone (e.g. 'call my "
     "daughter', 'ring Priya', 'call the test number'). Pass who she asked for as "
-    "`contact`, in her words. Do not call this for talking *about* someone; only when "
-    "she wants to phone them now."
+    "`contact`, in her words ('my son', not 'your son'). ALWAYS call this tool for any "
+    "request to phone someone -- never answer from memory that a number isn't saved; "
+    "only this tool knows her contacts, and it will show her the saved ones if it "
+    "isn't sure. Do not call this for talking *about* someone; only when she wants to "
+    "phone them now."
 )
 SAVE_CONTACT_DESCRIPTION = (
     "Save someone's phone number when she asks (e.g. 'save my daughter Priya's number, "
@@ -176,6 +179,14 @@ def make_call_tool(
             return _dial(controller, result.best.phone, result.best.name)
         if result.band == "unsure" and choices is not None:
             return choices.offer(contact, result.choices())
+        # Nothing matched, but she has saved contacts: ask from them rather
+        # than saying "no number" -- a relation the parser didn't know, or a
+        # name Whisper spelled oddly, is far likelier than a stranger. Up to
+        # three on a card (one -> "Did you mean …?"); still never dials
+        # without her answer. The user asked for this live, 2026-09-25.
+        saved = contacts.list_contacts(store_path)
+        if saved and choices is not None:
+            return choices.offer(contact, saved[:3])
         return {
             "status": "no_match",
             "note": (

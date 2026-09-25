@@ -1167,3 +1167,76 @@ def test_say_in_one_language_is_still_one_synthesis_stream(no_real_playback):
 
     assert backend.synthesized == ["你好。", "今天怎么样？"]
     assert backend.languages_asked == ["chinese"]
+
+
+# --- the provider seam (voice/engine/provider.py) --------------------------
+
+
+def _openai_session(client, *, llm="gpt-4.1", stt="gpt-transcribe"):
+    from saathi.voice.engine.provider import AIProvider
+
+    return CascadeSession(
+        "fake-sink",
+        provider=AIProvider("openai", client, llm, stt),
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        speech_gate=_hears_speech,
+    )
+
+
+def test_openai_transcriber_is_asked_for_json_and_language_comes_from_the_script(
+    no_real_playback,
+):
+    # OpenAI's newer transcribers return text only; a Mandarin transcript
+    # must still switch her reply language, from its script.
+    client = FakeClient(heard="请帮我播放一首邓丽君的歌。", detected_language="english")
+    session = _openai_session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    stt = client.audio.transcriptions.calls[0]
+    assert stt["model"] == "gpt-transcribe" and stt["response_format"] == "json"
+    chat = client.chat.completions.calls[0]
+    assert chat["model"] == "gpt-4.1"
+    assert {"role": "system", "content": "Reply in chinese."} in chat["messages"]
+    assert session.last_heard == "请帮我播放一首邓丽君的歌。"
+
+
+def test_every_chat_call_bounds_its_output_and_reasoning_models_get_it_off(no_real_playback):
+    # The unbounded default made Groq reject tool turns (2048 reserved vs
+    # a 1000/min limit); OpenAI's reasoning families need reasoning off
+    # to accept tools at all.
+    client = FakeClient()
+    session = _openai_session(client, llm="gpt-6-sol")
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    call = client.chat.completions.calls[0]
+    assert call["max_completion_tokens"] == 400
+    assert call["reasoning_effort"] == "none"
+    assert "max_tokens" not in call
+
+
+def test_a_silent_turn_clears_last_heard(no_real_playback):
+    client = FakeClient(heard="hello there")
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    assert session.last_heard == "hello there"
+    session._speech_gate = lambda pcm: False
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    assert session.end_turn() == ""
+    assert session.last_heard is None
+
+
+def test_a_bare_client_keeps_the_groq_defaults(no_real_playback):
+    client = FakeClient()
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    assert client.audio.transcriptions.calls[0]["response_format"] == "verbose_json"
+    assert client.chat.completions.calls[0]["model"] == cascade_module._LLM_MODEL

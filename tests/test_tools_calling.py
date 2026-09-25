@@ -259,11 +259,27 @@ def test_a_single_unsure_name_is_confirmed_by_name_before_dialling(tmp_path):
     assert client.created == []
 
 
-def test_no_match_says_so_and_never_dials(tmp_path):
+def test_no_match_with_saved_contacts_asks_from_them_and_never_dials(tmp_path):
+    # Changed 2026-09-25 at the user's request ("make it ask from contacts
+    # if it's really unsure"): nothing matched "Suresh", but Priya is saved,
+    # so she's asked "Did you mean Priya?" instead of told there's no number.
     call, _, cards, client = _stage3(tmp_path, ("Priya", A))
+    result = call.handler(contact="Suresh")
+    assert result["status"] == "unsure" and "Did you mean Priya?" in result["note"]
+    assert client.created == [] and cards.current.kind == "confirm"
+
+
+def test_no_match_and_nothing_saved_says_so_and_never_dials(tmp_path):
+    call, _, cards, client = _stage3(tmp_path)
     result = call.handler(contact="Suresh")
     assert result["status"] == "no_match" and "offer to save" in result["note"]
     assert client.created == [] and cards.current is None
+
+
+def test_the_model_saying_your_son_still_finds_her_son(tmp_path):
+    from saathi.call import contacts
+
+    assert contacts.normalise_relation("your son") == contacts.normalise_relation("my son")
 
 
 def test_a_tap_on_the_choice_dials_off_the_calling_thread(tmp_path):

@@ -1,4 +1,4 @@
-"""The cascade `VoiceSession`: mic -> Groq Whisper -> Groq chat -> a
+"""The cascade `VoiceSession`: mic -> speech-to-text -> chat -> a
 `TTSBackend` (`voice/tts/`) -> speaker.
 
 One-hour spike (2026-09-17), built to close the loop end to end, not to
@@ -87,7 +87,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import os
 import queue
 import tempfile
 import threading
@@ -106,6 +105,12 @@ from saathi.identity.compile import compile_context
 from saathi.identity.digest import digest_turn, write_episode
 from saathi.identity.store import IdentityStore
 from saathi.voice.conversation import ConversationMemory, Exchange
+from saathi.voice.engine.provider import (
+    GROQ_LLM_MODEL,
+    GROQ_STT_MODEL,
+    AIProvider,
+    provider_from_env,
+)
 from saathi.voice.language import (
     DEFAULT_LANGUAGE,
     SUPPORTED_LANGUAGES,
@@ -118,7 +123,7 @@ from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 logger = logging.getLogger(__name__)
 
 _PERSONA_PATH = Path(__file__).parent.parent / "persona_stub.txt"
-_STT_MODEL = "whisper-large-v3-turbo"
+_STT_MODEL = GROQ_STT_MODEL
 # Item D's bake-off (2026-09-18), decided: none of the originally
 # requested models (llama-3.3-70b-versatile, qwen/qwen3-32b, Kimi K2)
 # exist on this Groq account anymore -- confirmed live against
@@ -130,12 +135,19 @@ _STT_MODEL = "whisper-large-v3-turbo"
 # the runner-up candidate, invented a fake memory about a daughter's
 # visit, which is disqualifying for a device talking to someone with
 # memory problems. See DECISIONS.md and docs/completed/D-model-bakeoff.md.
-_LLM_MODEL = "qwen/qwen3.8-27b"
+_LLM_MODEL = GROQ_LLM_MODEL
 # Checked against console.groq.com/docs/models on 2026-09-18. LLM-only:
 # does not include Whisper STT or TTS backend cost, which are priced in
 # different units (audio-seconds, characters) and tracked separately --
 # see voice/tts/*_backend.py's cost_per_million_chars_usd() for TTS.
 _LLM_PRICE_PER_MILLION_USD = {"input": 0.80, "output": 4.00}
+# Output tokens reserved per chat call. Replies are capped at two
+# sentences (compile.py) and a tool call's arguments are short; the
+# unbounded default made Groq reserve 2048 against an account limit of
+# 1000 a minute and reject tool turns outright (live, 2026-09-25).
+# `max_completion_tokens`, not `max_tokens`: OpenAI's newer models
+# reject the latter, and Groq accepts both.
+_REPLY_TOKEN_LIMIT = 400
 _SAMPLE_RATE = 16000
 
 
@@ -303,13 +315,22 @@ class CascadeSession:
         identity_store: IdentityStore | None = None,
         tool_schemas: list[dict] | None = None,
         speech_gate: Callable[[bytes], bool] | None = None,
+        provider: AIProvider | None = None,
     ) -> None:
-        if client is None:
-            api_key = os.environ.get("GROQ_API_KEY")
-            if not api_key:
-                raise RuntimeError("GROQ_API_KEY is not set in the environment")
-            client = Groq(api_key=api_key)
-        self._client = client
+        # Which service hears her and replies (voice/engine/provider.py).
+        # A bare `client` (tests, smoke.py) keeps the Groq-shaped defaults
+        # this class had before the seam existed; neither means "ask the
+        # environment" -- OpenAI if its key is set, else Groq.
+        if provider is None:
+            if client is not None:
+                provider = AIProvider("groq", client, _LLM_MODEL, _STT_MODEL)
+            else:
+                provider = provider_from_env()
+        self._provider = provider
+        self._client = provider.client
+        # What STT heard on the last turn, for on-screen captions
+        # (screen/server.py). None after a silent turn.
+        self.last_heard: str | None = None
         self._backends = backends if backends is not None else default_backends()
         self._backend_preference = backend_preference
         self._language_preference = language_preference
@@ -429,6 +450,7 @@ class CascadeSession:
         self._chunks.append(chunk)
 
     def end_turn(self) -> str:
+        self.last_heard = None  # a silent turn must not re-caption the last one
         pcm = b"".join(self._chunks)
         self._chunks = []
         # The silence bug, fixed where it starts. Whisper hallucinates
@@ -483,9 +505,9 @@ class CascadeSession:
 
         stt_started_at = time.monotonic()
         transcription = self._client.audio.transcriptions.create(
-            model=_STT_MODEL,
+            model=self._provider.stt_model,
             file=("turn.flac", flac_bytes),
-            response_format="verbose_json",
+            response_format=self._provider.stt_response_format,
         )
         self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
         heard = transcription.text.strip()
@@ -494,8 +516,17 @@ class CascadeSession:
             # contract as the gate: nothing said, end silently.
             self._pending_stt_ms = None
             return ""
+        self.last_heard = heard
         if not language_pinned:
-            detected = (transcription.language or "").lower()
+            if self._provider.stt_reports_language:
+                detected = (getattr(transcription, "language", None) or "").lower()
+            else:
+                # OpenAI's newer transcribers return text only. Her
+                # language is read from the script she was transcribed
+                # in instead: Han -> chinese, Devanagari -> hindi, ...
+                # Latin can't tell English from Malay; English is the
+                # only Latin-script language with a voice here anyway.
+                detected = script_language(heard, self._last_language)
             self._last_language = resolve_language(detected, self._last_language)
 
         # Three layers of memory, oldest to newest, then her words.
@@ -520,9 +551,11 @@ class CascadeSession:
         completion_tokens = 0
 
         completion = self._client.chat.completions.create(
-            model=_LLM_MODEL,
+            model=self._provider.llm_model,
             messages=messages,
             tools=self._tool_schemas or None,
+            max_completion_tokens=_REPLY_TOKEN_LIMIT,
+            **self._provider.llm_extra,
         )
         message = completion.choices[0].message
         usage = getattr(completion, "usage", None)
@@ -628,7 +661,12 @@ class CascadeSession:
             {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result)}
         )
 
-        follow_up = self._client.chat.completions.create(model=_LLM_MODEL, messages=messages)
+        follow_up = self._client.chat.completions.create(
+            model=self._provider.llm_model,
+            messages=messages,
+            max_completion_tokens=_REPLY_TOKEN_LIMIT,
+            **self._provider.llm_extra,
+        )
         follow_up_usage = getattr(follow_up, "usage", None)
         return _ToolOutcome(
             reply_text=(follow_up.choices[0].message.content or "").strip(),
@@ -719,7 +757,9 @@ class CascadeSession:
             first_tts_chunk_ms=first_tts_chunk_ms,
             prompt_tokens=self._pending_prompt_tokens,
             completion_tokens=self._pending_completion_tokens,
-            cost_usd=_estimate_llm_cost_usd(
+            cost_usd=None
+            if self._provider.name != "groq"
+            else _estimate_llm_cost_usd(
                 self._pending_prompt_tokens, self._pending_completion_tokens
             ),
         )
@@ -774,7 +814,7 @@ class CascadeSession:
                 try:
                     digest = digest_turn(
                         self._client,
-                        model=_LLM_MODEL,
+                        model=self._provider.llm_model,
                         exchange=exchange,
                         unfolded=unfolded,
                         summary=summary,

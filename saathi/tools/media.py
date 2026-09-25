@@ -89,6 +89,7 @@ import json
 import logging
 import os
 import re
+import threading
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -130,6 +131,58 @@ _SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 _VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 _HTTP_TIMEOUT_SECONDS = 8.0
 
+def direct_playback_enabled() -> bool:
+    """Play from a direct stream (yt-dlp) instead of YouTube's embedded
+    player -- DEMO ONLY, the user's explicit override on 2026-09-25 of the
+    original "official APIs only" rule (DECISIONS.md). Label uploads such
+    as "Ed Sheeran - Perfect" report `embeddable` and `syndicated` yet fail
+    in the embed with error 150; no API field predicts it. Search stays
+    on the official Data API. Opt-in with `SAATHI_YOUTUBE_PLAYBACK=direct`;
+    the default stays the official embed, and must."""
+    if os.environ.get("SAATHI_YOUTUBE_PLAYBACK", "iframe").strip().lower() != "direct":
+        return False
+    try:
+        import yt_dlp  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+# YouTube no longer serves one file with both audio and video (checked
+# 2026-09-25, even with a JS runtime): the page plays a muted <video> and
+# an <audio> side by side. Plain HTTPS only -- Chrome can't play the HLS
+# (m3u8) variants -- and 480p is plenty beside the face.
+_STREAM_FORMAT = (
+    "(bestvideo[ext=mp4][protocol=https][height<=480]/bestvideo[protocol=https][height<=480])"
+    "+(bestaudio[ext=m4a][protocol=https]/bestaudio[protocol=https])"
+)
+
+
+def resolve_stream_url(video_id: str) -> dict[str, str] | None:
+    """Direct, time-limited `{"video": url, "audio": url}` for `video_id`,
+    or None (logged) -- None means the page falls back to the embed."""
+    try:
+        import yt_dlp
+
+        options = {"format": _STREAM_FORMAT, "quiet": True, "no_warnings": True, "noplaylist": True}
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        parts = info.get("requested_formats") or []
+        video = next((f["url"] for f in parts if f.get("vcodec") not in (None, "none")), None)
+        audio = next((f["url"] for f in parts if f.get("acodec") not in (None, "none")), None)
+        if not (video and audio):
+            logger.warning("no separate audio+video streams for %s; falling back", video_id)
+            return None
+        return {"video": video, "audio": audio}
+    except Exception as exc:  # network, extractor change, age gate: fall back
+        logger.warning(
+            "stream lookup failed for %s (%s); falling back to the embed",
+            video_id,
+            type(exc).__name__,
+        )
+        return None
+
+
 ACTIONS = (
     "search",
     "play",
@@ -162,10 +215,15 @@ MEDIA_DESCRIPTION = (
     "for you to offer out loud by number. Use 'play' with choice 1, 2 or 3 when she "
     "picks one ('the second one', 'the first one'); 'play' with no choice means the one she most "
     "recently meant ('that one'). 'again' replays what last played. 'next' plays "
-    "the next result. 'never_mind' when she waves the offered choices away without "
-    "picking one. 'pause', 'resume' ('carry on'), 'stop', 'louder', 'quieter', "
-    "'bigger' (fill the screen) and 'smaller' (back beside your face) do what "
-    "they say. Never invent a title: only offer what the tool returned."
+    "the next result ('another one', 'a different video', 'skip this'). "
+    "'never_mind' when she waves the offered choices away without picking one. "
+    "'pause' ('pause', 'hold on', 'wait'), 'resume' ('carry on', 'play', 'continue'), "
+    "'stop' ('stop', 'close it', 'close YouTube', 'turn it off' -- also hides the "
+    "video), 'louder' ('volume up', 'turn it up'), 'quieter' ('volume down', 'turn "
+    "it down'), 'bigger' ('make it bigger', 'full screen') and 'smaller' ('make it "
+    "smaller', back beside your face). When she asks for any of these, call the "
+    "tool -- never just say you did it. Never invent a title: only offer what the "
+    "tool returned."
 )
 
 
@@ -382,6 +440,10 @@ def youtube_search(query: str, api_key: str | None = None) -> list[MediaResult]:
         "type": "video",
         "maxResults": str(SEARCH_CANDIDATES),
         "videoEmbeddable": "true",
+        # Only videos allowed to play outside youtube.com. Label uploads
+        # ("Ed Sheeran - Perfect", official) report `embeddable` and still
+        # fail in the player with error 150 -- found live 2026-09-25.
+        "videoSyndicated": "true",
         "safeSearch": "moderate",
         "q": query,
         "key": key,
@@ -596,6 +658,20 @@ class MediaController:
 
     def _emit(self, action: str, **fields: Any) -> None:
         if self._broadcast is None:
+            return
+        if action == "play" and direct_playback_enabled() and fields.get("video_id"):
+            # Resolve the direct stream off whatever thread we're on -- a
+            # tap arrives on the screen loop, and yt-dlp takes a second or
+            # two. The play goes out when the URL is known; without one it
+            # goes out as before and the page falls back to the embed.
+            broadcast = self._broadcast
+
+            def _resolve_then_play() -> None:
+                streams = resolve_stream_url(fields["video_id"])
+                extra = {"stream": streams} if streams else {}
+                broadcast({"type": "media", "action": action, **fields, **extra})
+
+            threading.Thread(target=_resolve_then_play, daemon=True).start()
             return
         self._broadcast({"type": "media", "action": action, **fields})
 

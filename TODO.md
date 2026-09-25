@@ -7,6 +7,36 @@ in `DECISIONS.md` and strike it here.
 
 ## Known problems
 
+**2026-09-25 — Official music videos often refuse to play (YouTube
+error 150).** Found in the OpenAI live check: "Ed Sheeran - Perfect" came
+back from a search that asks for `videoEmbeddable=true`, then failed in
+the player with code 150 -- the rights owner blocks embedding outside
+youtube.com. The media tool handles it (drops the video, re-offers the
+rest), but for popular artists the first result is often unplayable. To
+try: filter results with a `videos.list` status check before offering
+them, or prefer lyric / fan uploads; measure how often 150 happens.
+
+**2026-09-25 — Revisit the OpenAI switch for cost and speed.** Speech-to-
+text and replies moved to OpenAI for the demo (`gpt-transcribe`,
+`gpt-4.1`; DECISIONS.md) — chosen for reliability, not price. To do:
+- **Latency got worse.** Measured: ~870 ms to transcribe + ~740 ms to
+  reply, vs Groq's ~350 + ~280. With Chirp's first audio (~650 ms) she
+  starts speaking ~2.2 s after the spacebar is released, vs ~1.3 s.
+  The 1200 ms budget was already red.
+- **Cost isn't tracked.** `turns.cost_usd` is left NULL for OpenAI (the
+  price table in cascade.py is Groq's); add OpenAI's per-token and
+  per-minute-of-audio prices, with the date checked.
+- **Options to measure, not guess:** `gpt-5.4-nano` (4/4 on the tool test
+  at 786 ms) or `gpt-4o-mini-transcribe` (~750 ms) for cheaper turns;
+  Groq back for transcription only (fast, and it reports the language);
+  streaming the reply so the first sentence is spoken before the rest
+  exists. `SAATHI_AI_PROVIDER` / `SAATHI_LLM_MODEL` / `SAATHI_STT_MODEL`
+  switch everything without code.
+- **Background calls still use the reply model:** the per-turn memory
+  digest runs on `gpt-4.1` too; a cheaper model would do. `reflect.py`
+  still builds its own Groq client.
+
+
 **2026-09-25 — "The feel is still missing." (user's words)**
 Reported after the three memory layers landed and were tested live:
 she works — stays quiet on silence, follows a conversation — but does

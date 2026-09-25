@@ -257,8 +257,80 @@ export function createMediaPanel(send, options = {}) {
     reportError(videoId, code);
   }
 
+  // DEMO ONLY (DECISIONS.md 2026-09-25): play a direct stream the server
+  // resolved with yt-dlp, because label uploads refuse the embed (error
+  // 150). YouTube serves picture and sound separately, so a muted <video>
+  // and an <audio> play side by side; the audio is the clock and the
+  // picture is nudged back if it drifts. Same methods as the YT.Player
+  // the rest of this module drives, so pause/volume/stop are unchanged.
+  function startDirect(stream, videoId) {
+    if (demo) return;
+    clearTimeout(readyTimer);
+    readyTimer = null;
+    attaching = false;
+    pendingVideoId = null;
+    if (player && playerReady && player.kind !== "direct") {
+      try {
+        player.stopVideo();
+      } catch (error) {
+        /* the embed is being replaced anyway */
+      }
+    }
+    const video = document.createElement("video");
+    video.className = "media-player__iframe";
+    video.muted = true;
+    video.playsInline = true;
+    video.src = stream.video;
+    const audio = document.createElement("audio");
+    audio.src = stream.audio;
+    frameHolder.replaceChildren(video, audio);
+    audio.addEventListener("timeupdate", () => {
+      if (Math.abs(video.currentTime - audio.currentTime) > 0.3) video.currentTime = audio.currentTime;
+    });
+    audio.addEventListener("ended", () => {
+      if (view !== "player") return;
+      send({ type: "media_event", event: "ended" });
+      view = "none";
+      render();
+    });
+    audio.addEventListener("error", () => {
+      if (view === "player" && player && player.kind === "direct") reportError(videoId, "stream");
+    });
+    player = {
+      kind: "direct",
+      playVideo() {
+        audio.play().catch(() => {});
+        video.play().catch(() => {});
+      },
+      pauseVideo() {
+        audio.pause();
+        video.pause();
+      },
+      stopVideo() {
+        audio.pause();
+        video.pause();
+      },
+      setVolume(level) {
+        audio.volume = Math.max(0, Math.min(1, level / 100));
+      },
+      loadVideoById() {},
+    };
+    playerReady = true;
+    loadedVideoId = videoId;
+    applyVolume();
+    player.playVideo();
+  }
+
   async function startPlayback(videoId) {
     if (demo) return; // the demo draws a fake player region, no network
+    if (player && player.kind === "direct") {
+      // Back to the embed (no stream this time): the direct player can't
+      // load a video id, so start the embed from scratch.
+      player.stopVideo();
+      player = null;
+      playerReady = false;
+      frameHolder.replaceChildren();
+    }
     if (player && playerReady) {
       loadedVideoId = videoId;
       player.loadVideoById(videoId);
@@ -309,7 +381,11 @@ export function createMediaPanel(send, options = {}) {
         if (typeof message.fullscreen === "boolean") fullscreen = message.fullscreen;
         view = "player";
         render();
-        startPlayback(message.video_id);
+        if (message.stream && message.stream.video && message.stream.audio) {
+          startDirect(message.stream, message.video_id);
+        } else {
+          startPlayback(message.video_id);
+        }
         break;
       case "pause":
         if (player && playerReady) player.pauseVideo();

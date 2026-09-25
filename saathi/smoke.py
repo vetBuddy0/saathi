@@ -109,13 +109,46 @@ def _report_groq_key(
     return True
 
 
+def _report_openai_key(
+    api_key: str | None = None, client_factory: Callable[..., object] | None = None
+) -> bool:
+    """Same cheap check as `_report_groq_key`, for OpenAI -- the provider
+    the voice engine uses whenever OPENAI_API_KEY is set
+    (voice/engine/provider.py)."""
+    api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY not set.")
+        return True
+    if client_factory is None:
+        from openai import OpenAI as client_factory
+    client = client_factory(api_key=api_key)
+    try:
+        client.models.list()
+    except Exception as exc:
+        print(f"OPENAI_API_KEY was rejected: {type(exc).__name__}")
+        return False
+    print("OPENAI_API_KEY accepted.")
+    return True
+
+
+def _report_ai_key() -> bool:
+    """Check the key of the provider the engine will actually use."""
+    from saathi.voice.engine.provider import choose_provider_name
+
+    name = choose_provider_name(os.environ)
+    if name == "openai":
+        print("AI provider: OpenAI (speech-to-text and replies).")
+        return _report_openai_key()
+    return _report_groq_key()
+
+
 def main(argv: Sequence[str] | None = None, manager: DeviceManager | None = None) -> int:
     # `manager` is injectable so tests exercise the reporting/exit-code
     # logic against a FakeBackend, without a real PulseAudio server.
     manager = manager or DeviceManager(PulseAudioBackend())
     inputs_ok = _report("microphone", manager.enumerate("input"))
     outputs_ok = _report("speaker", manager.enumerate("output"))
-    key_ok = _report_groq_key()
+    key_ok = _report_ai_key()
     return 0 if inputs_ok and outputs_ok and key_ok else 1
 
 

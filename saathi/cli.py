@@ -20,7 +20,6 @@ invisible until someone spoke to the device.
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -159,7 +158,16 @@ def build_runtime() -> Runtime:
     media = MediaController(cards=cards)
     runtime = Runtime(config=config, core=core, store=store, cards=cards, hold=hold, media=media)
 
-    if not os.environ.get("GROQ_API_KEY"):
+    # The voice engine needs a speech-to-text + chat provider: OpenAI if
+    # OPENAI_API_KEY is set (the demo choice), else Groq. See
+    # voice/engine/provider.py.
+    from saathi.voice.engine.provider import missing_key
+
+    missing = missing_key()
+    if missing is not None:
+        runtime.notes.append(
+            f"No AI provider ({missing} not set); running without the voice engine."
+        )
         return runtime
 
     # One-hour spike wiring (2026-09-17): only actually talks to Groq

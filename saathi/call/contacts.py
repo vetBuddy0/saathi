@@ -63,7 +63,10 @@ _RELATION_ALIASES = {
     "friend": "friend", "neighbour": "neighbour", "neighbor": "neighbour",
     "doctor": "doctor", "nurse": "nurse", "carer": "carer", "caregiver": "carer",
 }
-_POSSESSIVE_RE = re.compile(r"^(?:my|our)\s+|'s$|\s+number$")
+# "your son" / "her daughter" too: the model often restates her request
+# from its own side ("call your son"), which used to miss the relation
+# and fall through to "no number saved" -- found live 2026-09-25.
+_POSSESSIVE_RE = re.compile(r"^(?:my|our|your|her|his|their|the)\s+|'s$|\s+number$")
 
 
 def normalise_name(name: str) -> str:

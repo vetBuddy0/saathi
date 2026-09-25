@@ -446,3 +446,38 @@ body.media--fullscreen.card--open #face-container {
   width: 0;
   background: var(--card-accent);
 }
+
+
+/* Captions (captions.js): the words heard and said, along the bottom.
+   Readable across a room, high contrast, never over the face's centre. */
+#captions {
+  position: fixed;
+  left: 4vw;
+  right: 4vw;
+  bottom: 3vh;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  padding: 0.6em 0.9em;
+  border-radius: 14px;
+  background: rgba(13, 13, 16, 0.86);
+  color: #f2efe8;
+  font-family: system-ui, sans-serif;
+  font-size: clamp(22px, 2.4vw, 36px);
+  line-height: 1.3;
+  pointer-events: none;
+}
+#captions[hidden] {
+  display: none;
+}
+.captions__who {
+  display: inline-block;
+  min-width: 5.2em;
+  margin-right: 0.6em;
+  font-weight: 600;
+  color: #ffce85;
+}
+.captions__line--her .captions__who {
+  color: #a9c7ff;
+}

@@ -1213,3 +1213,69 @@ as before. Rejected: starting the tunnel at the first dial (a minute of
 silence after "call Priya") and blocking boot on it (the face waits).
 The two audio diffs in that doc (`play_stream`, making the echo-cancel
 pair Pulse's default) are not applied here.
+
+**2026-09-25 — Speech-to-text and replies move to OpenAI for the demo
+(user's decision, "change later if required").** A live session on Groq
+failed two ways: its on-demand tier caps output at 1000 tokens/minute
+and rejected tool turns outright, and the model sometimes answered
+"help me play a song by Ed Sheeran" with "Of course, which song?"
+instead of calling the music tool (1 in 6 with all six tools offered).
+OpenAI is a new vendor and new spend; the user chose it explicitly.
+Both services share the `audio.transcriptions` / `chat.completions`
+shapes, so the switch is one seam (`voice/engine/provider.py`), not a
+second engine; Groq stays selectable (`SAATHI_AI_PROVIDER=groq`).
+
+**2026-09-25 — `gpt-4.1` for replies, chosen by measurement, not by
+name.** The live failure case (six tools, a prior exchange) four times
+per model, `max_completion_tokens=400`: gpt-4.1 4/4 at 742 ms median;
+gpt-5.4-nano 4/4 at 786; gpt-5.6-luna 4/4 at 1029; gpt-5.6-terra 1131;
+gpt-6-sol 1284; gpt-5.4-mini 1272; gpt-6-luna 2677; gpt-4.1-mini 0/4
+(the first guess -- it would have repeated the failure); gpt-6-astra
+refuses tools without reasoning. The fastest model that never missed
+wins: the model call sits directly in the pause before she answers.
+`SAATHI_LLM_MODEL` switches it.
+
+**2026-09-25 — Reasoning off for OpenAI's reasoning families.** gpt-5.x
+and gpt-6 reject function tools on chat completions unless
+`reasoning_effort="none"` (the API's own message). Sent automatically
+for those model names only; reasoning is latency a voice turn can't
+spare. The option that lost, the Responses API, would be a second call
+shape for one provider.
+
+**2026-09-25 — `gpt-transcribe` for speech-to-text; language from the
+transcript's script.** gpt-transcribe, gpt-4o-transcribe and
+gpt-4o-mini-transcribe were all exact on English and Mandarin test
+sentences (~750-870 ms); whisper-1 took 1.7 s. The newest was chosen,
+knowing clean synthetic speech can't show which copes best with a
+noisy mic. These models return no detected language, so the cascade
+reads it from the transcript's script (`script_language`, already
+used for YouTube titles): Han -> chinese, and so on.
+
+**2026-09-25 — Every chat call reserves at most 400 output tokens
+(`max_completion_tokens`).** The unbounded default reserved 2048
+against Groq's 1000/minute and got tool turns refused. Replies are
+capped at two sentences; 400 is ample. `max_completion_tokens` because
+OpenAI's newer models reject `max_tokens`.
+
+**2026-09-25 — Captions, off by default, from the Ctrl+L panel.** A
+strip along the bottom showing what speech-to-text heard and what she
+said, for whoever is demoing or setting up the device -- the first live
+demo failed in ways nobody could see (was it the mic, or the model?).
+Captions are content, not status: the words said, never "Listening...",
+so CLAUDE.md's rule against status text under the face is not what's
+at stake; nothing is sent while they're off. The option that lost was
+terminal logging only: the person demoing looks at the screen.
+
+**2026-09-25 — Demo-only: YouTube played from a direct stream (yt-dlp),
+reversing "official APIs only" at the user's explicit instruction.**
+"Ed Sheeran - Perfect" (and similar label uploads) report `embeddable`
+and `syndicated` through the official API and still fail in the embed
+with error 150; no API field predicts it, so no filter can. The user
+chose the unofficial route knowing it breaches YouTube's terms -- the
+reason the original brief ruled it out, and still the reason it must
+not ship. Scope kept small: search stays on the Data API; only playback
+changes; opt-in via `SAATHI_YOUTUBE_PLAYBACK=direct`, default remains
+the official embed. YouTube no longer serves any combined audio+video
+file (checked with a JS runtime too), so the page plays a muted
+<video> and an <audio> in step, audio as the clock. New dependencies:
+yt-dlp (Unlicense), deno (MIT, the JS runtime yt-dlp needs).
