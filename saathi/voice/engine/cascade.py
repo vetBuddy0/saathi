@@ -87,6 +87,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import queue
 import tempfile
 import threading
@@ -117,6 +118,7 @@ from saathi.voice.language import (
     resolve_language,
     script_language,
 )
+from saathi.voice.router import Command, Context, route
 from saathi.voice.tts import TTSBackend, split_into_sentences
 from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
 
@@ -149,6 +151,13 @@ _LLM_PRICE_PER_MILLION_USD = {"input": 0.80, "output": 4.00}
 # reject the latter, and Groq accepts both.
 _REPLY_TOKEN_LIMIT = 400
 _SAMPLE_RATE = 16000
+
+
+def command_router_enabled() -> bool:
+    """The kill switch for voice/router.py: `SAATHI_COMMAND_ROUTER=off`
+    sends every transcript to the model, as before the router existed.
+    Read per turn, so it can be flipped in a test without a restart."""
+    return os.environ.get("SAATHI_COMMAND_ROUTER", "on").strip().lower() not in ("off", "0", "no")
 
 
 def _estimate_llm_cost_usd(
@@ -271,6 +280,9 @@ class _ToolOutcome:
     did: str
     prompt_tokens: int
     completion_tokens: int
+    # False when no chat completion was made for this outcome at all (a
+    # routed command with a fixed reply, or a tool that said `say`).
+    model_called: bool = True
 
 
 def _group_by_language(sentences: list[str], default: str) -> list[tuple[str, list[str]]]:
@@ -357,6 +369,11 @@ class CascadeSession:
         self._last_turn_timings: TurnTimings | None = None
         self._tool_schemas = tool_schemas
         self._intent_callback = None
+        # The command router's context (voice/router.py), inferred from
+        # tool results as they pass through _emit_intent(): how many
+        # music titles are on offer, and whether a calling card is up.
+        self._results_count = 0
+        self._card_pending = False
         # None means the real Silero gate (audio/vad.py's contains_speech);
         # tests inject a permissive one. Same shape as `client`/`backends`:
         # the default is the real thing, never a stub.
@@ -550,38 +567,57 @@ class CascadeSession:
         prompt_tokens = 0
         completion_tokens = 0
 
-        completion = self._client.chat.completions.create(
-            model=self._provider.llm_model,
-            messages=messages,
-            tools=self._tool_schemas or None,
-            max_completion_tokens=_REPLY_TOKEN_LIMIT,
-            **self._provider.llm_extra,
-        )
-        message = completion.choices[0].message
-        usage = getattr(completion, "usage", None)
-        prompt_tokens += getattr(usage, "prompt_tokens", None) or 0
-        completion_tokens += getattr(usage, "completion_tokens", None) or 0
-
         outcome: _ToolOutcome | None = None
-        if message.tool_calls:
-            # "The voice engine never executes anything. It emits
-            # intent; the core validates; the tool executes" (SPEC.md).
-            # _emit_intent() only calls whatever was registered through
-            # on_intent() -- it never touches a Tool or Registry itself.
-            # Handles only the first tool call; a model asking for two
-            # in one turn is a real, unhandled edge case here, not
-            # silently mishandled — flagged, not built, since
-            # set_language is this project's only real tool so far and
-            # nothing exercises multi-call turns yet.
-            tool_call = message.tool_calls[0]
-            outcome = self._continue_after_tool_call(messages, message, tool_call)
+        # The command router (voice/router.py): a clear command ("pause",
+        # "call my son") is emitted as an intent straight from the
+        # transcript, before -- instead of -- asking the model whether
+        # to call a tool. Same callback, same permission check in
+        # cli.py; only the decision is deterministic. Off with
+        # SAATHI_COMMAND_ROUTER=off. Nothing to emit to means nothing
+        # to route: the model answers, as before.
+        command = self._route_command(heard)
+        if command is not None:
+            logger.info("routed %r -> %s %s", heard, command.tool, command.arguments)
+            outcome = self._run_command(messages, command)
             reply_text = outcome.reply_text
             prompt_tokens += outcome.prompt_tokens
             completion_tokens += outcome.completion_tokens
         else:
-            reply_text = (message.content or "").strip()
+            completion = self._client.chat.completions.create(
+                model=self._provider.llm_model,
+                messages=messages,
+                tools=self._tool_schemas or None,
+                max_completion_tokens=_REPLY_TOKEN_LIMIT,
+                **self._provider.llm_extra,
+            )
+            message = completion.choices[0].message
+            usage = getattr(completion, "usage", None)
+            prompt_tokens += getattr(usage, "prompt_tokens", None) or 0
+            completion_tokens += getattr(usage, "completion_tokens", None) or 0
 
-        self._pending_first_token_ms = round((time.monotonic() - llm_started_at) * 1000)
+            if message.tool_calls:
+                # "The voice engine never executes anything. It emits
+                # intent; the core validates; the tool executes" (SPEC.md).
+                # _emit_intent() only calls whatever was registered through
+                # on_intent() -- it never touches a Tool or Registry itself.
+                # Handles only the first tool call; a model asking for two
+                # in one turn is a real, unhandled edge case here, not
+                # silently mishandled — flagged, not built, since
+                # set_language is this project's only real tool so far and
+                # nothing exercises multi-call turns yet.
+                tool_call = message.tool_calls[0]
+                outcome = self._continue_after_tool_call(messages, message, tool_call)
+                reply_text = outcome.reply_text
+                prompt_tokens += outcome.prompt_tokens
+                completion_tokens += outcome.completion_tokens
+            else:
+                reply_text = (message.content or "").strip()
+
+        if command is not None and not outcome.model_called:
+            # No model in this turn at all: there is no token to time.
+            self._pending_first_token_ms = 0
+        else:
+            self._pending_first_token_ms = round((time.monotonic() - llm_started_at) * 1000)
         self._pending_prompt_tokens = prompt_tokens
         self._pending_completion_tokens = completion_tokens
         # The real count from the API, not an estimate. A flat number
@@ -609,6 +645,82 @@ class CascadeSession:
         self._pending_exchange = Exchange(user=heard, assistant=reply_text)
         return reply_text
 
+    def _route_command(self, heard: str) -> Command | None:
+        """The router's verdict for this transcript, or None when the
+        model should decide. The router is a pure function of the words
+        and a `Context` this session infers from the tool results that
+        have passed through it (`_note_tool_result`): it never asks a
+        controller. `card_pending` is a one-turn window -- a card is
+        answered on the turn after it is shown, or the model takes over
+        (it still has `answer_card`)."""
+        if self._intent_callback is None or not command_router_enabled():
+            return None
+        context = Context(
+            results_offered=self._results_count > 0,
+            results_count=self._results_count,
+            card_pending=self._card_pending,
+        )
+        self._card_pending = False
+        return route(heard, context=context)
+
+    def _run_command(self, messages: list[dict], command: Command) -> "_ToolOutcome":
+        """A routed command: emit the intent, then decide the words. A
+        `say` in the result always wins (the tool decided). The command's
+        fixed `speak` applies only when the tool answered ok -- "Paused."
+        over a "nothing is playing" result would be a lie -- and the
+        model phrases every other case from the tool's note, exactly as
+        it does after its own tool calls."""
+        arguments_json = json.dumps(command.arguments)
+        result = self._emit_intent(command.tool, command.arguments)
+        say = result.get("say") if isinstance(result, dict) else None
+        if not isinstance(say, str) and command.speak is not None:
+            if isinstance(result, dict) and result.get("status") == "ok":
+                say = command.speak
+        if isinstance(say, str):
+            return _ToolOutcome(
+                reply_text=say.strip(),
+                silent=not say.strip(),
+                did=str(result.get("did") or "") or f"Did: {command.tool} {arguments_json}.",
+                prompt_tokens=0,
+                completion_tokens=0,
+                model_called=False,
+            )
+        return self._finish_tool_call(
+            messages,
+            call_id="routed",
+            name=command.tool,
+            arguments_json=arguments_json,
+            assistant_content=None,
+            result=result,
+        )
+
+    def _emit_intent(self, name: str, arguments: dict) -> dict:
+        """The one door every tool call leaves through, routed or model-
+        chosen: whatever `on_intent()` registered runs it (cli.py's
+        registry, with its permission check); this class never does."""
+        if self._intent_callback is not None:
+            result = self._intent_callback(name, arguments)
+        else:
+            result = {"status": "error", "detail": "no intent handler registered"}
+        self._note_tool_result(name, result)
+        return result
+
+    def _note_tool_result(self, name: str, result) -> None:
+        # The router's context, read off the results as they pass. A
+        # music search that returned titles leaves them on offer for
+        # the rest of the session (the controller never forgets them
+        # either); a calling result that showed a card leaves it
+        # pending for the next turn.
+        if not isinstance(result, dict):
+            return
+        if name == "play_music":
+            results = result.get("results")
+            if isinstance(results, list) and results:
+                self._results_count = len(results)
+        self._card_pending = name in ("call_contact", "save_contact", "answer_card") and result.get(
+            "status"
+        ) in ("unsure", "readback")
+
     def _continue_after_tool_call(self, messages: list[dict], message, tool_call) -> "_ToolOutcome":
         """Emits the intent to whatever `on_intent()` registered, feeds
         the result back as a normal tool-result message, and asks the
@@ -626,11 +738,26 @@ class CascadeSession:
         exactly what the first live run complained about). `did` is
         then what the conversation window records in place of a reply."""
         arguments = json.loads(tool_call.function.arguments)
-        if self._intent_callback is not None:
-            result = self._intent_callback(tool_call.function.name, arguments)
-        else:
-            result = {"status": "error", "detail": "no intent handler registered"}
+        result = self._emit_intent(tool_call.function.name, arguments)
+        return self._finish_tool_call(
+            messages,
+            call_id=tool_call.id,
+            name=tool_call.function.name,
+            arguments_json=tool_call.function.arguments,
+            assistant_content=message.content,
+            result=result,
+        )
 
+    def _finish_tool_call(
+        self,
+        messages: list[dict],
+        *,
+        call_id: str,
+        name: str,
+        arguments_json: str,
+        assistant_content,
+        result,
+    ) -> "_ToolOutcome":
         say = result.get("say") if isinstance(result, dict) else None
         if isinstance(say, str):
             return _ToolOutcome(
@@ -639,27 +766,23 @@ class CascadeSession:
                 did=str(result.get("did") or ""),
                 prompt_tokens=0,
                 completion_tokens=0,
+                model_called=False,
             )
 
         messages.append(
             {
                 "role": "assistant",
-                "content": message.content,
+                "content": assistant_content,
                 "tool_calls": [
                     {
-                        "id": tool_call.id,
+                        "id": call_id,
                         "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
+                        "function": {"name": name, "arguments": arguments_json},
                     }
                 ],
             }
         )
-        messages.append(
-            {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result)}
-        )
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(result)})
 
         follow_up = self._client.chat.completions.create(
             model=self._provider.llm_model,
@@ -674,6 +797,7 @@ class CascadeSession:
             did="",
             prompt_tokens=getattr(follow_up_usage, "prompt_tokens", None) or 0,
             completion_tokens=getattr(follow_up_usage, "completion_tokens", None) or 0,
+            model_called=True,
         )
 
     def _speak(self, text: str) -> None:
