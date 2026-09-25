@@ -1279,3 +1279,22 @@ the official embed. YouTube no longer serves any combined audio+video
 file (checked with a JS runtime too), so the page plays a muted
 <video> and an <audio> in step, audio as the clock. New dependencies:
 yt-dlp (Unlicense), deno (MIT, the JS runtime yt-dlp needs).
+
+**2026-09-26 — The video sits in one framed shell; playback state is
+drawn as brightness and motion, never as a word.** `.media-frame` wraps
+the holder, so the YouTube embed, the direct `<video>` and the demo
+stand-in all get the same 24 px-rounded, 3 px accent border with a soft
+glow and a black letterbox inside (2 px / 18 px in fullscreen, where the
+title hides and the face inset gets the same accent ring). Paused dims
+the shell to 62 % and softens the title to `#bfb9ae` (9.9:1 on the card
+ground) under a large two-bar mark with no text; loading breathes the
+border. "Paused" / "Loading…" labels lost to CLAUDE.md's status-text
+rule -- a person across the room reads brightness before words. Results
+rows reuse the Choice card's option geometry and tokens (112 px rows,
+36-48 px type, accent number badge) so a search and a card look like one
+system. Title ≥ 34 px, two lines. Known gap, out of this change's
+territory: the direct-playback stream lookup (~3 s in `tools/media.py`)
+happens *before* the `play` message is sent, so the panel cannot breathe
+during it; it breathes from the message until the picture starts. To
+show the lookup, the tool would emit the play (title, no stream) first
+and the stream after.

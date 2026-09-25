@@ -189,15 +189,20 @@ html, body {
   display: none !important;
 }
 
-/* Media panel (YouTube stream, 2026-09-25) — the first instance of the
-   ambient content layer: search results and the title of what's playing,
-   beside the face. The face is in every layout below; there is no rule
-   here that hides #face-container. Readable at 1.5 m by someone with poor
-   eyesight: three lines at most, ~3.4vw (65px at 1080p) in the system
-   font, high contrast on the warm dark ground. No cards, no icons, no
-   thumbnails, no status words. */
+/* --- media panel --- */
+/* Media panel (YouTube stream, 2026-09-25; framed 2026-09-26) — the
+   first instance of the ambient content layer: search results and the
+   title of what's playing, beside the face. The face is in every layout
+   below; there is no rule here that hides #face-container. Readable at
+   1.5 m by someone with poor eyesight: large type in the same font and
+   tokens as the cards, so a search and a card feel like one system. No
+   status words: paused is a dimmed frame, loading is a breathing border.
+   Every text/background pair below is on the card tokens (7:1). */
 
 #media-panel {
+  --media-frame-radius: 24px;
+  --media-frame-border: 3px;
+  --media-title-soft: #bfb9ae; /* paused title on --card-bg: 9.9:1 */
   display: none;
   position: fixed;
   z-index: 2;
@@ -205,10 +210,10 @@ html, body {
   justify-content: center;
   padding: 4vh 4vw;
   box-sizing: border-box;
-  color: #f2efe8;
+  color: var(--card-fg);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK SC",
     sans-serif;
-  background: #0d0d10;
+  background: var(--card-bg);
 }
 
 /* Beside the face: face left half, panel right half. */
@@ -221,7 +226,8 @@ body.media--panel #media-panel {
 }
 
 /* "Make it bigger": the panel takes the viewport and the face stays,
-   small, in the bottom-left corner, above the video. */
+   small, in the bottom-left corner, above the video, ringed like the
+   frame so the two read as one system. */
 body.media--fullscreen #media-panel {
   display: flex;
   inset: 0;
@@ -235,38 +241,68 @@ body.media--fullscreen #face-container {
   z-index: 3;
   border-radius: 3vh;
   overflow: hidden;
-  box-shadow: 0 0 4vh rgba(0, 0, 0, 0.6);
+  background: var(--card-bg);
+  box-shadow: 0 0 0 2px var(--card-accent), 0 0 4vh rgba(0, 0, 0, 0.7);
 }
 
+/* Results: the same rows as a Choice card (.card__option) — a number
+   badge in the accent, the title beside it, 112px tall, 2vh apart. */
 .media-results {
   display: flex;
   flex-direction: column;
-  gap: 4vh;
+  gap: 2vh;
 }
 
-/* ~58px at 1080p. Three lines per title, not two: the artist's name is
-   usually at the end ("... - Teresa Teng") and is the part she knows. */
 .media-result {
-  font-size: clamp(28px, 3vw, 68px);
-  line-height: 1.25;
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  gap: 1.2vw;
+  padding: 2vh 2vw;
+  box-sizing: border-box;
+  border-radius: 2vh;
+  background: var(--card-button-bg);
+  color: var(--card-button-fg);
+  font-size: clamp(36px, 2.2vw, 48px);
+  line-height: 1.2;
   font-weight: 500;
-  letter-spacing: 0.01em;
+}
+
+.media-result__number {
+  color: var(--card-accent);
+  font-weight: 700;
+  min-width: 1.4em;
+}
+
+/* Three lines per title, not two: the artist's name is usually at the
+   end ("... - Teresa Teng") and is the part she knows. */
+.media-result__title {
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
-.media-result__number {
-  color: #ffce85;
-  font-weight: 700;
-}
-
 .media-player {
   display: flex;
   flex-direction: column;
-  gap: 3vh;
+  gap: 2.5vh;
   width: 100%;
+}
+
+/* The frame: one shell around whatever is playing (embed, direct
+   <video>, demo stand-in). The picture is letterboxed on black inside;
+   the shell never stretches it. */
+.media-frame {
+  position: relative;
+  width: 100%;
+  box-sizing: border-box;
+  border: var(--media-frame-border) solid var(--card-accent);
+  border-radius: var(--media-frame-radius);
+  background: #000;
+  overflow: hidden;
+  box-shadow: 0 0 3vh rgba(255, 206, 133, 0.22), 0 1.5vh 5vh rgba(0, 0, 0, 0.6);
+  transition: opacity 0.4s ease-out, box-shadow 0.4s ease-out;
 }
 
 .media-player__frame {
@@ -282,40 +318,97 @@ body.media--fullscreen #face-container {
   width: 100%;
   height: 100%;
   border: 0;
+  object-fit: contain;
+  background: #000;
 }
 
 .media-player__iframe--demo {
-  background: linear-gradient(135deg, #1a1a22, #2a2430);
+  background: radial-gradient(ellipse at 50% 40%, #3a3044 0%, #1a1a22 60%, #0d0d10 100%);
 }
 
+/* The title under the frame: the card title's font, two lines at most. */
 .media-title {
-  font-size: clamp(26px, 2.4vw, 52px);
+  font-size: clamp(34px, 2.4vw, 52px);
   line-height: 1.25;
-  font-weight: 500;
+  font-weight: 600;
+  color: var(--card-fg);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  transition: color 0.4s ease-out;
 }
 
-/* Fullscreen: the video fills the viewport; the title is drawn over the
-   bottom edge so nothing is pushed off-screen. */
+/* Paused: the frame dims, the title softens, a large wordless pause
+   mark sits over the picture. No "Paused" text (CLAUDE.md). */
+.media-player--paused .media-frame {
+  opacity: 0.62;
+}
+.media-player--paused .media-title {
+  color: var(--media-title-soft);
+}
+.media-frame__pause {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 2.4vh;
+  pointer-events: none;
+}
+.media-frame__pause::before,
+.media-frame__pause::after {
+  content: "";
+  width: 3.2vh;
+  height: 12vh;
+  border-radius: 1vh;
+  background: var(--card-accent);
+  box-shadow: 0 0 2vh rgba(13, 13, 16, 0.9);
+}
+.media-player--paused .media-frame__pause {
+  display: flex;
+}
+
+/* Loading: the border breathes until the picture starts. Motion is the
+   cue; there is no "Loading…" label. */
+.media-player--loading .media-frame {
+  animation: media-frame-breathe 1.8s ease-in-out infinite;
+}
+@keyframes media-frame-breathe {
+  0%, 100% {
+    border-color: rgba(255, 206, 133, 0.35);
+    box-shadow: 0 0 1vh rgba(255, 206, 133, 0.08), 0 1.5vh 5vh rgba(0, 0, 0, 0.6);
+  }
+  50% {
+    border-color: var(--card-accent);
+    box-shadow: 0 0 5vh rgba(255, 206, 133, 0.5), 0 1.5vh 5vh rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* Fullscreen: a slim frame fills the viewport with a small margin; the
+   face inset sits over its bottom-left corner; the title hides (she has
+   already heard it, and the picture is the point). */
 body.media--fullscreen .media-player {
   height: 100%;
   gap: 0;
+}
+body.media--fullscreen .media-frame {
+  --media-frame-border: 2px;
+  --media-frame-radius: 18px;
+  flex: 1;
+  width: auto;
+  margin: 2vh 2vw;
+  display: flex;
+  flex-direction: column;
 }
 body.media--fullscreen .media-player__frame {
   flex: 1;
   aspect-ratio: auto;
 }
 body.media--fullscreen .media-title {
-  position: absolute;
-  right: 3vw;
-  bottom: 3vh;
-  left: calc(22vw + 6vw);
-  text-align: right;
-  text-shadow: 0 0 1.5vh rgba(0, 0, 0, 0.9);
+  display: none;
 }
+/* --- end media panel --- */
 
 /* Cards (cards.js) — Choice, Confirm, Read-back, Holding. Beside the
    face in the same non-face region the media panel uses, above it when
