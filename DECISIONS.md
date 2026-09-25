@@ -1186,3 +1186,12 @@ in `style.css`.** Found in the real stylesheet in a headless Chromium:
 `.media-results { display: flex }` beat the browser's own
 `[hidden] { display: none }`, so the results list and the player were
 both drawn at once in the no-cards path.
+
+**2026-09-26 — An unanswered call ends by itself: a ring watcher polls
+`fetch_call`, not a StatusCallback.** S1 fix. While DIALLING, a daemon
+thread polls Twilio every 2 s and tears the call down on a terminal
+status or after 45 s of ringing (then completes it via REST so the far
+end stops ringing). A StatusCallback would need another public route on
+the relay and would never arrive if the tunnel is what died -- the
+timeout covers that case too. The watcher stops the moment the stream
+opens; an answered call is still ended by its stream.

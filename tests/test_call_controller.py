@@ -227,3 +227,92 @@ def test_hangup_does_not_block_the_calling_thread_on_twilio(parts):
     release.set()
     worker.join(2.0)
     assert client.completed == [client.next_sid]
+
+
+# -- S1: an unanswered call ends by itself -----------------------------------
+
+
+def _ringing_parts(ring_timeout: float = 60.0, clock=None):
+    FakeCallAudio.instances.clear()
+    client = FakeTwilioClient()
+    client.call_resource = {"status": "ringing"}
+    hold = FakeHoldSeam()
+    kwargs = {"ring_timeout_seconds": ring_timeout, "poll_interval_seconds": 0.01}
+    if clock is not None:
+        kwargs["clock"] = clock
+    controller = CallController(
+        CREDS, client, FakeRelay("https://relay.example.test"), FakeServer(), FakeCallAudio,
+        hold, **kwargs
+    )
+    return controller, client, hold
+
+
+@pytest.mark.parametrize("status", ["no-answer", "busy", "failed", "canceled", "completed"])
+def test_a_call_that_ends_without_being_answered_clears_and_frees_the_spacebar(status):
+    controller, client, hold = _ringing_parts()
+    controller.dial_test_number()
+    _wait_for(lambda: len(client.fetched) >= 2)
+    assert controller.state is CallState.DIALLING and hold.handler is not None
+    client.call_resource = {"status": status}
+    _wait_for(lambda: controller.state is CallState.IDLE)
+    assert not controller.active and hold.cleared == 1 and hold.handler is None
+    assert client.completed == []  # Twilio already ended it; nothing to complete
+    # The next call is not "already in progress".
+    client.call_resource = {"status": "ringing"}
+    controller.dial_test_number()
+    assert controller.state is CallState.DIALLING
+
+
+def test_a_call_still_ringing_past_the_timeout_is_completed_and_cleared():
+    now = {"t": 1000.0}
+    controller, client, hold = _ringing_parts(ring_timeout=45.0, clock=lambda: now["t"])
+    controller.dial_test_number()
+    _wait_for(lambda: len(client.fetched) >= 3)
+    assert controller.state is CallState.DIALLING
+    now["t"] = 1044.0
+    _wait_for(lambda: len(client.fetched) >= 6)
+    assert controller.state is CallState.DIALLING  # 44 s: still allowed to ring
+    now["t"] = 1045.5
+    _wait_for(lambda: controller.state is CallState.IDLE)
+    _wait_for(lambda: client.completed == [client.next_sid])  # told Twilio to stop ringing
+    assert hold.cleared == 1 and not controller.active
+
+
+def test_an_answered_call_stops_the_watcher_and_is_ended_by_its_stream():
+    controller, client, hold = _ringing_parts()
+    controller.dial_test_number()
+    _wait_for(lambda: len(client.fetched) >= 1)
+    controller.stream_started("MZ1", client.next_sid, lambda b: None)
+    fetched = len(client.fetched)
+    client.call_resource = {"status": "completed"}
+    import time
+
+    time.sleep(0.05)
+    assert controller.state is CallState.IN_CALL  # the watcher no longer decides
+    assert len(client.fetched) <= fetched + 1
+    controller.stream_stopped("MZ1")
+    assert controller.state is CallState.IDLE
+
+
+def test_a_fetch_that_fails_keeps_watching_and_the_timeout_still_ends_the_call():
+    now = {"t": 0.0}
+    controller, client, hold = _ringing_parts(ring_timeout=10.0, clock=lambda: now["t"])
+    controller.dial_test_number()
+    _wait_for(lambda: len(client.fetched) >= 1)
+    client.fail_with = RuntimeError("GET https://api.twilio.com/... 503")
+    now["t"] = 11.0
+    _wait_for(lambda: controller.state is CallState.IDLE)
+    assert hold.cleared == 1
+
+
+def test_a_hangup_while_ringing_stops_the_watcher():
+    controller, client, hold = _ringing_parts()
+    controller.dial_test_number()
+    _wait_for(lambda: len(client.fetched) >= 1)
+    controller.hangup(wait=True)
+    fetched = len(client.fetched)
+    import time
+
+    time.sleep(0.05)
+    assert len(client.fetched) <= fetched + 1
+    assert controller.state is CallState.IDLE and client.completed == [client.next_sid]

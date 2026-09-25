@@ -17,6 +17,20 @@ is the signal: `initiative/policy.py`'s "a call is happening" (SPEC.md,
 "the gate reads ... whether something else is happening — television, a
 call") should read it.
 
+An unanswered call ends by itself (S1, 2026-09-26). DIALLING used to be
+left only by `stream_stopped`, and a Media Stream only opens once the
+call is answered: a declined, busy or unanswered call -- or a dead
+tunnel -- left the controller DIALLING forever, "a call is already in
+progress" for every later call, and the hold handler registered so a
+short spacebar tap did nothing. Now `dial()` starts a watcher thread
+that polls `fetch_call(sid)` every `poll_interval_seconds` while the
+call is DIALLING: a terminal status (completed, busy, failed,
+no-answer, canceled) tears down; a call still ringing past
+`ring_timeout_seconds` is completed via REST and torn down. Polling
+over a Twilio StatusCallback because the callback would need one more
+public route on the relay and the poll needs nothing; one GET every
+two seconds for at most forty-five seconds is nothing against a call.
+
 Threading, because three threads meet here: `dial()` runs on the screen
 server's executor thread (tool handlers do); `stream_started`/
 `inbound_audio`/`stream_stopped` run on the media server's loop thread;
@@ -28,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from enum import Enum
 from typing import Callable, Protocol
 
@@ -45,6 +60,14 @@ class CallState(str, Enum):
     IN_CALL = "in_call"  # Twilio's stream is open; audio is bridged
 
 
+# Twilio call statuses after which nothing will ring: the watcher ends
+# a DIALLING call on any of these. "in-progress" (answered) is left to
+# the stream, which is what actually bridges the audio.
+TERMINAL_STATUSES = frozenset({"completed", "busy", "failed", "no-answer", "canceled"})
+RING_TIMEOUT_SECONDS = 45.0
+POLL_INTERVAL_SECONDS = 2.0
+
+
 class ServerLike(Protocol):
     def start(self) -> None: ...
 
@@ -60,6 +83,10 @@ class CallController:
         server: ServerLike,
         audio_factory: Callable[[], CallAudio],
         hold: HoldSeam,
+        *,
+        ring_timeout_seconds: float = RING_TIMEOUT_SECONDS,
+        poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._credentials = credentials
         self._client = client
@@ -74,6 +101,11 @@ class CallController:
         self._audio: CallAudio | None = None
         self._prepared = False
         self.on_state_change: Callable[[CallState], None] | None = None
+        self._ring_timeout = float(ring_timeout_seconds)
+        self._poll_interval = float(poll_interval_seconds)
+        self._clock = clock
+        self._watch_stop: threading.Event | None = None
+        self._watcher: threading.Thread | None = None
 
     # -- observation -------------------------------------------------------
 
@@ -150,9 +182,55 @@ class CallController:
                 raise sanitize("create call", exc) from None
             self._call_sid = sid
             self._set_state(CallState.DIALLING)
+            self._start_watch_locked(sid)
         self._hold.set_handler(self.hangup, seconds=HANGUP_HOLD_SECONDS, label=HANGUP_LABEL)
         logger.info("call placed")
         return sid
+
+    # -- the ring watcher (S1) ---------------------------------------------
+
+    def _start_watch_locked(self, sid: str) -> None:
+        stop = threading.Event()
+        self._watch_stop = stop
+        self._watcher = threading.Thread(
+            target=self._watch_ringing, args=(sid, stop, self._clock()), daemon=True
+        )
+        self._watcher.start()
+
+    def _stop_watch_locked(self) -> None:
+        if self._watch_stop is not None:
+            self._watch_stop.set()
+        self._watch_stop = None
+        self._watcher = None
+
+    def _watch_ringing(self, sid: str, stop: threading.Event, started_at: float) -> None:
+        """Runs while the call is DIALLING. Ends it on a terminal status
+        from Twilio, or on the ring timeout (the far end never answered,
+        or the tunnel died and Twilio could never fetch /twiml)."""
+        while not stop.wait(self._poll_interval):
+            with self._lock:
+                if self._state is not CallState.DIALLING or self._call_sid != sid:
+                    return
+            reason: str | None = None
+            try:
+                status = str(self._client.fetch_call(sid).get("status", ""))
+            except BaseException as exc:
+                logger.warning("%s", sanitize("fetch call", exc))
+                status = ""
+            if status in TERMINAL_STATUSES:
+                reason = status
+            elif self._clock() - started_at >= self._ring_timeout:
+                reason = "no answer in time"
+            if reason is None:
+                continue
+            with self._lock:
+                if self._state is not CallState.DIALLING or self._call_sid != sid:
+                    return
+                self._teardown_locked()
+            logger.info("call ended before it was answered: %s", reason)
+            if status not in TERMINAL_STATUSES:
+                self._complete(sid)  # still ringing on Twilio's side: stop it
+            return
 
     def dial_test_number(self) -> str:
         return self.dial(self._credentials.test_number)
@@ -173,6 +251,7 @@ class CallController:
             self._stream_sid = stream_sid
             self._audio = self._audio_factory()
             self._audio.start(send_outbound)
+            self._stop_watch_locked()  # answered: the stream owns the call's end now
             self._set_state(CallState.IN_CALL)
         logger.info("call stream open")
 
@@ -218,6 +297,7 @@ class CallController:
             logger.warning("%s", sanitize("complete call", exc))
 
     def _teardown_locked(self) -> None:
+        self._stop_watch_locked()
         audio, self._audio = self._audio, None
         self._stream_sid = None
         self._call_sid = None

@@ -80,19 +80,14 @@ cards is preserved on `reconcile/calling` (one test still failing
 there). S1 alone would break the whole device on stage, not just
 calling. Fix S1–S4 before #4 merges.
 
-**S1 — A missed call jams calling AND the spacebar.** An unanswered,
-declined or busy call leaves `CallController` in DIALLING forever
-(`saathi/call/controller.py:137-155`, `:184-189`). DIALLING is left
-only by `stream_stopped`, and a Media Stream opens only after the call
-is answered; there is no StatusCallback, no timeout, and `fetch_call`
-is never used. Meanwhile the hold handler stays registered, so a short
-spacebar tap does nothing (`hangup.py:259-262`).
-*Repro:* dial the test number and don't answer (or decline). Then
-"call X" → "A call is already in progress" (`tools/calling.py:362-366`)
-and every short spacebar tap is swallowed until a 2 s hold. Same if the
-tunnel has died (Twilio can't fetch `/twiml`, no stream ever opens).
-*Fix:* poll `fetch_call(sid)` on a worker thread while DIALLING, or a
-~45 s ring timeout; tear down on no-answer / busy / failed / canceled.
+~~**S1 — A missed call jams calling AND the spacebar.**~~ Fixed
+2026-09-26 on `cloud/demo`: `CallController` polls `fetch_call(sid)` on
+a watcher thread while DIALLING (every 2 s) and tears down on a
+terminal status (no-answer, busy, failed, canceled, completed) or after
+a 45 s ring timeout, completing the call via REST in the timeout case.
+Teardown clears the hold handler, so the spacebar is a spacebar again.
+Verified in a headless browser: a tap during the ring does nothing,
+a tap after the timeout starts a turn. S2–S4 below are still open.
 
 **S2 — A name one letter off dials without asking.** Confident band is
 ≥0.93 plus a 0.05 margin (`saathi/call/match.py:43-47`, `:146-147`);
