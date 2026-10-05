@@ -1,4 +1,4 @@
-"""The state machine, and the only thing in this codebase that sets state.
+""" The state machine, and the only thing in this codebase that sets state.
 
 Everything downstream — the face, the log, eventually initiative's gate —
 reacts to a state `core.py` already decided. Nothing else is allowed to
