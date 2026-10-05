@@ -36,6 +36,7 @@ import { FACE_MODULES, DEFAULT_FACE } from "./face.js";
 import { createSettingsPanel } from "./settings-panel.js";
 import { createMediaPanel } from "./media-panel.js";
 import { createCards } from "./cards.js";
+import { createCaptions } from "./captions.js";
 
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 30000;
@@ -128,6 +129,7 @@ async function main() {
 
   let transport = null;
   const sendLater = (payload) => transport && transport.send(payload);
+  const captions = createCaptions();
   const settingsPanel = createSettingsPanel(sendLater);
   // `?demo=media|media-playing|media-fullscreen` draws the panel with
   // sample content and no network, for looking at the layout. Dev
@@ -143,6 +145,7 @@ async function main() {
       settingsPanel.onMessage(message);
       mediaPanel.onMessage(message);
       cards.onMessage(message);
+      captions.onMessage(message);
     },
     // Not the media panel, and not cards: space must keep working
     // during playback (a press ducks the video) and while a card is up

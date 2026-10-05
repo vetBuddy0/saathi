@@ -66,6 +66,7 @@ class TooManyOptions(ValueError):
 class Option:
     n: int  # 1-based; the number she hears and taps
     label: str
+    image: str | None = None  # optional picture (a video thumbnail); never spoken
 
     @property
     def spoken(self) -> str:
@@ -80,6 +81,9 @@ class Card:
     options: tuple[Option, ...] = ()
     value: str | None = None  # readback: the grouped digits / short value
     progress: float | None = None  # holding: 0..1
+    # readback only: the value is a question ("is that right?") answered
+    # yes/no by tap or voice, not just acknowledged. See readback().
+    confirmable: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def as_message(self) -> dict[str, Any]:
@@ -90,18 +94,28 @@ class Card:
             "spoken": self.spoken,
         }
         if self.kind == "choice":
-            message["options"] = [{"n": o.n, "label": o.label} for o in self.options]
+            message["options"] = [
+                {"n": o.n, "label": o.label, **({"image": o.image} if o.image else {})}
+                for o in self.options
+            ]
         if self.value is not None:
             message["value"] = self.value
         if self.progress is not None:
             message["progress"] = self.progress
+        if self.kind == "readback" and self.confirmable:
+            message["confirm"] = True
         return message
 
 
 # -- builders -------------------------------------------------------------
 
 
-def choice(title: str, options: list[str] | tuple[str, ...], spoken: str | None = None) -> Card:
+def choice(
+    title: str,
+    options: list[str] | tuple[str, ...],
+    spoken: str | None = None,
+    images: list[str | None] | None = None,
+) -> Card:
     """Two or three numbered options. `spoken` defaults to the title
     followed by each option as "One: …" — exactly what is on screen."""
     labels = [str(label).strip() for label in options if str(label).strip()]
@@ -109,7 +123,11 @@ def choice(title: str, options: list[str] | tuple[str, ...], spoken: str | None 
         raise TooManyOptions(f"{len(labels)} options; the most a card may carry is {MAX_OPTIONS}")
     if len(labels) < 2:
         raise ValueError("a choice needs two or three options; use confirm() for one")
-    opts = tuple(Option(n=i + 1, label=label) for i, label in enumerate(labels))
+    pics = list(images or [])
+    opts = tuple(
+        Option(n=i + 1, label=label, image=(pics[i] if i < len(pics) else None))
+        for i, label in enumerate(labels)
+    )
     if spoken is None:
         spoken = f"{title.strip()} " + " ".join(f"{o.spoken}." for o in opts)
     return Card(kind="choice", title=title.strip(), spoken=spoken.strip(), options=opts)
@@ -121,14 +139,39 @@ def confirm(statement: str, spoken: str | None = None) -> Card:
     return Card(kind="confirm", title=statement, spoken=(spoken or statement).strip())
 
 
-def readback(title: str, value: str, spoken: str | None = None) -> Card:
+def readback(
+    title: str,
+    value: str,
+    spoken: str | None = None,
+    *,
+    confirm: bool = False,
+    group: bool = True,
+) -> Card:
     """A single value shown very large. Digits are grouped for the eye;
     `spoken` defaults to the digits read one at a time with a pause at
-    each group, which is how a person reads a number back."""
-    grouped = group_digits(value)
+    each group, which is how a person reads a number back.
+
+    `confirm=True` makes the read-back a question: Yes/No on screen,
+    `{"yes": bool}` accepted by `answer()`. Added at reconciliation for
+    Calling, whose read-back before saving a number IS the question --
+    the option that lost was a Confirm card carrying the number as its
+    statement, which drops the very-large grouped digits a read-back
+    exists for. Off by default: a plain read-back is only acknowledged.
+
+    `group=False`: the caller has grouped the value itself and knows its
+    structure ("+65 9123 4567" -- country code apart); regrouping in threes
+    would give "+659 123 4567". Added at reconciliation for Calling;
+    `group_digits` itself keeps normalising, as its own tests require."""
+    grouped = group_digits(value) if group else " ".join(str(value).split())
     if spoken is None:
         spoken = f"{title.strip()} {speak_value(grouped)}"
-    return Card(kind="readback", title=title.strip(), spoken=spoken.strip(), value=grouped)
+    return Card(
+        kind="readback",
+        title=title.strip(),
+        spoken=spoken.strip(),
+        value=grouped,
+        confirmable=confirm,
+    )
 
 
 def holding(label: str, progress: float = 0.0, card_id: str | None = None) -> Card:
@@ -229,7 +272,12 @@ def validate_answer(card: Card, answer: Any) -> dict[str, Any] | None:
         if isinstance(yes, bool):
             return {"yes": yes}
         return None
-    return None  # readback and holding only take dismiss
+    if card.kind == "readback" and card.confirmable:
+        yes = answer.get("yes")
+        if isinstance(yes, bool):
+            return {"yes": yes}
+        return None
+    return None  # a plain readback and holding only take dismiss
 
 
 class CardController:

@@ -45,6 +45,15 @@ import {
 const IFRAME_API_SRC = "https://www.youtube.com/iframe_api";
 const EMBED_BASE = "https://www.youtube.com/embed/";
 const PLAYER_STATE_ENDED = 0; // YT.PlayerState.ENDED
+// How long a play may sit with no player before it is reported as an
+// error rather than swallowed. Found in review (2026-09-26): with the
+// API script loaded but the embed never reporting ready (blocked embed,
+// a video that errors before it is ready), `attaching` stayed true
+// forever and every later play was queued behind it, silently. These
+// are failure deadlines, not playback timers -- playback is still only
+// ever started from a message (see the note on autoplay above).
+const API_TIMEOUT_MS = 20000;
+const READY_TIMEOUT_MS = 20000;
 
 const DEMO_RESULTS = [
   { index: 1, label: "One", title: "The Moon Represents My Heart - Teresa Teng", video_id: "d1" },
@@ -62,12 +71,20 @@ const DEMO_RESULTS = [
   },
 ];
 
-function loadIframeApi(src) {
+function loadIframeApi(src, timeoutMs) {
   if (window.YT && window.YT.Player) return Promise.resolve();
   if (!loadIframeApi.pending) {
     loadIframeApi.pending = new Promise((resolve, reject) => {
       const previous = window.onYouTubeIframeAPIReady;
+      let timer = null;
+      const fail = (why) => {
+        clearTimeout(timer);
+        loadIframeApi.pending = null;
+        script.remove();
+        reject(new Error(why));
+      };
       window.onYouTubeIframeAPIReady = () => {
+        clearTimeout(timer);
         if (typeof previous === "function") previous();
         resolve();
       };
@@ -77,11 +94,10 @@ function loadIframeApi(src) {
       // this the first play would wait forever and every later play
       // would queue behind it (found in review). Failing lets the next
       // play try again.
-      script.onerror = () => {
-        loadIframeApi.pending = null;
-        script.remove();
-        reject(new Error("iframe api failed to load"));
-      };
+      script.onerror = () => fail("iframe api failed to load");
+      // The script arrived but never announced itself (a captive
+      // portal's HTML, a partial download): same outcome, by deadline.
+      timer = setTimeout(() => fail("iframe api did not become ready"), timeoutMs);
       document.head.appendChild(script);
     });
   }
@@ -91,6 +107,8 @@ function loadIframeApi(src) {
 export function createMediaPanel(send, options = {}) {
   const demo = options.demo || null;
   const iframeApiSrc = options.iframeApiSrc || IFRAME_API_SRC; // tests point this elsewhere
+  const apiTimeoutMs = options.apiTimeoutMs || API_TIMEOUT_MS; // tests shorten these
+  const readyTimeoutMs = options.readyTimeoutMs || READY_TIMEOUT_MS;
 
   let view = "none"; // "none" | "results" | "player"
   let results = [];
@@ -104,6 +122,7 @@ export function createMediaPanel(send, options = {}) {
   let attaching = false; // an iframe + wrapper is being set up
   let loadedVideoId = null; // what the iframe was created with
   let pendingVideoId = null; // a play asked for before the player was ready
+  let readyTimer = null; // the deadline for onReady after a player is created
 
   const root = document.createElement("div");
   root.id = "media-panel";
@@ -176,7 +195,32 @@ export function createMediaPanel(send, options = {}) {
     return `${EMBED_BASE}${encodeURIComponent(videoId)}?${params}`;
   }
 
+  function reportError(videoId, code) {
+    send({ type: "media_event", event: "error", video_id: videoId, code });
+    view = "none";
+    render();
+  }
+
+  // A player that never became usable is thrown away whole -- iframe,
+  // wrapper, pending play -- so the next play starts from scratch
+  // instead of queueing behind a wrapper that will never call back.
+  // (The "never remove the iframe" rule above is about a *working*
+  // player: removing that one reloads the first video.)
+  function abandonPlayer(videoId, code) {
+    clearTimeout(readyTimer);
+    readyTimer = null;
+    attaching = false;
+    playerReady = false;
+    player = null;
+    pendingVideoId = null;
+    loadedVideoId = null;
+    frameHolder.replaceChildren();
+    reportError(videoId, code);
+  }
+
   function onPlayerReady(event) {
+    clearTimeout(readyTimer);
+    readyTimer = null;
     playerReady = true;
     attaching = false;
     applyVolume();
@@ -201,15 +245,101 @@ export function createMediaPanel(send, options = {}) {
     }
   }
 
-  function onPlayerError() {
+  function onPlayerError(event) {
+    const code = event && event.data !== undefined ? event.data : null;
+    const videoId = current ? current.video_id : null;
+    if (!playerReady) {
+      // Errored before it was ever ready: the wrapper is no use.
+      abandonPlayer(videoId, code);
+      return;
+    }
     if (view !== "player") return;
-    send({ type: "media_event", event: "error", video_id: current ? current.video_id : null });
-    view = "none";
-    render();
+    reportError(videoId, code);
+  }
+
+  // DEMO ONLY (DECISIONS.md 2026-09-25): play a direct stream the server
+  // resolved with yt-dlp, because label uploads refuse the embed (error
+  // 150). YouTube serves picture and sound separately, so a muted <video>
+  // and an <audio> play side by side; the audio is the clock and the
+  // picture is nudged back if it drifts. Same methods as the YT.Player
+  // the rest of this module drives, so pause/volume/stop are unchanged.
+  function startDirect(stream, videoId) {
+    if (demo) return;
+    clearTimeout(readyTimer);
+    readyTimer = null;
+    attaching = false;
+    pendingVideoId = null;
+    if (player && playerReady && player.kind !== "direct") {
+      try {
+        player.stopVideo();
+      } catch (error) {
+        /* the embed is being replaced anyway */
+      }
+    }
+    const video = document.createElement("video");
+    video.className = "media-player__iframe";
+    video.muted = true;
+    video.playsInline = true;
+    video.src = stream.video;
+    const audio = document.createElement("audio");
+    audio.src = stream.audio;
+    frameHolder.replaceChildren(video, audio);
+    audio.addEventListener("timeupdate", () => {
+      if (Math.abs(video.currentTime - audio.currentTime) > 0.3) video.currentTime = audio.currentTime;
+    });
+    audio.addEventListener("ended", () => {
+      if (view !== "player") return;
+      send({ type: "media_event", event: "ended" });
+      view = "none";
+      render();
+    });
+    audio.addEventListener("error", () => {
+      // The direct stream failed (a network blip, an expired URL): fall
+      // back to the official embed for this video rather than declaring
+      // it unplayable -- found live 2026-09-25, when one transient failure
+      // made "Ed Sheeran - Perfect" vanish from every later search.
+      if (view !== "player" || !player || player.kind !== "direct") return;
+      player.stopVideo();
+      player = null;
+      playerReady = false;
+      frameHolder.replaceChildren();
+      startPlayback(videoId);
+    });
+    player = {
+      kind: "direct",
+      playVideo() {
+        audio.play().catch(() => {});
+        video.play().catch(() => {});
+      },
+      pauseVideo() {
+        audio.pause();
+        video.pause();
+      },
+      stopVideo() {
+        audio.pause();
+        video.pause();
+      },
+      setVolume(level) {
+        audio.volume = Math.max(0, Math.min(1, level / 100));
+      },
+      loadVideoById() {},
+    };
+    playerReady = true;
+    loadedVideoId = videoId;
+    applyVolume();
+    player.playVideo();
   }
 
   async function startPlayback(videoId) {
     if (demo) return; // the demo draws a fake player region, no network
+    if (player && player.kind === "direct") {
+      // Back to the embed (no stream this time): the direct player can't
+      // load a video id, so start the embed from scratch.
+      player.stopVideo();
+      player = null;
+      playerReady = false;
+      frameHolder.replaceChildren();
+    }
     if (player && playerReady) {
       loadedVideoId = videoId;
       player.loadVideoById(videoId);
@@ -229,15 +359,9 @@ export function createMediaPanel(send, options = {}) {
     loadedVideoId = videoId;
     frameHolder.replaceChildren(iframe);
     try {
-      await loadIframeApi(iframeApiSrc);
+      await loadIframeApi(iframeApiSrc, apiTimeoutMs);
     } catch (error) {
-      attaching = false;
-      pendingVideoId = null;
-      loadedVideoId = null;
-      frameHolder.replaceChildren();
-      send({ type: "media_event", event: "error", video_id: videoId });
-      view = "none";
-      render();
+      abandonPlayer(videoId, "api");
       return;
     }
     player = new window.YT.Player(iframe, {
@@ -247,6 +371,9 @@ export function createMediaPanel(send, options = {}) {
         onError: onPlayerError,
       },
     });
+    readyTimer = setTimeout(() => {
+      if (!playerReady) abandonPlayer(pendingVideoId || videoId, "no_ready");
+    }, readyTimeoutMs);
   }
 
   function onMedia(message) {
@@ -263,7 +390,11 @@ export function createMediaPanel(send, options = {}) {
         if (typeof message.fullscreen === "boolean") fullscreen = message.fullscreen;
         view = "player";
         render();
-        startPlayback(message.video_id);
+        if (message.stream && message.stream.video && message.stream.audio) {
+          startDirect(message.stream, message.video_id);
+        } else {
+          startPlayback(message.video_id);
+        }
         break;
       case "pause":
         if (player && playerReady) player.pauseVideo();

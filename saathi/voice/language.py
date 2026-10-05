@@ -51,3 +51,32 @@ def resolve_language(detected: str | None, last_used: str) -> str:
     if last_used in SUPPORTED_LANGUAGES:
         return last_used
     return DEFAULT_LANGUAGE
+
+
+# Which of our languages a piece of text is *written* in, by script. A
+# reply is spoken in the turn's language, but a YouTube title inside it
+# is whatever language it is: "One: 推荐50多岁以上的人真正喜欢的歌曲" read
+# by the English voice is noise (found in the first live check). Counted
+# per letter; digits, spaces and punctuation don't vote.
+def script_language(text: str, default: str = DEFAULT_LANGUAGE) -> str:
+    """The language `text`'s letters are mostly written in: "chinese"
+    for Han characters, "hindi" for Devanagari, "bengali" for Bengali
+    script, "english" for Latin letters (the one Latin-script language
+    with a voice here). `default` when there are no letters at all, e.g.
+    "One: 50". Latin wins ties only over nothing: "三: The Moon Represents
+    My Heart" is English, "Two: 月亮代表我的心" is Chinese."""
+    counts = {"chinese": 0, "hindi": 0, "bengali": 0, "english": 0}
+    for ch in text:
+        point = ord(ch)
+        if 0x4E00 <= point <= 0x9FFF or 0x3400 <= point <= 0x4DBF or 0xF900 <= point <= 0xFAFF:
+            counts["chinese"] += 1
+        elif 0x0900 <= point <= 0x097F:
+            counts["hindi"] += 1
+        elif 0x0980 <= point <= 0x09FF:
+            counts["bengali"] += 1
+        elif ch.isalpha():
+            counts["english"] += 1
+    best = max(counts, key=lambda language: counts[language])
+    if counts[best] == 0:
+        return default if default in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
+    return best

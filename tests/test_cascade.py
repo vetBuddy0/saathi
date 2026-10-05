@@ -266,9 +266,9 @@ def test_say_synthesizes_one_sentence_at_a_time_via_the_selected_backend(no_real
     session.start()
     session.end_turn()  # resolves _last_language to "chinese"
 
-    session.say("First sentence. Second sentence.")
+    session.say("第一句。第二句。")
 
-    assert backend.synthesized == ["First sentence.", "Second sentence."]
+    assert backend.synthesized == ["第一句。", "第二句。"]
     assert backend.languages_asked[-1] == "chinese"
 
 
@@ -1056,3 +1056,264 @@ def test_digest_failure_still_recompiles_context_and_leaves_memory_intact(no_rea
     # The window (layer 1) never depended on the call.
     assert len(session._conversation.window) == 1
     store.close()
+
+
+# -- a tool may decide the words, or that there are none (2026-09-26) --------
+
+
+def test_a_tool_result_saying_nothing_ends_the_turn_silently_and_is_still_remembered(
+    no_real_playback,
+):
+    tool_call = _fake_tool_call("call_1", "play_music", {"action": "play", "choice": 2})
+    client = FakeClient(
+        heard="the second one",
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="never asked for"),
+        ],
+    )
+    session, backend = _session(client)
+    session.on_intent(
+        lambda name, args: {"status": "ok", "say": "", "did": "Started playing Two: X."}
+    )
+
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    reply = session.end_turn()
+
+    assert reply == ""  # server.py ends the turn without SPEAKING
+    assert len(client.chat.completions.calls) == 1  # no follow-up completion
+    assert backend.synthesized == []
+    assert session.pop_last_turn_timings() is None  # nothing was spoken, nothing to time
+
+    # The exchange is recorded without a say(): the next turn knows.
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    second_messages = client.chat.completions.calls[1]["messages"]
+    assert second_messages[-3] == {"role": "user", "content": "the second one"}
+    assert second_messages[-2] == {"role": "assistant", "content": "Started playing Two: X."}
+
+
+def test_a_tool_result_with_exact_words_is_spoken_verbatim_without_a_second_call(
+    no_real_playback,
+):
+    tool_call = _fake_tool_call("call_1", "play_music", {"action": "search", "query": "x"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="never asked for"),
+        ]
+    )
+    session, _backend = _session(client)
+    session.on_intent(lambda name, args: {"status": "ok", "say": " Which one? One: A. "})
+
+    session.start()
+    reply = session.end_turn()
+
+    assert reply == "Which one? One: A."
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_a_tool_result_without_say_still_asks_the_model_for_the_words(no_real_playback):
+    tool_call = _fake_tool_call("call_1", "play_music", {"action": "search", "query": "x"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="Which one would you like?"),
+        ]
+    )
+    session, _backend = _session(client)
+    session.on_intent(lambda name, args: {"status": "ok", "say": None, "note": "offer them"})
+
+    session.start()
+    assert session.end_turn() == "Which one would you like?"
+    assert len(client.chat.completions.calls) == 2
+
+
+# -- each sentence is read in the voice of its own script --------------------
+
+
+def test_say_reads_a_chinese_title_with_the_chinese_voice_inside_an_english_reply(
+    no_real_playback,
+):
+    client = FakeClient(detected_language="English")
+    session, backend = _session(client)
+    session.start()
+    session.end_turn()
+
+    session.say(
+        "Which one would you like? One: 推荐50多岁以上的人真正喜欢的歌曲. "
+        "Two: The Moon Represents My Heart - Teresa Teng. Three: 鄧麗君傳唱金曲."
+    )
+
+    assert backend.synthesized == [
+        "Which one would you like?",
+        "One: 推荐50多岁以上的人真正喜欢的歌曲.",
+        "Two: The Moon Represents My Heart - Teresa Teng.",
+        "Three: 鄧麗君傳唱金曲.",
+    ]
+    # One stream per run of sentences in the same language, in order.
+    assert backend.languages_asked == ["english", "chinese", "english", "chinese"]
+
+
+def test_say_in_one_language_is_still_one_synthesis_stream(no_real_playback):
+    client = FakeClient(detected_language="Chinese")
+    session, backend = _session(client)
+    session.start()
+    session.end_turn()
+
+    session.say("你好。今天怎么样？")
+
+    assert backend.synthesized == ["你好。", "今天怎么样？"]
+    assert backend.languages_asked == ["chinese"]
+
+
+# --- the provider seam (voice/engine/provider.py) --------------------------
+
+
+def _openai_session(client, *, llm="gpt-4.1", stt="gpt-transcribe"):
+    from saathi.voice.engine.provider import AIProvider
+
+    return CascadeSession(
+        "fake-sink",
+        provider=AIProvider("openai", client, llm, stt),
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        speech_gate=_hears_speech,
+    )
+
+
+def test_openai_transcriber_is_asked_for_json_and_language_comes_from_the_script(
+    no_real_playback,
+):
+    # OpenAI's newer transcribers return text only; a Mandarin transcript
+    # must still switch her reply language, from its script.
+    client = FakeClient(heard="请帮我播放一首邓丽君的歌。", detected_language="english")
+    session = _openai_session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    stt = client.audio.transcriptions.calls[0]
+    assert stt["model"] == "gpt-transcribe" and stt["response_format"] == "json"
+    chat = client.chat.completions.calls[0]
+    assert chat["model"] == "gpt-4.1"
+    assert {"role": "system", "content": "Reply in chinese."} in chat["messages"]
+    assert session.last_heard == "请帮我播放一首邓丽君的歌。"
+
+
+def test_every_chat_call_bounds_its_output_and_reasoning_models_get_it_off(no_real_playback):
+    # The unbounded default made Groq reject tool turns (2048 reserved vs
+    # a 1000/min limit); OpenAI's reasoning families need reasoning off
+    # to accept tools at all.
+    client = FakeClient()
+    session = _openai_session(client, llm="gpt-6-sol")
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    call = client.chat.completions.calls[0]
+    assert call["max_completion_tokens"] == 400
+    assert call["reasoning_effort"] == "none"
+    assert "max_tokens" not in call
+
+
+def test_a_silent_turn_clears_last_heard(no_real_playback):
+    client = FakeClient(heard="hello there")
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    assert session.last_heard == "hello there"
+    session._speech_gate = lambda pcm: False
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    assert session.end_turn() == ""
+    assert session.last_heard is None
+
+
+def test_a_bare_client_keeps_the_groq_defaults(no_real_playback):
+    client = FakeClient()
+    session, _ = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    assert client.audio.transcriptions.calls[0]["response_format"] == "verbose_json"
+    assert client.chat.completions.calls[0]["model"] == cascade_module._LLM_MODEL
+
+
+# --- the command router (voice/router.py) --------------------------------
+
+
+def _media_session(client: FakeClient):
+    """A session that has already had one music search answered, so the
+    router knows results are on offer."""
+    session, backend = _session(client)
+    intents: list = []
+
+    def handle(name, args):
+        intents.append((name, args))
+        if args.get("action") == "search":
+            return {"status": "ok", "results": ["One: A", "Two: B", "Three: C"]}
+        return {"status": "ok", "note": "Paused. One word is enough."}
+
+    session.on_intent(handle)
+    search = handle("play_music", {"action": "search", "query": "x"})
+    session._note_tool_result("play_music", search)
+    intents.clear()
+    return session, backend, intents
+
+
+def test_a_routed_command_calls_the_intent_and_makes_no_chat_completion(no_real_playback):
+    client = FakeClient(heard="Pause.")
+    session, _backend, intents = _media_session(client)
+
+    session.start()
+    reply = session.end_turn()
+
+    assert intents == [("play_music", {"action": "pause"})]
+    assert reply == "Paused."
+    assert client.chat.completions.calls == []
+    session.say(reply)
+    timings = session.pop_last_turn_timings()
+    assert timings.first_token_ms == 0 and timings.prompt_tokens == 0
+    # The exchange is still recorded, so "that one" later has context.
+    assert session._conversation.messages()[-2:] == [
+        {"role": "user", "content": "Pause."},
+        {"role": "assistant", "content": "Paused."},
+    ]
+
+
+def test_a_routed_command_whose_tool_did_not_say_ok_is_phrased_by_the_model(no_real_playback):
+    client = FakeClient(heard="Pause.", reply="Nothing is playing just now.")
+    session, _backend, _intents = _media_session(client)
+    session.on_intent(lambda name, args: {"status": "nothing_playing", "note": "Nothing to pause."})
+
+    session.start()
+    assert session.end_turn() == "Nothing is playing just now."
+    assert len(client.chat.completions.calls) == 1
+    tool_messages = [m for m in client.chat.completions.calls[0]["messages"] if m["role"] == "tool"]
+    assert json.loads(tool_messages[0]["content"])["status"] == "nothing_playing"
+
+
+def test_the_router_kill_switch_restores_the_model_path(no_real_playback, monkeypatch):
+    monkeypatch.setenv("SAATHI_COMMAND_ROUTER", "off")
+    client = FakeClient(heard="Pause.", reply="Of course.")
+    session, _backend, intents = _media_session(client)
+
+    session.start()
+    assert session.end_turn() == "Of course."
+    assert intents == []
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_call_my_son_routes_without_any_results_on_offer(no_real_playback):
+    client = FakeClient(heard="Call my son.", reply="There's no number saved for your son.")
+    session, _backend = _session(client)
+    intents = []
+    session.on_intent(lambda name, args: intents.append((name, args)) or {"status": "no_match"})
+
+    session.start()
+    assert session.end_turn() == "There's no number saved for your son."
+    assert intents == [("call_contact", {"contact": "my son"})]
+    assert len(client.chat.completions.calls) == 1  # the follow-up only, never the tool choice
