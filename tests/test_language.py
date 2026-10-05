@@ -67,3 +67,33 @@ def test_mixed_language_pair_english_malay_falls_back_since_malay_has_no_voice()
     assert resolve_language("malay", "english") == "english"
     # The reverse can't arise: resolve_language() never returns an
     # unsupported language, so "last_used" can never actually be Malay.
+
+
+# -- script_language: which voice reads a sentence --------------------------
+
+from saathi.voice.language import script_language  # noqa: E402
+
+
+def test_script_language_reads_a_chinese_title_in_chinese_inside_an_english_reply():
+    assert script_language("One: 推荐50多岁以上的人真正喜欢的歌曲", "english") == "chinese"
+    assert script_language("Two: 月亮代表我的心", "english") == "chinese"
+
+
+def test_script_language_reads_a_latin_title_in_english_inside_a_chinese_reply():
+    assert script_language("三: The Moon Represents My Heart - Teresa Teng", "chinese") == "english"
+
+
+def test_script_language_recognises_devanagari_and_bengali():
+    assert script_language("नमस्ते। जब भी आप बात करना चाहें, मैं यहीं हूँ।", "english") == "hindi"
+    assert script_language("নমস্কার। আপনি যখনই কথা বলতে চান", "english") == "bengali"
+
+
+def test_script_language_falls_back_to_the_turns_language_when_there_are_no_letters():
+    assert script_language("50 - 2", "chinese") == "chinese"
+    assert script_language("", "hindi") == "hindi"
+    assert script_language("123", "klingon") == DEFAULT_LANGUAGE
+
+
+def test_script_language_only_ever_names_a_supported_language():
+    for text in ("hello", "你好", "नमस्ते", "নমস্কার", "...", "こんにちは"):
+        assert script_language(text, "english") in SUPPORTED_LANGUAGES

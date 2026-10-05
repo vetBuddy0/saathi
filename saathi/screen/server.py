@@ -25,7 +25,8 @@ lowers the player's volume on the `state` it already receives
 
 Cards (same day): `{"type": "card", "card": {...} | null}` (server ->
 browser: show this one card, or clear it; emitted by `screen/cards.py`'s
-CardController through the same seam, never on connect) and
+CardController through the same seam, and re-sent to a fresh connection
+while one is up -- see the last paragraph) and
 `{"type": "card_answer", "id": ..., "answer": {...}}` (browser -> server:
 a tap). A voice answer never crosses this socket: it arrives as a tool
 call and the tool calls the same `CardController.answer()`. The hold
@@ -66,6 +67,21 @@ turn recognizes it's been superseded: every real turn start (a press
 that begins listening, or a barge-in) bumps it, and a turn only acts on
 its own tail end — `response_ready`, `done` — if the counter still
 matches what it captured at the start.
+
+A tap answering a card ends the exchange (2026-09-26). Found in a real
+headless Chromium against this server: a search turn shows the card
+while still THINKING, then spends the rest of the turn reading the
+three titles out; a tap on option two mid-reading cleared the card and
+started the video, and the reading carried on regardless — "she keeps
+talking instead of just playing the thing". The card answered *is* the
+turn's answer, so an accepted tap on a card shown by the live turn
+either interrupts the reply (`SPEAKING`, the turn's own tail then fires
+`done` as usual) or, if the reply hasn't started (`THINKING`),
+supersedes the turn and closes it with `no_response` — nothing left to
+say. A card shown by an earlier turn, or between turns, ends nothing.
+The same run showed why a card is re-sent on connect: the browser is
+the only copy of it, and a reload left a question pending on the
+server with nothing on the screen to answer.
 """
 
 from __future__ import annotations
@@ -88,7 +104,7 @@ from saathi.identity.preferences import (
     write_preference,
 )
 from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
-from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
+from saathi.voice.tts.registry import DEFAULT_PREFERRED_BACKEND_ID, default_backends
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _CAPTURE_CHUNK_BYTES = 3200  # 100ms of 16kHz mono 16-bit PCM
@@ -239,10 +255,12 @@ def _settings_message(store) -> str:
             }
         )
     current_language = DEFAULT_LANGUAGE
-    current_backend = DEFAULT_BACKEND_ID
+    # No preference written yet means the preferred default (Chirp), the
+    # same thing cli.py hands the session -- not the offline fallback.
+    current_backend = DEFAULT_PREFERRED_BACKEND_ID
     if store is not None:
         current_language = read_preference(store, LANGUAGE_KEY, DEFAULT_LANGUAGE)
-        current_backend = read_preference(store, TTS_BACKEND_KEY, DEFAULT_BACKEND_ID)
+        current_backend = read_preference(store, TTS_BACKEND_KEY, DEFAULT_PREFERRED_BACKEND_ID)
     return json.dumps(
         {
             "type": "settings",
@@ -290,12 +308,36 @@ def build_app(
     # because there is no running loop at build time; a message before
     # then has no screen to reach anyway and is dropped.
     loop_holder: dict[str, asyncio.AbstractEventLoop | None] = {"loop": None}
+    # The turn that showed the card now up (None: no turn -- shown
+    # between turns, e.g. by initiative). Read from the executor thread
+    # inside end_turn(), where the counter is stable for the turn.
+    card_shown_in: dict[str, int | None] = {"generation": None}
 
     def broadcast_threadsafe(payload: dict) -> None:
+        if payload.get("type") == "card" and payload.get("card") is not None:
+            card_shown_in["generation"] = turn_generation["value"]
         loop = loop_holder["loop"]
         if loop is None or loop.is_closed():
             return
         loop.call_soon_threadsafe(_send_all, json.dumps(payload))
+
+    def end_turn_answered_on_screen() -> None:
+        """Her tap answered the question the live turn is asking, so the
+        turn is over -- see the module docstring. Only `core.py` moves
+        the state: here it's asked for the one event that fits."""
+        if session is None:
+            return
+        if core.state == State.SPEAKING:
+            # The reply reading her the options is pointless now. Stop
+            # it; say() returns and the turn's own tail fires `done`.
+            session.interrupt()
+        elif core.state == State.THINKING:
+            # The reply hasn't been spoken yet (the model is still
+            # composing it, or TTS is warming up). Supersede the turn so
+            # its tail never speaks, and close the state machine: there
+            # is nothing to say.
+            turn_generation["value"] += 1
+            core.handle(Event("no_response"))
 
     seams = [obj for obj in (media, cards) if obj is not None]
     if seams:
@@ -351,6 +393,11 @@ def build_app(
         websockets.add(ws)
         await ws.send_str(json.dumps({"type": "state", "state": core.state.value}))
         await ws.send_str(_settings_message(store))
+        if cards is not None and cards.current is not None:
+            # A card stays until it is answered or dismissed, across a
+            # reload too: the server holds the question, the browser
+            # only draws it.
+            await ws.send_str(json.dumps({"type": "card", "card": cards.current.as_message()}))
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -392,19 +439,38 @@ def build_app(
                     # what "play that again" means; nothing here does.
                     event = payload.get("event")
                     video_id = payload.get("video_id")
+                    code = payload.get("code")
+                    if event == "error":
+                        # Never silent: the code is the player's own
+                        # (150/101 embedding disabled, 100 not found,
+                        # "no_ready"/"api" from the panel's timeouts).
+                        logger.warning("player error for %s: code %s", video_id, code)
                     if media is not None and isinstance(event, str):
                         media.on_browser_event(
-                            event, video_id if isinstance(video_id, str) else None
+                            event,
+                            video_id if isinstance(video_id, str) else None,
+                            code=code if isinstance(code, (str, int)) else None,
                         )
                     continue
                 if payload.get("type") == "card_answer":
                     # A tap. The same entry point a voice answer uses
                     # (CardController.answer); a stale id or a malformed
-                    # answer is dropped there, not here.
+                    # answer is dropped there, not here -- but said in
+                    # the log, so "I tapped and nothing happened" can be
+                    # traced to the card having been replaced.
                     if cards is not None:
                         card_id = payload.get("id")
                         if isinstance(card_id, str):
-                            cards.answer(card_id, payload.get("answer"), source="tap")
+                            if cards.answer(card_id, payload.get("answer"), source="tap"):
+                                if card_shown_in["generation"] == turn_generation["value"]:
+                                    # call_soon, so the card's own clear (queued
+                                    # by the seam) reaches the screen before
+                                    # the state change that follows from it.
+                                    asyncio.get_running_loop().call_soon(
+                                        end_turn_answered_on_screen
+                                    )
+                            else:
+                                logger.info("tap on %s dropped: not the current card", card_id)
                     continue
                 if payload.get("type") != "input":
                     continue

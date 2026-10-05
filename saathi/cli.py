@@ -4,12 +4,28 @@
 drive the face. `saathi smoke` is `python -m saathi.smoke` under the same
 entry point, for consistency — both are how a person on this machine
 checks the device, not library code anything else here imports.
+`saathi voice` reads or writes the one preference a person is most
+likely to want from a shell (which backend she speaks with), against the
+same database `saathi run` reads.
+
+`run` is split so the wiring can be tested (2026-09-26): `build_runtime()`
+constructs everything -- the store, the card/hold/media controllers, the
+registry with every tool registered and every permission granted, the
+session -- and returns it; `_run()` only hands that to the screen server.
+Before the split nothing covered this file, and it is the file where a
+tool registered but not granted, or a controller built twice, would be
+invisible until someone spoke to the device.
 """
 
 from __future__ import annotations
 
 import argparse
-from typing import Sequence
+import os
+from dataclasses import dataclass, field
+from typing import Any, Callable, Sequence
+
+# Aliases a person would type; the ids are what the settings panel shows.
+_VOICE_ALIASES = {"chirp": "google-chirp3-hd", "piper": "piper"}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -34,6 +50,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="hardware-in-the-loop barge-in check (stop latency + post-interrupt bleed)",
     )
+    voice_parser = subparsers.add_parser(
+        "voice", help="show or set which voice she speaks with (the tts_backend preference)"
+    )
+    voice_parser.add_argument(
+        "backend",
+        nargs="?",
+        help="a backend id (google-chirp3-hd, piper, ...) or 'chirp'/'piper'; omit to show",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "smoke":
@@ -48,20 +72,51 @@ def main(argv: Sequence[str] | None = None) -> int:
             smoke_args.append("--barge-in")
         return smoke_cli(smoke_args)
 
+    if args.command == "voice":
+        return _voice(args.backend)
+
     if args.command == "run":
         return _run()
 
     return 1
 
 
-def _run() -> int:
-    import os
+# The tools `saathi run` offers the model and the permission each one
+# needs -- granted unconditionally, every one of them, because none has
+# a consequence outside the room (DECISIONS 2026-09-25): set_language
+# is device configuration, correct_memory is her own way to fix a wrong
+# belief, play_music is a song on her own screen. "calls"/"contacts"
+# stay ungranted: Calling is parked on its branch with four serious
+# review findings (TODO.md).
+GRANTED_PERMISSIONS = frozenset({"preferences", "memory", "music"})
 
+
+@dataclass
+class Runtime:
+    """Everything `saathi run` wires together, in one place a test can
+    look at. `session` and `capture_source_id` are None when there is no
+    `GROQ_API_KEY` or no usable microphone/speaker/echo-cancel -- the
+    device then runs the checkpoint-1 fake press/release path."""
+
+    config: Any
+    core: Any
+    store: Any
+    cards: Any
+    hold: Any
+    media: Any
+    registry: Any = None
+    tool_schemas: list[dict] = field(default_factory=list)
+    handle_intent: Callable[[str, dict], dict] | None = None
+    session: Any = None
+    capture_source_id: str | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+def build_runtime() -> Runtime:
     from saathi.config import Config
     from saathi.core import Core
     from saathi.identity.store import IdentityStore
     from saathi.screen.cards import CardController, HoldController
-    from saathi.screen.server import run
     from saathi.tools.media import MediaController
 
     config = Config.load()
@@ -80,105 +135,148 @@ def _run() -> int:
     cards = CardController()
     hold = HoldController(cards)
     media = MediaController(cards=cards)
+    runtime = Runtime(config=config, core=core, store=store, cards=cards, hold=hold, media=media)
 
-    session = None
-    capture_source_id = None
-    if os.environ.get("GROQ_API_KEY"):
-        # One-hour spike wiring (2026-09-17): only actually talks to Groq
-        # if a key is present, so checkpoint-1-only setups still get the
-        # fake press/release path in screen/server.py unchanged.
-        from saathi.audio.aec import EchoCancelHandles, ensure_echo_cancellation
-        from saathi.audio.devices import DeviceManager, PulseAudioBackend
-        from saathi.identity.correction import (
-            CORRECT_MEMORY_DESCRIPTION,
-            make_correct_memory_tool,
-        )
-        from saathi.identity.preferences import (
-            LANGUAGE_KEY,
-            TTS_BACKEND_KEY,
-            threadsafe_reader,
-        )
-        from saathi.tools.language import SET_LANGUAGE_DESCRIPTION, make_set_language_tool
-        from saathi.tools.llm_schema import tool_to_openai_schema
-        from saathi.tools.media import MEDIA_DESCRIPTION, make_media_tool
-        from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
-        from saathi.voice.engine.cascade import CascadeSession
-        from saathi.voice.tts.registry import DEFAULT_BACKEND_ID
+    if not os.environ.get("GROQ_API_KEY"):
+        return runtime
 
-        # Item G's spoken entry point. "The voice engine never executes
-        # anything. It emits intent; the core validates; the tool
-        # executes" (SPEC.md) -- this Registry and the permission grant
-        # below are that validation, living here rather than inside
-        # cascade.py. set_language needs no elevated consent beyond
-        # what any device-configuration change would (unlike calls/
-        # music, explicitly out of v1's scope): granted unconditionally.
-        registry = Registry()
-        set_language_tool = make_set_language_tool(store)
-        registry.register(set_language_tool)
-        # correct_memory: her own way to fix a wrong belief; no consequence
-        # outside the device (DECISIONS 2026-09-25, "memory" scope).
-        correct_memory_tool = make_correct_memory_tool(store)
-        registry.register(correct_memory_tool)
-        # play_music: a song on her own screen has no consequence outside
-        # the room (DECISIONS 2026-09-25, reversing 2026-09-18's "music
-        # is out for v1"). "calls"/"contacts" stay ungranted: Calling is
-        # parked on its branch with four serious review findings (TODO.md).
-        media_tool = make_media_tool(media)
-        registry.register(media_tool)
-        granted_permissions = frozenset({"preferences", "memory", "music"})
-
-        def handle_intent(name: str, arguments: dict) -> dict:
-            try:
-                return registry.call(name, granted_permissions, **arguments)
-            except UnknownTool:
-                return {"status": "error", "detail": f"no such tool: {name}"}
-            except PermissionDenied as exc:
-                return {"status": "denied", "detail": str(exc)}
-
-        tool_schemas = [
-            tool_to_openai_schema(set_language_tool, SET_LANGUAGE_DESCRIPTION),
-            tool_to_openai_schema(correct_memory_tool, CORRECT_MEMORY_DESCRIPTION),
-            tool_to_openai_schema(media_tool, MEDIA_DESCRIPTION),
-        ]
-
-        manager = DeviceManager(PulseAudioBackend())
-        mic, speaker = manager.choose("input"), manager.choose("output")
-        if mic is not None and speaker is not None:
-            handles = ensure_echo_cancellation(mic.id, speaker.id)
-            if isinstance(handles, EchoCancelHandles):
-                # threadsafe_reader, not a lambda over `store`: these are
-                # called from end_turn()'s executor thread and from the
-                # voice-warming daemon thread, never from this one, and
-                # a sqlite3 connection can't cross threads. Found live --
-                # the first spacebar release of a real run crashed the
-                # turn. See identity/preferences.py.
-                session = CascadeSession(
-                    handles.sink_id,
-                    backend_preference=threadsafe_reader(
-                        store, TTS_BACKEND_KEY, DEFAULT_BACKEND_ID
-                    ),
-                    language_preference=threadsafe_reader(store, LANGUAGE_KEY),
-                    identity_store=store,
-                    tool_schemas=tool_schemas,
-                )
-                session.on_intent(handle_intent)
-                capture_source_id = handles.source_id
-            else:
-                print("No system echo-cancel available; running without the voice engine.")
-        else:
-            print("No microphone/speaker found; running without the voice engine.")
-
-    run(
-        core,
-        config.screen_host,
-        config.screen_port,
-        session=session,
-        capture_source_id=capture_source_id,
-        store=store,
-        media=media,
-        cards=cards,
-        hold=hold,
+    # One-hour spike wiring (2026-09-17): only actually talks to Groq
+    # if a key is present, so checkpoint-1-only setups still get the
+    # fake press/release path in screen/server.py unchanged.
+    from saathi.audio.aec import EchoCancelHandles, ensure_echo_cancellation
+    from saathi.audio.devices import DeviceManager, PulseAudioBackend
+    from saathi.identity.correction import (
+        CORRECT_MEMORY_DESCRIPTION,
+        make_correct_memory_tool,
     )
+    from saathi.identity.preferences import (
+        LANGUAGE_KEY,
+        TTS_BACKEND_KEY,
+        threadsafe_reader,
+    )
+    from saathi.tools.language import SET_LANGUAGE_DESCRIPTION, make_set_language_tool
+    from saathi.tools.llm_schema import tool_to_openai_schema
+    from saathi.tools.media import MEDIA_DESCRIPTION, make_media_tool
+    from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
+    from saathi.voice.engine.cascade import CascadeSession
+    from saathi.voice.tts.registry import DEFAULT_PREFERRED_BACKEND_ID
+
+    # Item G's spoken entry point. "The voice engine never executes
+    # anything. It emits intent; the core validates; the tool
+    # executes" (SPEC.md) -- this Registry and the permission grant
+    # are that validation, living here rather than inside cascade.py.
+    registry = Registry()
+    set_language_tool = make_set_language_tool(store)
+    correct_memory_tool = make_correct_memory_tool(store)
+    media_tool = make_media_tool(media)
+    for tool in (set_language_tool, correct_memory_tool, media_tool):
+        registry.register(tool)
+
+    def handle_intent(name: str, arguments: dict) -> dict:
+        try:
+            return registry.call(name, GRANTED_PERMISSIONS, **arguments)
+        except UnknownTool:
+            return {"status": "error", "detail": f"no such tool: {name}"}
+        except PermissionDenied as exc:
+            return {"status": "denied", "detail": str(exc)}
+
+    tool_schemas = [
+        tool_to_openai_schema(set_language_tool, SET_LANGUAGE_DESCRIPTION),
+        tool_to_openai_schema(correct_memory_tool, CORRECT_MEMORY_DESCRIPTION),
+        tool_to_openai_schema(media_tool, MEDIA_DESCRIPTION),
+    ]
+    runtime.registry = registry
+    runtime.tool_schemas = tool_schemas
+    runtime.handle_intent = handle_intent
+
+    manager = DeviceManager(PulseAudioBackend())
+    mic, speaker = manager.choose("input"), manager.choose("output")
+    if mic is None or speaker is None:
+        runtime.notes.append("No microphone/speaker found; running without the voice engine.")
+        return runtime
+    handles = ensure_echo_cancellation(mic.id, speaker.id)
+    if not isinstance(handles, EchoCancelHandles):
+        runtime.notes.append("No system echo-cancel available; running without the voice engine.")
+        return runtime
+    # threadsafe_reader, not a lambda over `store`: these are called
+    # from end_turn()'s executor thread and from the voice-warming
+    # daemon thread, never from this one, and a sqlite3 connection
+    # can't cross threads. Found live -- the first spacebar release of
+    # a real run crashed the turn. See identity/preferences.py.
+    #
+    # No `tts_backend` row yet means Chirp (DEFAULT_PREFERRED_BACKEND_ID),
+    # not the offline fallback: verified against the real database
+    # path this time, not a scratch one (2026-09-26). `saathi voice`
+    # switches an existing database.
+    session = CascadeSession(
+        handles.sink_id,
+        backend_preference=threadsafe_reader(store, TTS_BACKEND_KEY, DEFAULT_PREFERRED_BACKEND_ID),
+        language_preference=threadsafe_reader(store, LANGUAGE_KEY),
+        identity_store=store,
+        tool_schemas=tool_schemas,
+    )
+    session.on_intent(handle_intent)
+    runtime.session = session
+    runtime.capture_source_id = handles.source_id
+    return runtime
+
+
+def _run() -> int:
+    from saathi.screen.server import run
+
+    runtime = build_runtime()
+    for note in runtime.notes:
+        print(note)
+    run(
+        runtime.core,
+        runtime.config.screen_host,
+        runtime.config.screen_port,
+        session=runtime.session,
+        capture_source_id=runtime.capture_source_id,
+        store=runtime.store,
+        media=runtime.media,
+        cards=runtime.cards,
+        hold=runtime.hold,
+    )
+    return 0
+
+
+def _voice(backend: str | None) -> int:
+    """`saathi voice` shows the effective `tts_backend` preference of
+    the configured database; `saathi voice <id>` writes it. The same
+    row the Ctrl+L panel writes, effective on her next turn, no
+    restart -- see identity/preferences.py."""
+    from saathi.config import Config
+    from saathi.identity.preferences import TTS_BACKEND_KEY, read_preference, write_preference
+    from saathi.identity.store import IdentityStore
+    from saathi.voice.tts.registry import DEFAULT_PREFERRED_BACKEND_ID, default_backends
+
+    config = Config.load()
+    backends = default_backends()
+    with IdentityStore(config.identity_db_path) as store:
+        store.create()
+        if backend is None:
+            stored = read_preference(store, TTS_BACKEND_KEY)
+            effective = stored or DEFAULT_PREFERRED_BACKEND_ID
+            origin = "set" if stored else "default (no preference stored)"
+            available, reason = backends[effective].available() if effective in backends else (
+                False,
+                "unknown backend id",
+            )
+            print(f"{config.identity_db_path}: tts_backend = {effective} [{origin}]")
+            state = "yes" if available else f"no -- {reason}"
+            print(f"available now: {state}")
+            return 0
+        wanted = _VOICE_ALIASES.get(backend, backend)
+        if wanted not in backends:
+            print(f"unknown backend {backend!r}; one of: {', '.join(backends)}")
+            return 2
+        write_preference(store, TTS_BACKEND_KEY, wanted)
+        available, reason = backends[wanted].available()
+        print(f"{config.identity_db_path}: tts_backend = {wanted} (effective on her next turn)")
+        if not available:
+            print(f"note: {wanted} is not available on this machine right now -- {reason}; "
+                  "Piper is used until it is")
     return 0
 
 

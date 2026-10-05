@@ -266,9 +266,9 @@ def test_say_synthesizes_one_sentence_at_a_time_via_the_selected_backend(no_real
     session.start()
     session.end_turn()  # resolves _last_language to "chinese"
 
-    session.say("First sentence. Second sentence.")
+    session.say("第一句。第二句。")
 
-    assert backend.synthesized == ["First sentence.", "Second sentence."]
+    assert backend.synthesized == ["第一句。", "第二句。"]
     assert backend.languages_asked[-1] == "chinese"
 
 
@@ -1056,3 +1056,114 @@ def test_digest_failure_still_recompiles_context_and_leaves_memory_intact(no_rea
     # The window (layer 1) never depended on the call.
     assert len(session._conversation.window) == 1
     store.close()
+
+
+# -- a tool may decide the words, or that there are none (2026-09-26) --------
+
+
+def test_a_tool_result_saying_nothing_ends_the_turn_silently_and_is_still_remembered(
+    no_real_playback,
+):
+    tool_call = _fake_tool_call("call_1", "play_music", {"action": "play", "choice": 2})
+    client = FakeClient(
+        heard="the second one",
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="never asked for"),
+        ],
+    )
+    session, backend = _session(client)
+    session.on_intent(
+        lambda name, args: {"status": "ok", "say": "", "did": "Started playing Two: X."}
+    )
+
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    reply = session.end_turn()
+
+    assert reply == ""  # server.py ends the turn without SPEAKING
+    assert len(client.chat.completions.calls) == 1  # no follow-up completion
+    assert backend.synthesized == []
+    assert session.pop_last_turn_timings() is None  # nothing was spoken, nothing to time
+
+    # The exchange is recorded without a say(): the next turn knows.
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+    second_messages = client.chat.completions.calls[1]["messages"]
+    assert second_messages[-3] == {"role": "user", "content": "the second one"}
+    assert second_messages[-2] == {"role": "assistant", "content": "Started playing Two: X."}
+
+
+def test_a_tool_result_with_exact_words_is_spoken_verbatim_without_a_second_call(
+    no_real_playback,
+):
+    tool_call = _fake_tool_call("call_1", "play_music", {"action": "search", "query": "x"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="never asked for"),
+        ]
+    )
+    session, _backend = _session(client)
+    session.on_intent(lambda name, args: {"status": "ok", "say": " Which one? One: A. "})
+
+    session.start()
+    reply = session.end_turn()
+
+    assert reply == "Which one? One: A."
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_a_tool_result_without_say_still_asks_the_model_for_the_words(no_real_playback):
+    tool_call = _fake_tool_call("call_1", "play_music", {"action": "search", "query": "x"})
+    client = FakeClient(
+        chat_responses=[
+            _fake_completion(content=None, tool_calls=[tool_call]),
+            _fake_completion(content="Which one would you like?"),
+        ]
+    )
+    session, _backend = _session(client)
+    session.on_intent(lambda name, args: {"status": "ok", "say": None, "note": "offer them"})
+
+    session.start()
+    assert session.end_turn() == "Which one would you like?"
+    assert len(client.chat.completions.calls) == 2
+
+
+# -- each sentence is read in the voice of its own script --------------------
+
+
+def test_say_reads_a_chinese_title_with_the_chinese_voice_inside_an_english_reply(
+    no_real_playback,
+):
+    client = FakeClient(detected_language="English")
+    session, backend = _session(client)
+    session.start()
+    session.end_turn()
+
+    session.say(
+        "Which one would you like? One: 推荐50多岁以上的人真正喜欢的歌曲. "
+        "Two: The Moon Represents My Heart - Teresa Teng. Three: 鄧麗君傳唱金曲."
+    )
+
+    assert backend.synthesized == [
+        "Which one would you like?",
+        "One: 推荐50多岁以上的人真正喜欢的歌曲.",
+        "Two: The Moon Represents My Heart - Teresa Teng.",
+        "Three: 鄧麗君傳唱金曲.",
+    ]
+    # One stream per run of sentences in the same language, in order.
+    assert backend.languages_asked == ["english", "chinese", "english", "chinese"]
+
+
+def test_say_in_one_language_is_still_one_synthesis_stream(no_real_playback):
+    client = FakeClient(detected_language="Chinese")
+    session, backend = _session(client)
+    session.start()
+    session.end_turn()
+
+    session.say("你好。今天怎么样？")
+
+    assert backend.synthesized == ["你好。", "今天怎么样？"]
+    assert backend.languages_asked == ["chinese"]

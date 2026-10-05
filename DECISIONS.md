@@ -879,3 +879,91 @@ press behind it. The hold timer also exits on `abandon()`, so
 **2026-09-25 — `readback()` only regroups phone-number shapes;
 decimals and times pass through.** Review: "37.5" was becoming "375".
 A "." or ":" now means "not a phone number".
+
+**2026-09-26 — A tap that answers a card ends the exchange; the turn
+that asked is over.** Reproduced in a real headless Chromium against
+`screen/server.py` (not by reading the code): the search turn shows the
+card while THINKING and then reads the three titles for the rest of the
+reply; a tap on option two cleared the card and started the video, and
+the reading carried on. `server.py` now treats an accepted tap on a card
+shown by the live turn as that turn's answer: `session.interrupt()`
+while SPEAKING (the turn's own tail fires `done`), or supersede plus
+`no_response` while THINKING. A card shown by an earlier turn or between
+turns ends nothing. The alternative — leave the turn alone and let the
+reply finish — is exactly the symptom. Only `core.py` moves the state;
+the server asks it for the one event that fits.
+
+**2026-09-26 — A tool result may carry `say`: the exact words, or `""`
+for none.** `cascade.py` then skips the second model call. `play`
+returns `say: ""` so "the second one" starts the song and nothing is
+said over its opening; the exchange is still recorded (the result's
+`did`) so the next turn knows what is playing. Rejected: a stronger
+note asking the model for "one short sentence" — that was the note
+already there, and she kept talking. `search` keeps the model in the
+loop (it can phrase the framing in her language); only the pick is
+silent.
+
+**2026-09-26 — Each sentence is spoken in the voice of its own script.**
+`voice/language.py`'s `script_language` decides per sentence (Han →
+Chinese, Devanagari → Hindi, Bengali → Bengali, Latin → English, no
+letters → the turn's language); `cascade._speak` groups consecutive
+sentences by language and chains one synthesis stream per group, so an
+ordinary single-language reply is still one call. `split_into_sentences`
+now also splits on 。！？. Consequence: a Latin-script sentence in a
+Hindi or Bengali turn is read by the English voice, which is wrong for
+romanised Hindi and right for an English title; the title case is the
+one that was observed, the other is not, and the model is asked to reply
+in the language's own script anyway.
+
+**2026-09-26 — A search is two API calls: ten candidates, then
+`videos.list` for `status.embeddable`.** `videoEmbeddable=true` on
+`search.list` is a hint the API does not honour reliably. Private,
+unprocessed and age-restricted videos are dropped too (an age-restricted
+embed asks for a sign-in the kiosk can't give). If the status call fails
+the unchecked results are offered and the log says so, rather than no
+results at all. One extra quota unit per search.
+
+**2026-09-26 — A video the player could not play is re-offered without
+it, on the card, not swallowed.** The browser reports the error with the
+player's code; the server logs it; the controller puts the remaining
+results back on the card ("That one won't play here. Which instead?"),
+shown between turns so nothing speaks it — she sees the device noticed,
+and the model learns from the next tool call. The panel's own silent
+failures are gone too: the API script and the wrapper each have a
+deadline after which the play is reported as an error (codes `api`,
+`no_ready`) and the next play starts fresh, instead of every later play
+queueing behind a wrapper that never calls back.
+
+**2026-09-26 — The card that is up is re-sent on connect.** The server
+holds the question; the browser only draws it; a reload or a kiosk
+restart must not leave a pending question with nothing on screen to
+answer. Reverses "never on connect" (2026-09-25), which was symmetry
+with media messages, where a message about a screen that isn't there
+really has nothing to say.
+
+**2026-09-26 — YouTube titles are cleaned hard, and capped by display
+width.** Bracketed runs, symbols and emoji, "(Official Video)"-style
+boilerplate in English and Chinese, track listings ("01 …；02 …") and
+repeated segments go; a CJK character counts double toward the cap, so
+a Chinese title is about as long to say as an English one. 《》 marks
+are dropped but their words kept: they wrap the song's own name.
+
+**2026-09-26 — Chirp is the default preference; Piper stays the
+fallback.** `DEFAULT_PREFERRED_BACKEND_ID` (what a database with no
+`tts_backend` row means, in `cli.py` and the panel) is separate from
+`DEFAULT_BACKEND_ID` (what `cascade.py` uses when the preferred backend
+is unavailable). The user's call, 2026-09-26. `saathi voice
+google-chirp3-hd` (or `saathi voice chirp`) switches an existing
+database; `saathi voice` shows the effective value.
+
+**2026-09-26 — `cli.py` is split into `build_runtime()` and `_run()` so
+the wiring is tested.** Every tool registered, every permission granted,
+one set of controllers shared by the tools and the screen — asserted in
+`tests/test_cli.py` with the outside world faked at the seams cli.py
+imports it from.
+
+**2026-09-26 — The `[hidden]` attribute wins over every `display:` rule
+in `style.css`.** Found in the real stylesheet in a headless Chromium:
+`.media-results { display: flex }` beat the browser's own
+`[hidden] { display: none }`, so the results list and the player were
+both drawn at once in the no-cards path.

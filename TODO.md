@@ -44,14 +44,12 @@ rather than guesses:
 Next step: collect five or six real exchanges where it felt wrong,
 with what she said, before changing anything.
 
-**YouTube titles are read and shown raw.** Found in the live check
-2026-09-25: "old Chinese songs" returned titles like "推荐50多岁以上的人真正
-喜欢的歌曲 ♣ 50首70、80、90年代…" and a track listing with semicolons. She
-reads them in full, in the English voice, and they crowd the Choice card;
-the model also garbled a character when repeating one (林淑容 → 林深容).
-Titles need shortening and cleaning (strip emoji/symbols, track lists,
-"(Official Video)"-style suffixes; cap length; keep the artist) before
-they reach the card or the spoken note. `saathi/tools/media.py`.
+~~**YouTube titles are read and shown raw.**~~ Fixed 2026-09-26
+(`clean_title` in `saathi/tools/media.py`, per-sentence voice by script
+in `cascade.py`; see DECISIONS.md and `docs/completed/screen.md`,
+"Fixed later"). The model garbling a character when repeating a title
+(林淑容 → 林深容) remains a model artifact: the offer is still phrased by
+the model so it can be framed in her language.
 
 **Retrieval's relevance axis is live but weak.** ~~Every
 `episodes.embedding` is NULL~~ — resolved 2026-09-25 by PR #2: local
@@ -136,8 +134,9 @@ through tunnel/REST work and `RelayError` escapes untranslated; M6
 pending cards never expire, so a stale "Call Deepak?" can be answered
 by an unrelated later "yes"; M7 a mismatched voice answer is reported
 to the model as "no card" while the card is still up; M8 the save on a
-tapped "yes" runs SQLite on the screen loop and can fail silently; M9
-a tap landing between `show()` and registration is lost.
+tapped "yes" runs SQLite on the screen loop and can fail silently; M9 a tap landing between `show()` and registration is lost (fixed
+for the media card 2026-09-26: the id is the tool's before `show()`;
+calling's flows should do the same).
 
 ## Open decisions (waiting on the user)
 

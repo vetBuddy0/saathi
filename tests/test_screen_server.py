@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import tempfile
 import threading
 from pathlib import Path
@@ -304,7 +305,9 @@ async def test_settings_message_on_connect_lists_languages_and_backends():
     piper = next(b for b in settings["backends"] if b["id"] == "piper")
     assert piper["available"] is True
     assert piper["cost_per_million_chars_usd"] == 0.0
-    assert settings["current_backend"] == "piper"
+    # No preference stored: the panel shows the preferred default (Chirp),
+    # the same thing cli.py hands the session, not the offline fallback.
+    assert settings["current_backend"] == "google-chirp3-hd"
 
 
 async def test_set_preference_without_a_store_reports_failure_not_a_crash():
@@ -539,11 +542,12 @@ async def test_a_session_without_pop_last_turn_timings_logs_eou_only(monkeypatch
     assert rows[0]["eou_ms"] is not None
 
 
-async def test_a_superseded_barge_in_turn_is_not_logged():
+async def test_a_superseded_barge_in_turn_is_not_logged(monkeypatch):
     # The turn that got barged into never reaches core.handle(Event("done"))
     # (see _speak_and_finish) -- and _log_turn is called right there, so a
     # superseded turn correctly produces no row at all, not a row with
     # wrong or partial numbers.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)  # no real parec
     store = _tmp_store()
     say_blocked = threading.Event()
     say_may_return = threading.Event()
@@ -1005,9 +1009,12 @@ async def test_connecting_with_cards_and_hold_still_yields_exactly_state_then_se
             await _turn_collecting_cards(ws, session)
             assert cards.current is not None  # a card is up...
         async with client.ws_connect("/ws") as fresh:
-            # ...and a fresh connection still gets state, settings, nothing
-            # else -- no card on connect.
+            # ...and a fresh connection gets state, settings, then the card
+            # that is still up: the server holds the question, the browser
+            # only draws it, and a reload must not lose it (2026-09-26).
             assert (await _connect(fresh))["type"] == "state"
+            resent = await fresh.receive_json()
+            assert resent == {"type": "card", "card": cards.current.as_message()}
             await fresh.send_json({"type": "input", "event": "press"})
             assert await fresh.receive_json() == {"type": "state", "state": "listening"}
 
@@ -1248,3 +1255,232 @@ async def test_with_the_hold_handler_cleared_the_spacebar_is_a_spacebar_again(mo
             assert await ws.receive_json() == {"type": "state", "state": "listening"}
     assert core.state == State.LISTENING
     assert session.start_calls == 1
+
+
+# -- a tap answering a card ends the exchange (2026-09-26) -------------------
+#
+# Found in a real headless Chromium: the search turn showed the card while
+# THINKING and then read the three titles out; a tap mid-reading cleared
+# the card and started the video, and the reading carried on. Three
+# behaviours pinned here: a card stays until it is answered or dismissed
+# (a reload gets it back), an answer always lands whatever state the turn
+# is in, and answering ends the exchange.
+
+
+def _slow_cards_app(show_card=True, block_end_turn=False):
+    """A session whose reply is a card's spoken text, and whose say()
+    blocks until interrupt() (or a release event), so the tap can land
+    while SPEAKING; with block_end_turn, end_turn() blocks after showing
+    the card so the tap can land while THINKING."""
+    from saathi.screen.cards import CardController, confirm
+
+    cards = CardController()
+    say_started = threading.Event()
+    say_release = threading.Event()
+    reply_release = threading.Event()
+
+    class SlowCardSession(FakeSession):
+        shown: list[str] = []
+
+        def end_turn(self) -> str:
+            if not show_card:
+                return "an ordinary reply"
+            card = confirm("Call Priya, your daughter?")
+            SlowCardSession.shown.append(cards.show(card))
+            if block_end_turn:
+                reply_release.wait(timeout=2.0)
+            return card.spoken
+
+        def say(self, text: str) -> None:
+            self.spoken.append(text)
+            say_started.set()
+            say_release.wait(timeout=2.0)
+            say_started.clear()
+
+        def interrupt(self) -> None:
+            super().interrupt()
+            say_release.set()
+
+    session = SlowCardSession()
+    SlowCardSession.shown = []
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source", cards=cards)
+    return app, session, cards, core, say_started, say_release, reply_release
+
+
+async def _start_turn(ws) -> None:
+    await ws.send_json({"type": "input", "event": "press"})
+    assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    await ws.send_json({"type": "input", "event": "release"})
+    assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+
+
+async def test_a_tap_while_the_options_are_being_read_stops_the_reading_and_ends_the_turn(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, core, say_started, _, _ = _slow_cards_app()
+    answers = []
+    cards.on_answer(answers.append)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _start_turn(ws)
+            card = await ws.receive_json()
+            assert card["type"] == "card"
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            loop = asyncio.get_running_loop()
+            assert await loop.run_in_executor(None, say_started.wait, 2.0)
+
+            await ws.send_json(
+                {"type": "card_answer", "id": card["card"]["id"], "answer": {"yes": True}}
+            )
+            assert await ws.receive_json() == {"type": "card", "card": None}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.interrupt_calls == 1  # the reading was cut short...
+    assert [(a.yes, a.source) for a in answers] == [(True, "tap")]  # ...and the answer landed
+    assert cards.current is None
+    assert core.state == State.IDLE
+
+
+async def test_a_tap_before_the_reply_is_spoken_ends_the_turn_with_nothing_said(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, cards, core, _, say_release, reply_release = _slow_cards_app(
+        block_end_turn=True
+    )
+    answers = []
+    cards.on_answer(answers.append)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _start_turn(ws)
+            card = await ws.receive_json()
+            assert card["type"] == "card"
+            assert core.state == State.THINKING  # the model is still composing the question
+
+            await ws.send_json(
+                {"type": "card_answer", "id": card["card"]["id"], "answer": {"yes": False}}
+            )
+            assert await ws.receive_json() == {"type": "card", "card": None}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+            reply_release.set()  # the model's reply arrives late...
+            say_release.set()
+            await asyncio.sleep(0.2)
+            # ...and is never spoken: the turn was over when she answered.
+            assert session.spoken == []
+            assert core.state == State.IDLE
+            # The spacebar is a spacebar again.
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+    assert [(a.yes, a.source) for a in answers] == [(False, "tap")]
+
+
+async def test_a_tap_on_a_card_from_an_earlier_turn_does_not_end_the_live_one(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    from saathi.screen.cards import confirm
+
+    app, session, cards, core, say_started, say_release, _ = _slow_cards_app(show_card=False)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            # A card shown between turns (initiative, a call's own loop).
+            loop = asyncio.get_running_loop()
+            card = confirm("Take your tablets?")
+            await loop.run_in_executor(None, cards.show, card)
+            assert (await ws.receive_json())["card"]["id"] == card.id
+            # An unrelated turn is now speaking.
+            await _start_turn(ws)
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await loop.run_in_executor(None, say_started.wait, 2.0)
+
+            await ws.send_json({"type": "card_answer", "id": card.id, "answer": {"yes": True}})
+            assert await ws.receive_json() == {"type": "card", "card": None}
+            assert core.state == State.SPEAKING  # her answer is not about this reply
+            say_release.set()
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.interrupt_calls == 0
+
+
+async def test_a_tap_on_the_media_card_lands_and_plays_whatever_state_the_turn_is_in(
+    monkeypatch,
+):
+    # "An answer always lands": the search turn is still THINKING (the
+    # model composing the offer) when she taps the second one.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    from saathi.screen.cards import CardController
+    from saathi.tools.media import MediaController, make_media_tool
+    from saathi.tools.registry import Registry
+
+    found = _media_fixture_results()
+    cards = CardController()
+    controller = MediaController(search=lambda _q: found, cards=cards)
+    registry = Registry()
+    registry.register(make_media_tool(controller))
+    reply_release = threading.Event()
+
+    class SlowToolSession(ToolSession):
+        def end_turn(self) -> str:
+            reply = super().end_turn()
+            reply_release.wait(timeout=2.0)
+            return reply
+
+    session = SlowToolSession(
+        lambda name, args: registry.call(name, frozenset({"music"}), **args)
+    )
+    app = build_app(
+        Core(), session=session, capture_source_id="fake", media=controller, cards=cards
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            session.queue(action="search", query="old Chinese songs")
+            await _start_turn(ws)
+            card = (await ws.receive_json())["card"]
+            await ws.send_json({"type": "card_answer", "id": card["id"], "answer": {"choice": 2}})
+            assert await ws.receive_json() == {"type": "card", "card": None}
+            play = await ws.receive_json()
+            assert play["type"] == "media" and play["action"] == "play"
+            assert play["video_id"] == found[1].video_id
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+            reply_release.set()
+            await asyncio.sleep(0.2)
+            assert session.spoken == []  # the offer is never read: she already chose
+    assert controller.now_playing == found[1]
+
+
+async def test_a_stale_tap_is_dropped_and_said_in_the_log(monkeypatch, caplog):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    caplog.set_level(logging.INFO, logger="saathi.screen.server")
+    app, session, cards, _, _ = _cards_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            seen = await _turn_collecting_cards(ws, session)
+            card_id = seen[0]["card"]["id"]
+            await ws.send_json({"type": "card_answer", "id": "gone", "answer": {"yes": True}})
+            await ws.send_json({"type": "card_answer", "id": card_id, "answer": {"yes": True}})
+            assert await ws.receive_json() == {"type": "card", "card": None}
+    assert "gone" in caplog.text and "not the current card" in caplog.text
+
+
+async def test_a_player_error_is_logged_with_its_code_and_reaches_the_controller(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_collecting_media(ws, session, action="search", query="q")
+            await _turn_collecting_media(ws, session, action="play", choice=1)
+            await ws.send_json(
+                {
+                    "type": "media_event",
+                    "event": "error",
+                    "video_id": found[0].video_id,
+                    "code": 150,
+                }
+            )
+            await asyncio.sleep(0.1)
+    assert found[0].video_id in controller.unplayable
+    assert found[0].video_id in caplog.text and "code 150" in caplog.text
