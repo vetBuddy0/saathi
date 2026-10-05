@@ -437,10 +437,16 @@ class CascadeSession:
             available, _reason = backend.available()
             if available:
                 return backend
-        # Preferred backend missing, unknown, or unavailable right now:
-        # fall back to Piper, which is always available (see
-        # PiperBackend.available()) rather than raising and losing the
-        # turn's reply entirely.
+        # Preferred backend missing, unknown, or unavailable right now.
+        # A Google voice that just failed (Chirp's streaming path drops
+        # out for seconds at a time on this network -- live, 2026-09-25)
+        # falls back to Google's Neural2 first: still a warm voice, on the
+        # non-streaming API, so one blip doesn't turn her flat. Piper is
+        # the last resort, always available (see PiperBackend.available()).
+        if preferred_id.startswith("google-"):
+            neural2 = self._backends.get("google-neural2")
+            if neural2 is not None and neural2 is not backend and neural2.available()[0]:
+                return neural2
         return self._backends[DEFAULT_BACKEND_ID]
 
     def _preload_voice_in_background(self, language: str) -> None:

@@ -269,6 +269,16 @@ def test_no_match_with_saved_contacts_asks_from_them_and_never_dials(tmp_path):
     assert client.created == [] and cards.current.kind == "confirm"
 
 
+def test_no_match_offers_the_closest_sounding_contacts_not_the_first_saved(tmp_path):
+    # Live 2026-10-05: the fallback card was the first three saved, so a
+    # fourth contact could never be picked from it.
+    D = "+65" + "9444" + "1111"
+    call, _, cards, client = _stage3(tmp_path, ("Priya", A), ("Ravi", B), ("Meena", C), ("Suresh", D))
+    result = call.handler(contact="Naresh")
+    assert result["status"] == "unsure" and client.created == []
+    assert cards.current.options[0].label == "Suresh"
+
+
 def test_no_match_and_nothing_saved_says_so_and_never_dials(tmp_path):
     call, _, cards, client = _stage3(tmp_path)
     result = call.handler(contact="Suresh")

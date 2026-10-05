@@ -1310,3 +1310,16 @@ the official embed. YouTube no longer serves any combined audio+video
 file (checked with a JS runtime too), so the page plays a muted
 <video> and an <audio> in step, audio as the clock. New dependencies:
 yt-dlp (Unlicense), deno (MIT, the JS runtime yt-dlp needs).
+
+**2026-10-05 — Contact names are matched across scripts; the no-match
+card ranks by sound.** Live: "call Udhi" in a Hindi turn came back from
+the transcriber in Devanagari, scored 0 against the Latin "Udhi", and
+fell through to a card of the first three saved contacts -- so the
+fourth could never be picked. `call/match.py` now transliterates
+Devanagari and Bengali (one ISCII-shaped table for both blocks, schwa
+dropped word-finally) before folding; the fallback card sorts saved
+contacts by similarity, saved order on ties. No threshold changed; the
+corpus gained six cross-script pairs. Lost: `unidecode` (a dependency
+for one table) and telling the model to pass names in Latin (a prompt
+can't guarantee it). `call_contact` now logs the name it was asked for
+-- her words, never a number -- so a mis-dial can be debugged.

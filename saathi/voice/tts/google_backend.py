@@ -102,7 +102,8 @@ _REGION_ENDPOINT = "asia-southeast1-texttospeech.googleapis.com"
 # connection (a Pi on Wi-Fi) blocks a sentence -- and with it the turn
 # -- indefinitely. A sentence that hasn't rendered in this long is not
 # going to; ten seconds is generous against a measured ~0.5-1.7 s.
-_REQUEST_TIMEOUT_S = 10.0
+# Was 10 s: a stalled sentence must fail fast enough to fall back mid-reply.
+_REQUEST_TIMEOUT_S = 6.0
 
 # After a synthesis failure, `available()` reports this backend
 # unavailable for this long, so `cascade._current_backend()` routes the
@@ -110,7 +111,8 @@ _REQUEST_TIMEOUT_S = 10.0
 # retrying a dead network every turn. `available()` only stats the
 # credentials file; it cannot see a revoked key, exhausted quota or a
 # Wi-Fi drop -- a real failure is the only signal there is.
-_FAILURE_COOLDOWN_S = 60.0
+# Was 60 s: one blip cost a full minute of the flat voice (live, 2026-09-25).
+_FAILURE_COOLDOWN_S = 15.0
 
 # Every Google voice used here is published at 24 kHz; asking for
 # anything else makes the API resample. Requested explicitly on both

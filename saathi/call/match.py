@@ -56,9 +56,81 @@ _TONE_RE = re.compile(r"[1-5]")
 _SPLIT_RE = re.compile(r"[\s\-_.']+")
 
 
+# Devanagari and Bengali, by offset into their Unicode block -- the two
+# blocks share one ISCII-derived layout, so one table serves both. A
+# Hindi-speaking turn comes back from the transcriber in Devanagari
+# ("उधी") while the contact was saved in Latin ("Udhi"), and a
+# letter-by-letter score across scripts is 0: found live 2026-10-05,
+# "call Udhi" fell through to the first three saved contacts. Lost: the
+# `unidecode` package -- a dependency for one table -- and a matching
+# step in the model ("pass names in Latin"), which a prompt can't
+# guarantee and the router's direct path never sees anyway.
+_INDIC_BLOCKS = (0x0900, 0x0980)
+_INDIC_LETTERS = {
+    0x05: "a", 0x06: "aa", 0x07: "i", 0x08: "ii", 0x09: "u", 0x0A: "uu", 0x0B: "ri",
+    0x0D: "e", 0x0F: "e", 0x10: "ai", 0x11: "o", 0x13: "o", 0x14: "au",
+    0x15: "k", 0x16: "kh", 0x17: "g", 0x18: "gh", 0x19: "n",
+    0x1A: "ch", 0x1B: "chh", 0x1C: "j", 0x1D: "jh", 0x1E: "n",
+    0x1F: "t", 0x20: "th", 0x21: "d", 0x22: "dh", 0x23: "n",
+    0x24: "t", 0x25: "th", 0x26: "d", 0x27: "dh", 0x28: "n",
+    0x2A: "p", 0x2B: "ph", 0x2C: "b", 0x2D: "bh", 0x2E: "m",
+    0x2F: "y", 0x30: "r", 0x32: "l", 0x33: "l", 0x35: "v",
+    0x36: "sh", 0x37: "sh", 0x38: "s", 0x39: "h",
+    0x5C: "r", 0x5D: "rh", 0x5F: "y",  # Bengali ড়, ঢ়, য়
+}
+_INDIC_CONSONANTS = frozenset(range(0x15, 0x3A)) | {0x5C, 0x5D, 0x5F}
+_INDIC_MATRAS = {
+    0x3E: "aa", 0x3F: "i", 0x40: "ii", 0x41: "u", 0x42: "uu", 0x43: "ri",
+    0x45: "e", 0x47: "e", 0x48: "ai", 0x49: "o", 0x4B: "o", 0x4C: "au",
+}
+_INDIC_SIGNS = {0x01: "n", 0x02: "n", 0x03: "h"}  # chandrabindu, anusvara, visarga
+_VIRAMA, _NUKTA = 0x4D, 0x3C
+
+
+def _indic_offset(ch: str) -> int | None:
+    cp = ord(ch)
+    for base in _INDIC_BLOCKS:
+        if base <= cp < base + 0x80:
+            return cp - base
+    return None
+
+
+def transliterate(text: str) -> str:
+    """Devanagari/Bengali to rough Latin; anything else passes through.
+    Each consonant carries an inherent "a" that a vowel sign or virama
+    replaces, dropped at the end of a word (Hindi schwa deletion: राम
+    is "Ram", not "Rama"). Rough is enough -- `fold()` and Jaro-Winkler
+    absorb aa/a, v/b and the rest."""
+    out: list[str] = []
+    inherent = False  # out[-1] is a consonant's unspoken "a"
+    for ch in text:
+        offset = _indic_offset(ch)
+        if offset is None:
+            if inherent:
+                out.pop()
+            out.append(ch)
+            inherent = False
+        elif offset in _INDIC_MATRAS or offset == _VIRAMA:
+            if inherent:
+                out.pop()
+            out.append(_INDIC_MATRAS.get(offset, ""))
+            inherent = False
+        elif offset == _NUKTA:
+            continue
+        elif offset in _INDIC_CONSONANTS:
+            out.extend((_INDIC_LETTERS[offset], "a"))
+            inherent = True
+        else:
+            out.append(_INDIC_LETTERS.get(offset) or _INDIC_SIGNS.get(offset, ""))
+            inherent = False
+    if inherent:
+        out.pop()
+    return "".join(out)
+
+
 def normalise(name: str) -> list[str]:
-    """Lowercased, accent- and tone-free tokens."""
-    folded = unicodedata.normalize("NFKD", name)
+    """Lowercased, accent- and tone-free Latin tokens."""
+    folded = unicodedata.normalize("NFKD", transliterate(name))
     folded = "".join(c for c in folded if not unicodedata.combining(c))
     folded = _TONE_RE.sub("", folded.lower())
     return [t for t in _SPLIT_RE.split(folded) if t]

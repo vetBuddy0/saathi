@@ -45,6 +45,7 @@ reading them to her is the point.
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any, Protocol
@@ -53,11 +54,14 @@ from saathi.call import contacts
 from saathi.call.cards import CardController
 from saathi.call.choosing import ChoiceFlow
 from saathi.call.match import match as match_name
+from saathi.call.match import similarity
 from saathi.call.controller import CallController
 from saathi.call.saving import SaveFlow
 from saathi.call.relay import RelayError
 from saathi.call.twilio import TwilioError
 from saathi.tools.registry import Tool
+
+logger = logging.getLogger(__name__)
 
 CALL_CONTACT_DESCRIPTION = (
     "Place a phone call for her, when she asks to call someone (e.g. 'call my "
@@ -140,6 +144,8 @@ def make_call_tool(
 
     def _call_contact(contact: str) -> dict[str, Any]:
         contact = (contact or "").strip()
+        # Her words, never a number: what a mis-dial is debugged from.
+        logger.info("call_contact asked for %r", contact)
         if _TEST_NUMBER_RE.search(contact):
             if controller.active:
                 return _dial(controller, "", "the test number")
@@ -184,7 +190,14 @@ def make_call_tool(
         # name Whisper spelled oddly, is far likelier than a stranger. Up to
         # three on a card (one -> "Did you mean …?"); still never dials
         # without her answer. The user asked for this live, 2026-09-25.
-        saved = contacts.list_contacts(store_path)
+        # Closest-sounding first, not first-saved: a fourth contact was
+        # otherwise never on the card (live, 2026-10-05). Ties keep
+        # saved order.
+        saved = sorted(
+            contacts.list_contacts(store_path),
+            key=lambda c: similarity(contact, c.name),
+            reverse=True,
+        )
         if saved and choices is not None:
             return choices.offer(contact, saved[:3])
         return {

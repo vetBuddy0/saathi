@@ -11,6 +11,7 @@ from saathi.call.match import (
     match,
     normalise,
     similarity,
+    transliterate,
 )
 
 SAME_PERSON = [
@@ -38,6 +39,14 @@ SAME_PERSON = [
     ("Philip", "Filip"),
     ("Priya", "Priya Sharma"),
     ("Ravi", "Rabi"),
+    # The transcriber writes a Hindi or Bengali turn in its own script;
+    # contacts are saved in Latin (live, 2026-10-05: "call Udhi").
+    ("उधी", "Udhi"),
+    ("उद्धि", "Udhi"),
+    ("वासुदेव", "Basudeb"),
+    ("বাসুদেব", "Basudeb"),
+    ("अक्षत", "Akshat"),
+    ("प्रिया", "Priya"),
 ]
 
 DIFFERENT_PEOPLE = [
@@ -137,3 +146,16 @@ def test_no_plausible_name_is_none():
     result = match("Suresh", ["Priya", "Basudeb"])
     assert result.band == "none" and result.best is None
     assert match("Priya", []).band == "none"
+
+
+def test_transliteration():
+    assert transliterate("उधी") == "udhii"
+    assert transliterate("किशन") == "kishan"  # a word-final inherent "a" is dropped
+    assert transliterate("अक्षत") == "akshat"  # a virama drops it mid-word
+    assert transliterate("বাসুদেব") == "baasudeb"
+    assert transliterate("Zhāng Wei") == "Zhāng Wei"
+    assert transliterate("उधी Sharma") == "udhii Sharma"
+
+
+def test_a_devanagari_request_finds_the_latin_contact():
+    assert match("उधी", ["Basudeb", "Utsav", "Akshat", "Udhi"]).best == "Udhi"
