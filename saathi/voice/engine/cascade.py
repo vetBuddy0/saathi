@@ -179,7 +179,7 @@ NAME_PROMPTS: dict[str, tuple[str, ...]] = {
 # Only while something plays -- a prompt nudges every transcript toward
 # its words, and "stop" is not what she usually means.
 MEDIA_STT_PROMPT = (
-    "Saathi, stop. Saathi, pause. Resume. Volume up. Volume down. "
+    "Kaki, stop. Kaki, pause. Resume. Volume up. Volume down. "
     "Louder. Softer. Next song."
 )
 

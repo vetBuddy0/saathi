@@ -6,7 +6,8 @@ entry point, for consistency — both are how a person on this machine
 checks the device, not library code anything else here imports.
 `saathi voice` reads or writes the one preference a person is most
 likely to want from a shell (which backend she speaks with), against the
-same database `saathi run` reads.
+same database `saathi run` reads. `saathi meds` is the staff's view of
+the medication records (saathi/medication/cli.py).
 
 `run` is split so the wiring can be tested (2026-09-26): `build_runtime()`
 constructs everything -- the store, the card/hold/media controllers, the
@@ -58,7 +59,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs="?",
         help="a backend id (google-chirp3-hd, piper, ...) or 'chirp'/'piper'; omit to show",
     )
+    from saathi.medication import cli as meds_cli
+
+    meds_cli.add_parser(subparsers)
+    test_resident = subparsers.add_parser(
+        "test-resident",
+        help="set this device up for the test resident, Lee Kim Tan (bed 6)",
+    )
+    test_resident.add_argument("--by", required=True, help="who is setting it up")
     args = parser.parse_args(argv)
+
+    if args.command == "meds":
+        from saathi.config import Config
+
+        return meds_cli.run(args, Config.load().data_dir)
+
+    if args.command == "test-resident":
+        return _test_resident(args.by)
 
     if args.command == "smoke":
         from saathi.smoke import cli as smoke_cli
@@ -79,6 +96,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run()
 
     return 1
+
+
+def _test_resident(by: str) -> int:
+    """The mock ward (with Lee Kim Tan in it), his companion profile and
+    his son's number on this device's identity file, and this device
+    assigned to his bed. Safe to run again."""
+    from saathi.config import Config
+    from saathi.identity.test_profile import BED, NAME, SON_NAME, SON_PHONE, apply_test_profile
+    from saathi.medication.cli import MOCK_NAME, open_store
+    from saathi.medication.emar import MockEMARAdapter
+    from saathi.medication.seed import RESIDENTS, seed
+
+    config = Config.load()
+    doses = seed(MockEMARAdapter(config.data_dir / MOCK_NAME))
+    resident = next(r for r in RESIDENTS if r.bed == BED)
+    applied = apply_test_profile(config.identity_db_path)
+    store = open_store(config.data_dir)
+    if store.assigned_resident() != resident.id:
+        store.assign(resident.id, by=by)
+    store.audit(by, "test_resident_set_up", resident.id, rules_written=applied.rules_written,
+                son_saved=applied.son_saved)
+    print(f"Mock eMAR: {len(RESIDENTS)} residents, {doses} daily doses.")
+    if applied.rules_written:
+        print(f"Profile: {applied.rules_written} things Kaki now knows about {NAME}.")
+    else:
+        print(f"Profile: already there for {NAME}; nothing rewritten.")
+    saved = "saved" if applied.son_saved else "already saved"
+    print(f"Son: {SON_NAME}, {SON_PHONE} ({saved})")
+    print(f"This device is for bed {BED}, {NAME}.")
+    return 0
 
 
 # The tools `saathi run` offers the model and the permission each one
@@ -543,7 +590,7 @@ def _wake_listener(runtime: Runtime):
 
     source_id = runtime.capture_source_id
     media = runtime.media
-    print('Wake word on: say "Saathi" to start talking (heard on this device only).')
+    print('Wake word on: say "Kaki" to start talking (heard on this device only).')
 
     def playing() -> bool:
         return bool(media is not None and media.playing)
@@ -565,7 +612,7 @@ def _wake_listener(runtime: Runtime):
     )
 
 
-WAKE_MEDIA_PROMPT = "Saathi, stop. Saathi, pause. Saathi, louder. Saathi, softer. Saathi, next."
+WAKE_MEDIA_PROMPT = "Kaki, stop. Kaki, pause. Kaki, louder. Kaki, softer. Kaki, next."
 # Seconds she has to start a follow-up after a reply before the
 # conversation closes (screen/server.py). 0 or "off" turns it off.
 DEFAULT_FOLLOW_UP_SECONDS = 7.0
@@ -590,7 +637,8 @@ def open_after_reply() -> bool:
     """SAATHI_OPEN_CONVERSATION=on keeps the mic open after every reply
     (a follow-up without her name). Off by default: a video or TV in the
     room was answered turn after turn (DECISIONS 2026-10-08)."""
-    return os.environ.get("SAATHI_OPEN_CONVERSATION", "").strip().lower() in ("on", "yes", "true", "1")
+    value = os.environ.get("SAATHI_OPEN_CONVERSATION", "").strip().lower()
+    return value in ("on", "yes", "true", "1")
 
 
 def _route_default_sink(runtime: Runtime):

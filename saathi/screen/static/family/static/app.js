@@ -53,7 +53,7 @@ function show(name) {
 function home(status = "") {
   stopCall();
   if (!creds) return show(pairToken ? "pair" : "unpaired");
-  $("home-title").textContent = `Saathi — ${herName()}`;
+  $("home-title").textContent = `Kaki — ${herName()}`;
   $("call-her").textContent = `Call ${herName()}`;
   $("call-her").hidden = !ws || ws.readyState !== WebSocket.OPEN || !canCall;
   $("home-status").textContent = status;
@@ -78,7 +78,7 @@ $("pair-form").addEventListener("submit", async (event) => {
   }).catch(() => null);
   const data = response ? await response.json().catch(() => null) : null;
   if (!data || !data.ok) {
-    $("pair-error").textContent = (data && data.error) || "Couldn't reach Saathi. Try again.";
+    $("pair-error").textContent = (data && data.error) || "Couldn't reach Kaki. Try again.";
     $("pair-error").hidden = false;
     return;
   }
@@ -251,7 +251,7 @@ $("call-her").addEventListener("click", async () => {
   try {
     await getMic();
   } catch (err) {
-    return home("Saathi needs the microphone to call. Allow it in your browser settings.");
+    return home("Kaki needs the microphone to call. Allow it in your browser settings.");
   }
   sendWs({ type: "call" });
   inCall(`Ringing ${herName()}…`);
@@ -261,7 +261,7 @@ $("answer").addEventListener("click", async () => {
   try {
     await getMic();
   } catch (err) {
-    return home("Saathi needs the microphone to answer. Allow it in your browser settings.");
+    return home("Kaki needs the microphone to answer. Allow it in your browser settings.");
   }
   sendWs({ type: "accept", call_id: callId });
   inCall("Connecting…");
@@ -284,7 +284,7 @@ async function startPeer(m) {
     await getMic();
   } catch (err) {
     sendWs({ type: "end", call_id: callId });
-    return home("Saathi needs the microphone. Allow it in your browser settings.");
+    return home("Kaki needs the microphone. Allow it in your browser settings.");
   }
   pc = new RTCPeerConnection({ iceServers: m.ice_servers || [] });
   mic.getTracks().forEach((t) => pc.addTrack(t, mic));

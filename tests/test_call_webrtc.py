@@ -133,7 +133,7 @@ def test_dial_rings_the_phone_by_push_with_the_current_url_and_a_call_token(worl
     assert calls.phase is Phase.RINGING_OUT
     (sub, payload), = world["push"].sent
     assert sub == SUB
-    assert payload["kind"] == "ring" and payload["title"] == "Saathi — Mum"
+    assert payload["kind"] == "ring" and payload["title"] == "Kaki — Mum"
     assert payload["url"].startswith("https://saathi.example.test/family/#call=")
     assert f"call={calls.call_id}" in payload["url"] and "&t=" in payload["url"]
     view = world["panel"].message()["call"]

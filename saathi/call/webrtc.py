@@ -715,7 +715,7 @@ class FamilyCalls:
 def _her_name(member: Member) -> str:
     """What the family member calls her ("Mum"), from their pairing; a
     neutral fallback otherwise."""
-    return getattr(member, "calls_her", None) or "Saathi"
+    return getattr(member, "calls_her", None) or "Kaki"
 
 
 def _unreachable(name: str) -> dict[str, Any]:

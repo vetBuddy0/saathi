@@ -1,7 +1,7 @@
 {
-  "name": "Saathi",
-  "short_name": "Saathi",
-  "description": "Calls with her Saathi, free over the internet.",
+  "name": "Kaki",
+  "short_name": "Kaki",
+  "description": "Calls with her Kaki, free over the internet.",
   "start_url": "/family/",
   "scope": "/family/",
   "display": "standalone",

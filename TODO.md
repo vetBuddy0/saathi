@@ -189,6 +189,21 @@ calling's flows should do the same).
 - **SPEC.md Memory-section diff** (three layers, silent turns, real
   prompt-token count) — proposed 2026-09-24, not applied. The user
   applies spec edits.
+- **SPEC.md care-home section** (medication module, 2026-10-08). SPEC
+  is "an elderly person living alone"; the module adds a care home with
+  nurses, one device per resident, four medication languages, and the
+  rule that Saathi never reminds a resident to take medication (the
+  reminder lane's "time for your tablets" must not fire there). Also:
+  Phase 4 sends what residents say in ordinary chats to staff, against
+  "nothing leaves the device until she asks for it" -- needs a consent
+  decision. Not applied; the user applies spec edits.
+- **SPEC.md still says "Saathi"** -- renamed to Kaki 2026-10-08
+  (DECISIONS.md); the user applies spec edits.
+- **Native review of the seeded purpose sentences** (Cantonese, Hokkien,
+  Tamil in `saathi/medication/seed.py`) before anyone hears them.
+- **Hokkien has no cloud voice or transcriber we know of** (Cantonese is
+  `yue`, Tamil `ta-IN`, Singlish is English). Blocks Phase 3 and 5 for
+  Hokkien residents unless the owner picks a vendor or recorded audio.
 - ~~**Where a correction is recorded**~~ — decided: a high-importance
   `episodes` row, no new table (PR #2).
 

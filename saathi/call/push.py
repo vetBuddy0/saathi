@@ -186,7 +186,7 @@ def ring_payload(call_id: str, caller: str, url: str) -> dict[str, Any]:
     return {
         "kind": "ring",
         "call_id": call_id,
-        "title": f"Saathi — {caller}",
+        "title": f"Kaki — {caller}",
         "body": f"{caller} is calling you",
         "url": url,
     }
@@ -198,7 +198,7 @@ def cancel_payload(call_id: str, caller: str, missed: bool) -> dict[str, Any]:
     return {
         "kind": "missed" if missed else "cancel",
         "call_id": call_id,
-        "title": f"Saathi — {caller}",
+        "title": f"Kaki — {caller}",
         "body": f"Missed call from {caller}" if missed else "",
     }
 

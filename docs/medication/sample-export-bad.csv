@@ -1,0 +1,6 @@
+resident_id,bed,name,preferred_language,fallback_language,dose_id,medication,dose,date,window_start,window_end,purpose_singlish,purpose_cantonese,purpose_hokkien,purpose_tamil
+a1,3,Siti Aminah,tamil,singlish,a1-1,Amlodipine,5 mg,,08:00,09:00,This one is for your blood pressure.,,,
+a1,3,Siti Aminah,french,singlish,a1-2,Paracetamol,1 g,,13:30,14:30,This one is for pain.,,,
+b2,4,Chan Ah Mui,cantonese,singlish,b2-1,Metformin,500 mg,,09:00,08:00,For blood sugar.,,,
+b2,4,Chan Ah Mui,cantonese,singlish,b2-2,Paracetamol,1 g,,13:30,14:30,Take 2 tablets when you have pain.,,,
+b2,4,Chan Ah Mui,cantonese,singlish,b2-3,Omeprazole,20 mg,,08:00,09:00,,唔使食都得。,,

@@ -1727,3 +1727,81 @@ nods every 3-7 s and half as deep, speaking bob ~half amplitude and
 slower, perk hop 10 (was 18) over 800 ms. Lost: removing flourishes and
 visitors outright -- rarer keeps it alive without busy. Not checked in a
 browser test here: no Chromium on this laptop, the JS tests skip.
+
+**2026-10-08 — Medication module, Phase 1: eMAR seam and records.**
+Owner's MVP brief: nurses give every dose, residents never
+self-medicate, eMAR vendor unknown. One device per resident (owner).
+Medication languages are Singlish (everyone's fallback), Cantonese,
+Hokkien and Tamil (owner). New package `saathi/medication/`, its own
+SQLite (`medication.sqlite3`; the mock eMAR in `mock_emar.sqlite3`) --
+not the identity store, so `IdentityStore` is untouched. Lost: tables in
+`identity/store.py`, which would put a ward's clinical data in one
+resident's identity file. Choices:
+- `EMARAdapter` is the owner's three calls plus `list_residents()`:
+  the overdue check must walk every resident, and the three can't name
+  them.
+- `purpose` is a sentence per language, not one `purpose_plain_text`
+  that a model translates (an inexact translation is an invented
+  medical claim). Missing in both her languages -> the nurse explains.
+- Two locks on the eMAR: every adapter's `record_event` refuses an
+  event that isn't CONFIRMED with a nurse named, and `writer.py` is the
+  only caller (a test greps the package). The eMAR is written before the
+  local event is marked confirmed, so a failed write leaves it PENDING.
+- The audit table and resolved events can't be updated or deleted
+  (SQLite triggers), not just "aren't".
+- `CSVImportAdapter` can't write into a vendor system: confirmed events
+  go to `emar_outbox.csv` for staff to enter. An import with any bad row
+  is refused whole, with line numbers; a purpose sentence that states a
+  dose or an instruction is a bad row (`guard.py`).
+- An accepted import makes the CSV live; otherwise the mock;
+  `SAATHI_EMAR=mock|csv` forces one.
+- Device assignment is append-only, latest wins (`saathi meds assign`).
+
+**2026-10-08 — Test resident Lee Kim Tan (bed 6).** Owner asked for a
+complete test profile with his son on +6589614304 -- already saved as
+"Udhi" (the paired family member, "Udhi (son)") but with no relation, so
+"call my son" couldn't find him; now saved with relation "son".
+`saathi test-resident --by <who>` seeds the mock ward (Lee is the 11th
+resident: ten daily doses, adding Allopurinol and Tamsulosin to the
+seed), writes twelve profile rules to this device's identity file, each
+sourced to one admission episode, and assigns the device to bed 6.
+Idempotent. Preferred language Hokkien (fallback Singlish): realistic
+for the name, and it exercises the fallback while Hokkien has no voice.
+No medicine, dose or condition is in the identity file; one rule says
+the nurses give his medicines and the nurse explains. Found on the way:
+guard.py read "Teresa Teng" as "ten g" -- number words now need a space
+before a unit.
+
+**2026-10-08 — Renamed to Kaki (what she hears, says and sees).**
+Owner's call. Changed: the wake word (`audio/wake.py`), the name the
+router and the name-stripping take off a command, the tiny.en prompt
+and the media-command prompts, the persona's first sentence ("Your name
+is Kaki." -- the model had never been told a name, so "what's your
+name?" got an invented one), the memory wording ("Kaki replied",
+"She corrected Kaki"), the screen's title, settings and captions, the
+family app, push titles, CLI messages. Not changed: the package, the
+`saathi` command, `SAATHI_*` variables, `~/.saathi`, the repo -- code
+names nobody hears; renaming them breaks every script and env for
+nothing she notices. Measured before choosing the matcher: tiny.en with
+prompt "Kaki" spelled it exactly "kaki" in 102/126 synthetic clips
+(Google Neural2/WaveNet en-IN/GB/US/AU at 1.0x and 1.15x, Piper amy);
+the misses were the name dropped before "what time is it?", which the
+0.55 s early check heard in 14/14. "Kaki" is everyday Singlish, so a
+name right after "my", "kopi", "mahjong" etc. is not a call, and the
+similarity line rose 0.82 -> 0.88 ("kai" 0.86 out; "khaki" 0.89 in).
+Cloud respellings for a name-only turn ("cocky", "kacky"...) are
+guesses until the logs show real ones. The wake tests' Saathi-specific
+misspellings (Sothai, Sati, Saudi) were replaced with Kaki ones -- the
+behaviour they pin is unchanged. SPEC.md still says Saathi (TODO.md).
+
+**2026-10-08 — The eyes' glow, ~12x cheaper per frame.** Owner: low
+frame rate when the eyes move. Measured in headless Firefox at this
+laptop's 3840x2230/dpr 2 (software raster, so absolute numbers are
+high; the ratio is the point): 101-139 ms a frame, nearly all of it the
+full-resolution `shadowBlur`. Now 8-12 ms: the glow is blurred on a
+quarter-size canvas behind the face, stretched by CSS (the compositor
+scales it), with only the shadow drawn there (an offset trick, so no
+blocky low-res copy of the eye shows at its rim); the eyes are drawn
+straight onto the face canvas, no offscreen copy; and the redraw box is
+the pair's rectangle, not a square of its width. Pixel output compared
+old vs new: the same eyes and glow. No browser test here (no Chromium).

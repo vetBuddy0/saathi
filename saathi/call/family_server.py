@@ -390,7 +390,7 @@ def install_local_routes(
             "expires_in": int(PAIRING_TTL_SECONDS),
             "stable": stable,
             "note": "" if stable else (
-                "This address changes when Saathi restarts. A phone paired now can "
+                "This address changes when Kaki restarts. A phone paired now can "
                 "answer calls, but will need pairing again after a restart to start "
                 "calls. Set SAATHI_PUBLIC_URL for a permanent address."
             ),

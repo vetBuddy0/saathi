@@ -46,7 +46,7 @@ def test_media_commands_route_when_results_are_on_offer(heard, expected):
         ("call my daughter", "my daughter"),
         ("Please ring Priya.", "priya"),
         ("Phone the test number", "the test number"),
-        ("Saathi, can you call Deepak please", "deepak"),
+        ("Kaki, can you call Deepak please", "deepak"),
     ],
 )
 def test_calling_routes_with_the_contact_as_she_said_it(heard, contact):
@@ -94,7 +94,7 @@ def test_a_single_result_confirm_card_takes_yes():
 def test_a_command_after_her_name_however_spelled_is_still_routed():
     from saathi.voice.router import route
 
-    for heard in ("Sothai, call Udhi.", "Sati call Udhi", "Saathi, call Udhi"):
+    for heard in ("Khaki, call Udhi.", "Kakki call Udhi", "Kaki, call Udhi"):
         command = route(heard)
         assert command is not None and command.tool == "call_contact"
         assert command.arguments == {"contact": "udhi"}
@@ -103,10 +103,10 @@ def test_a_command_after_her_name_however_spelled_is_still_routed():
 def test_sounds_complete_only_for_a_whole_routed_command():
     from saathi.voice.router import sounds_complete
 
-    assert sounds_complete("Saathi call Udi")
-    assert sounds_complete("Sati Kaul Udi.")  # tiny.en's spelling of "call"
-    assert not sounds_complete("Saathi call my")  # she is mid-phrase
-    assert not sounds_complete("Saathi, call")
-    assert not sounds_complete("Saathi")
-    assert not sounds_complete("Saathi, what's the time?")  # a question is the model's
+    assert sounds_complete("Kaki call Udi")
+    assert sounds_complete("Kakki Kaul Udi.")  # tiny.en's spelling of "call"
+    assert not sounds_complete("Kaki call my")  # she is mid-phrase
+    assert not sounds_complete("Kaki, call")
+    assert not sounds_complete("Kaki")
+    assert not sounds_complete("Kaki, what's the time?")  # a question is the model's
     assert not sounds_complete("")

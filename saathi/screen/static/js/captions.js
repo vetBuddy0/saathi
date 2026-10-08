@@ -49,7 +49,7 @@ export function createCaptions() {
     }
     const children = [];
     if (lines.her) children.push(line("captions__line--her", "Heard", lines.her));
-    if (lines.saathi) children.push(line("captions__line--saathi", "Saathi", lines.saathi));
+    if (lines.saathi) children.push(line("captions__line--saathi", "Kaki", lines.saathi));
     root.replaceChildren(...children);
   }
 

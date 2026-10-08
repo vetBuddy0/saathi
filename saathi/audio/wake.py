@@ -1,4 +1,16 @@
-"""Hands-free start: she says "Saathi" and it listens, no button.
+"""Hands-free start: she says "Kaki" and it listens, no button.
+
+Renamed from "Saathi" to "Kaki" (owner, 2026-10-08). Measured the same
+way as below (tiny.en, prompt "Kaki"; Google Neural2/WaveNet en-IN,
+en-GB, en-US, en-AU at 1.0x and 1.15x, plus Piper amy): the name came
+back spelled exactly "kaki" in 102 of 126 clips and never as a near
+miss; the misses were the name dropped before "what time is it?", and
+the first early check (0.55 s) heard "Kaki" in 14 of 14 of those.
+"Kaki" is an everyday Singlish word ("my kopi kaki"), so a name right
+after a possessive or a "kaki" compound is talk, not a call
+(`_NOT_A_CALL_BEFORE`), and the match needs 0.88 similarity: "khaki" and
+"kakis" (0.89) count, "kai" (0.86) doesn't. The notes below are from
+the "Saathi" days; their reasoning stands, their spellings don't.
 
 Why it exists: the spacebar stands in for a wearable button (SPEC.md,
 "Triggers"), and a name spoken from across the room is the fallback for
@@ -76,11 +88,21 @@ from saathi.audio.vad import CHUNK_BYTES, SAMPLE_RATE, VoiceActivityDetector
 
 logger = logging.getLogger(__name__)
 
-WAKE_WORD = "saathi"
+WAKE_WORD = "kaki"
+# What tiny.en is told to expect, so it spells the name the same way.
+WAKE_PROMPT = "Kaki"
 DEFAULT_WAKE_MODEL = "tiny.en"
-_SIMILARITY = 0.82
+_SIMILARITY = 0.88
 # Spellings seen from whisper that score under the line but are the name.
-_KNOWN_MISHEARINGS = frozenset({"sothai", "sati"})
+# None yet for "Kaki" (every hit in the 2026-10-08 measurement was exact).
+_KNOWN_MISHEARINGS: frozenset[str] = frozenset()
+# The word before the name that makes it talk about a kaki, not a call
+# to Kaki: "my kaki", "kopi kaki", "mahjong kaki".
+_NOT_A_CALL_BEFORE = frozenset({
+    "my", "your", "his", "her", "our", "their", "the", "a", "an", "old", "best",
+    "kopi", "mahjong", "makan", "drinking", "chess", "gym", "jogging", "walking",
+    "football", "badminton", "karaoke", "shopping", "kaki",
+})
 _WAKE_WITHIN_WORDS = 3
 
 _CHUNK_SECONDS = CHUNK_BYTES / 2 / SAMPLE_RATE  # 32 ms
@@ -106,6 +128,8 @@ def match_wake_word(text: str) -> tuple[bool, str]:
     among the first few words: "I told my saathi" is talk, not a call."""
     words = re.findall(r"[a-z]+", text.lower())
     for i in range(min(len(words), _WAKE_WITHIN_WORDS)):
+        if i and words[i - 1] in _NOT_A_CALL_BEFORE:
+            continue  # "my kopi kaki": talk about a friend
         if _is_name(words[i]):
             return True, " ".join(words[i + 1 :])
         if i + 1 < len(words) and _is_name(words[i] + words[i + 1]):
@@ -113,13 +137,14 @@ def match_wake_word(text: str) -> tuple[bool, str]:
     return False, ""
 
 
-# How the *cloud* transcriber has spelled the name when it was all she
-# said (live, 2026-10-08: "Saathi" alone came back "Saudi?" and was
-# answered). Only trusted on a turn that began with her name (`loose`):
-# "Sorry, what time is it?" said over the spacebar keeps its "Sorry", and
-# none of these ever wakes the device (match_wake_word doesn't use them).
-_CLOUD_MISHEARINGS = frozenset({"saudi", "sorry", "sadhi", "saadi", "saati", "sathee"})
-# Said before the name, never meant as content: "Hey Saathi".
+# How the *cloud* transcriber might spell the name when it was all she
+# said (live, 2026-10-08, as "Saathi": "Saudi?", answered). Only trusted
+# on a turn that began with her name (`loose`), and none of these ever
+# wakes the device (match_wake_word doesn't use them). For "Kaki" these
+# are the likely English respellings, not yet seen live -- add what the
+# logs show.
+_CLOUD_MISHEARINGS = frozenset({"khaki", "cocky", "kacky", "cakey", "kakki", "caki"})
+# Said before the name, never meant as content: "Hey Kaki".
 _GREETINGS = frozenset({"hey", "hi", "hello", "ok", "okay", "oh"})
 
 
@@ -330,7 +355,7 @@ def local_transcriber(
             language="en" if name.endswith(".en") else None,
             # Biases the spelling of her name (and, while music plays,
             # of the commands she gives it).
-            initial_prompt=(prompt() if prompt is not None else None) or "Saathi",
+            initial_prompt=(prompt() if prompt is not None else None) or WAKE_PROMPT,
             condition_on_previous_text=False,
             vad_filter=False,
         )

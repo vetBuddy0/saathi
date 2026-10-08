@@ -74,6 +74,19 @@ function randomBetween(min, max) {
 
 const GROUND_COLOR = "#171310";
 
+// The glow is blurred on its own canvas, this many times smaller than the
+// face, which sits *behind* the face canvas and is stretched to size by
+// CSS -- so the browser's compositor does the upscaling, not a drawImage.
+// A blur has no detail to lose, and its cost grows with pixels x radius.
+// Measured (2026-10-08, headless Firefox, 3840x2230 at dpr 2, frame time
+// median): full-size shadowBlur 101-132 ms -- the stutter the owner saw
+// when the eyes moved; quarter-size blur drawn back up 35-38 ms; plus a
+// rectangular redraw box 26-30 ms; plus this layering and drawing the
+// eyes straight onto the face canvas (no offscreen copy) -- see
+// DECISIONS.md for the last number. Lost: full-resolution shadowBlur,
+// and a CSS blur filter (it would blur the eyes' own edges too).
+const GLOW_DOWNSCALE = 4;
+
 const EYE_CONFIG = {
   leftEye: { width: 132, height: 132, borderRadius: 40 },
   rightEye: { width: 132, height: 132, borderRadius: 40 },
@@ -227,16 +240,24 @@ function drawBlush(ctx, eye, amount) {
 export default class EyesFace {
   async mount(container) {
     container.innerHTML = "";
+    // Two layers: the small glow canvas (with the ground colour) behind,
+    // stretched by CSS, and the face canvas on top, transparent except
+    // for what is drawn on it.
+    const stack = document.createElement("div");
+    stack.style.cssText = "position:relative;width:100%;height:100%;overflow:hidden";
+    const glow = document.createElement("canvas");
+    glow.style.cssText =
+      `position:absolute;inset:0;width:100%;height:100%;display:block;background:${GROUND_COLOR}`;
     const canvas = document.createElement("canvas");
-    canvas.style.width = "100%";
-    canvas.style.height = "100%";
-    canvas.style.display = "block";
-    container.appendChild(canvas);
+    canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block";
+    stack.appendChild(glow);
+    stack.appendChild(canvas);
+    container.appendChild(stack);
 
     this._canvas = canvas;
     this._ctx = canvas.getContext("2d");
-    this._off = document.createElement("canvas");
-    this._offCtx = this._off.getContext("2d");
+    this._glow = glow;
+    this._glowCtx = glow.getContext("2d");
     this._model = new RoboEyesModel(EYE_CONFIG);
     this._model.setMood(Mood.DEFAULT);
     this._model.setAutoblinker(true, 1, 4);
@@ -284,9 +305,8 @@ export default class EyesFace {
     this._canvas.width = Math.max(1, Math.round(rect.width * dpr));
     this._canvas.height = Math.max(1, Math.round(rect.height * dpr));
     this._ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this._off.width = this._canvas.width;
-    this._off.height = this._canvas.height;
-    this._offCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this._glow.width = Math.max(1, Math.ceil(this._canvas.width / GLOW_DOWNSCALE));
+    this._glow.height = Math.max(1, Math.ceil(this._canvas.height / GLOW_DOWNSCALE));
     this._widthCss = rect.width;
     this._heightCss = rect.height;
   }
@@ -296,8 +316,7 @@ export default class EyesFace {
     const w = this._widthCss;
     const h = this._heightCss;
 
-    ctx.fillStyle = GROUND_COLOR;
-    ctx.fillRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w, h);
     if (!(w > 0 && h > 0)) return;
 
     const idle = this._lastState === "idle" || this._lastState === null;
@@ -340,50 +359,64 @@ export default class EyesFace {
     const asleep = this._lastState === "sleeping";
     const look = { sparkle: frame.sparkle, brightness: frame.brightness, asleep };
 
-    // Only the box around the eyes is cleared and composited: a glow
-    // blur over the whole 1080p layer every frame is the expensive part
-    // on the arm64 kiosk.
+    // Only the box around the eyes feeds the glow: a blur over the whole
+    // layer every frame is the expensive part (GLOW_DOWNSCALE).
     const dpr = window.devicePixelRatio || 1;
     const blur = Math.min(48, left.width * scale * 0.3 * frame.brightness) * dpr;
-    const reach =
-      (Math.max(
-        Math.abs(left.x) + left.width,
-        Math.abs(right.x) + right.width,
-        Math.abs(left.y) + left.height,
-        Math.abs(right.y) + right.height
-      ) +
-        8) *
-      scale;
+    // A rectangle, not a square: the pair is three times wider than it is
+    // tall, and the square cleared and copied ~3x the pixels (2026-10-08).
+    // The tilt swings the outer corners up and down, so the height grows
+    // by the width's share of it.
+    const extentX = Math.max(Math.abs(left.x) + left.width, Math.abs(right.x) + right.width);
+    const extentY = Math.max(Math.abs(left.y) + left.height, Math.abs(right.y) + right.height);
+    const swing = Math.abs(Math.sin(frame.tilt));
+    const reachX = (extentX + 8) * scale;
+    const reachY = (extentY + extentX * swing + 8) * scale;
     const box = {
-      x: Math.max(0, Math.floor((cx - reach) * dpr)),
-      y: Math.max(0, Math.floor((cy - reach) * dpr)),
+      x: Math.max(0, Math.floor((cx - reachX) * dpr)),
+      y: Math.max(0, Math.floor((cy - reachY) * dpr)),
     };
-    box.w = Math.min(this._off.width - box.x, Math.ceil(reach * 2 * dpr));
-    box.h = Math.min(this._off.height - box.y, Math.ceil(reach * 2 * dpr));
-    const off = this._offCtx;
-    off.save();
-    off.setTransform(1, 0, 0, 1, 0, 0);
-    off.clearRect(box.x, box.y, box.w, box.h);
-    off.restore();
+    box.w = Math.min(this._canvas.width - box.x, Math.ceil(reachX * 2 * dpr));
+    box.h = Math.min(this._canvas.height - box.y, Math.ceil(reachY * 2 * dpr));
     // Head tilt: rotate the pair about the face's centre, then scale the
     // model's units to this box.
-    off.save();
-    off.translate(cx, cy);
-    off.rotate(frame.tilt);
-    off.scale(scale, scale);
-    drawEye(off, 0, 0, left, look);
-    drawEye(off, 0, 0, right, look);
-    off.restore();
-
-    // The glow, from the finished shape's own alpha.
     ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.shadowColor = `rgba(255, 176, 89, ${Math.min(0.85, (asleep ? 0.25 : 0.45) * frame.brightness)})`;
-    ctx.shadowBlur = blur;
-    if (box.w > 0 && box.h > 0) {
-      ctx.drawImage(this._off, box.x, box.y, box.w, box.h, box.x, box.y, box.w, box.h);
-    }
+    ctx.translate(cx, cy);
+    ctx.rotate(frame.tilt);
+    ctx.scale(scale, scale);
+    drawEye(ctx, 0, 0, left, look);
+    drawEye(ctx, 0, 0, right, look);
     ctx.restore();
+
+    // The glow, from the finished eyes' own alpha, blurred small on the
+    // layer behind. Cleared where it was drawn last frame, too: the eyes
+    // move, and last frame's glow would trail behind them.
+    if (box.w > 0 && box.h > 0) {
+      const k = GLOW_DOWNSCALE;
+      const pad = Math.ceil(blur * 1.5);
+      const g = {
+        x: Math.max(0, Math.floor((box.x - pad) / k)),
+        y: Math.max(0, Math.floor((box.y - pad) / k)),
+      };
+      g.w = Math.min(this._glow.width - g.x, Math.ceil((box.w + pad * 2) / k) + 1);
+      g.h = Math.min(this._glow.height - g.y, Math.ceil((box.h + pad * 2) / k) + 1);
+      const glow = this._glowCtx;
+      glow.setTransform(1, 0, 0, 1, 0, 0);
+      const last = this._lastGlowBox;
+      if (last) glow.clearRect(last.x, last.y, last.w, last.h);
+      glow.clearRect(g.x, g.y, g.w, g.h);
+      glow.shadowColor = `rgba(255, 176, 89, ${Math.min(0.85, (asleep ? 0.25 : 0.45) * frame.brightness)})`;
+      glow.shadowBlur = blur / k;
+      // Only the shadow lands on the layer: the shape is drawn far off to
+      // the left and the shadow offset brings it back. A low-res copy of
+      // the eye itself would show as a blocky rim around the sharp one.
+      const away = this._glow.width + g.w + 64;
+      glow.shadowOffsetX = away;
+      glow.drawImage(this._canvas, box.x, box.y, box.w, box.h,
+        box.x / k - away, box.y / k, box.w / k, box.h / k);
+      glow.shadowOffsetX = 0;
+      this._lastGlowBox = g;
+    }
 
     // In front: the eyes look toward it, so they often end up near it,
     // and a ball vanishing behind an eye reads as a glitch.

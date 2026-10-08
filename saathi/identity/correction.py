@@ -102,11 +102,11 @@ def _best_match(rules: list[dict[str, Any]], *texts: str) -> dict[str, Any] | No
 
 
 def _correction_sentence(said: str, correction: str | None, retired: dict[str, Any] | None) -> str:
-    parts = [f"She corrected Saathi: \"{said.strip()}\""]
+    parts = [f"She corrected Kaki: \"{said.strip()}\""]
     if correction and correction.strip():
         parts.append(f"What is true: {correction.strip().rstrip('.')}.")
     if retired is not None:
-        parts.append(f"Saathi had wrongly believed: {retired['text'].strip().rstrip('.')}.")
+        parts.append(f"Kaki had wrongly believed: {retired['text'].strip().rstrip('.')}.")
     return " ".join(parts)
 
 
