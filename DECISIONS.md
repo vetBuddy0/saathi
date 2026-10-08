@@ -7,6 +7,7 @@ through, not deleted, so the history of *why* something changed stays
 readable.
 
 ---
+2026-10-07 — Livelier eyes: listening breathes, nods and catches the light; the wake word perks them up. The first demo's listening eyes read as a held pose, not attention. roboeyes.js gained an expressiveness layer on top of its easing model (breathing, head tilt, nods, sparkle, brightness, warmth lid, perk and squint, slow blink, a confined drift region), and eyes-face.js gives every state a living version of its look, with a distinct perk-up for ATTENTIVE. Lids are now cut out of an offscreen layer and the glow is drawn from what's left; painting lids in the ground colour left the glow outlining the hidden part, so smiles read as dark bowls. A blink now reopens to the current size instead of idle size. Lost: CSS transforms on the canvas (they bypass the model's easing and its tests) and pupils (gaze already moves the whole eye; a pupil would have to look somewhere too).
 
 **2026-09-17 — Substituted `openai/gpt-oss-120b` for Kimi K2 in cascade.py.**
 The GROQ_API_KEY on hand doesn't have `moonshotai/kimi-k2-instruct` or
@@ -1323,3 +1324,406 @@ corpus gained six cross-script pairs. Lost: `unidecode` (a dependency
 for one table) and telling the model to pass names in Latin (a prompt
 can't guarantee it). `call_contact` now logs the name it was asked for
 -- her words, never a number -- so a mis-dial can be debugged.
+
+**2026-10-07 — Live captions while the key is held; silent turns say
+why in the log.** Live: spacebar presses ended with no reply and no
+caption, and nothing on screen or in the log said whether the mic was
+heard. With captions on, the server now re-transcribes the buffer so
+far every second while LISTENING (`CascadeSession.preview_heard()`,
+gated by the same Silero check, outside the `VoiceSession` Protocol and
+reached by getattr) and sends it as the "Heard" line. It costs one STT
+call per second held, and only while captions are on. A turn that ends
+silently now logs which gate stopped it: no speech (with seconds of
+audio and RMS) or an empty transcript. Lost: a mic level meter (status,
+not content) and streaming STT (a new client for a debugging aid).
+
+**2026-10-07 — Echo-cancel pair found by module arguments on PipeWire.**
+Live: the 800-series laptop runs PipeWire 1.6, whose pulse server sets
+neither `device.class = "filter"` nor `device.master_device` on
+module-echo-cancel's nodes. `SystemEchoCancel.find()` never matched, so
+every `saathi run` loaded another module, failed to find it, and
+started with no voice engine — the spacebar moved the face and recorded
+nothing. `find()` now falls back to the module whose own
+`source_master`/`sink_master` arguments name the pair, and takes the
+nodes it owns. Lost: matching PipeWire's `node.link-group` (a naming
+convention, not the pair's identity).
+
+**2026-10-07 — "Saathi" wake word: local whisper keyword spotting, not
+openWakeWord.** SPEC.md names openWakeWord as the across-the-room
+trigger, but it has no "Saathi": a new word means training a custom
+model, and its pretrained models are CC BY-NC-SA. `audio/wake.py`
+keeps the echo-cancelled mic open while idle, cuts utterances with the
+Silero VAD already here, and transcribes each one on-device with
+faster-whisper `tiny.en` (~180 ms; base 3x slower and dropped the name
+from "Saathi, play a song", small.en 5x slower and no better). Fuzzy
+match at 0.82 over the first three words: takes Sathi/Sothai/Saarthi,
+rejects sahi/sath/sorry. Nothing leaves the device until the name is
+heard. Her name alone: IDLE -> ATTENTIVE (0.35 s, the eyes perk up) ->
+LISTENING, ended by a VAD endpointer (0.9 s pause, 5 s of nothing, 15 s
+cap). Name plus request in one breath: that audio is the turn.
+faster-whisper moved from the `hardware` group to a default dependency.
+Off with SAATHI_WAKE_WORD=off; model via SAATHI_WAKE_MODEL. Not done:
+the open-mic window after Saathi speaks (SPEC.md, state machine), so a
+follow-up still needs the name or the key.
+
+**2026-10-07 — Livelier eyes: listening breathes, nods and catches the
+light; the wake word perks them up.** The first demo's listening eyes
+read as a held pose, not attention. `roboeyes.js` gained an
+expressiveness layer on its easing model (breathing, head tilt, nods,
+sparkle, brightness, warmth lid, perk and squint, slow blink, confined
+drift region) and `eyes-face.js` gives every state a living version of
+its look, with a distinct perk-up for ATTENTIVE. Lids are now cut out of
+an offscreen layer and the glow drawn from what's left: painting lids in
+the ground colour left the glow outlining the hidden part, so smiles read
+as dark bowls. A blink reopens at the current size, not idle size. Lost:
+CSS transforms on the canvas (they bypass the model's easing and its
+tests) and pupils (gaze already moves the whole eye).
+
+**2026-10-07 — Latency: Groq hears her, OpenAI replies; shorter wake
+pauses.** Turns were taking 2–4.5 s from end of speech to voice
+(`turns`: STT 0.7–1.8 s, reply 1–2.4 s). Measured from the demo
+laptop: Groq whisper-large-v3-turbo 270 ms vs gpt-transcribe 731 ms
+median on the same clip. With both keys set, STT now goes to Groq (no
+retry, 4 s deadline) and falls back to OpenAI's transcriber on any
+failure; the reply model is unchanged. Off with SAATHI_STT_PROVIDER=openai.
+Wake word: the pause that ends "Saathi" is 0.3 s (was 0.5) and a
+hands-free turn ends after 0.8 s (was 0.9 — shorter cuts off a pause
+mid-sentence). The audio heard while the name was being checked now
+starts the turn; before, the first words after the name were lost,
+which is likely why several hands-free turns came back with an empty
+transcript. Not done, needs a decision: streaming the reply (first
+words ~640 ms vs whole answer ~1080 ms for gpt-4.1) changes the
+`VoiceSession` contract. gpt-4.1-mini was not faster to first token
+(597 vs 637 ms) and missed the music tool 4/4 in the earlier bake-off.
+
+**2026-10-07 — Big, playful eyes: visitors, z's, blush and other
+feelings (owner's explicit ask, past SPEC.md's caution).** SPEC.md warns
+that eyebrows "read as children's illustration, which lands as
+patronising". The product owner asked for the opposite direction on
+purpose: eyes "quite big", filling most of the screen, a ball / leaf /
+star now and then that the eyes follow while idle, floating z's when
+asleep, and emotions — blush, happy, sad, surprised (plus love and
+curious). Lost: "warmth only" (narrowing at the corners and nothing
+more) — dignified, but flat in the demo. Kept from the caution: still no
+mouth, no eyebrows, no status words; a "z" is drawn, not a label.
+Visitors are rare (14–30 s apart), only while IDLE and only when the
+face has the full screen, and off under prefers-reduced-motion.
+Size: the model keeps its 132-unit eyes (its tests and easing are in
+those units); the renderer scales by `fitScale(box)` from
+`eyes-layout.js` and clamps gaze so the pair never leaves its box.
+Lost: resizing the model's eyes per container (every target and blink
+threshold recomputed mid-animation). The canvas follows its container
+by ResizeObserver, which is what fixes the fullscreen-video corner
+(it was stretched to the corner's shape with 132 px eyes cropped in it).
+
+**2026-10-07 — Emotions go core-side -> face; `onEmotion` is an
+optional Face method. Owner signed off on the Face interface change
+(2026-10-07).**
+`screen/emotion.py`'s `EmotionController.show(name, seconds)` is the
+one door: validated against a fixed set, clamped 0.5–15 s, broadcast
+as `{"type": "emotion"}` through the server's existing seam, lapsing
+back to the state's look in the browser. The face receives it through
+`onEmotion(name, seconds)`, documented in `face.js` as *optional* so
+orb and ink stay valid untouched — but it is still an addition to one
+of the five interfaces; the owner confirmed it the same day. Lost: a window
+CustomEvent the eyes listen for (no interface change on paper, a hidden
+one in practice). Not wired to the model: *when* to blush belongs to the
+voice side, and an `express` tool would spend the one tool call per
+turn (DECISIONS 2026-09-18) and change what she hears — so nothing
+calls `show()` yet except tests and `?demo=emotion-<name>`.
+
+**2026-10-07 — Phone panel on the right during a call; End call goes
+through the hold seam.** `call/controller.py` now reports a `CallView`
+(name, number, calling/ringing/connected, answered-at) to
+`screen/call_panel.py`, which broadcasts `{"type": "call"}` and re-sends
+it on connect; ringing comes from the ring watcher's existing poll. The
+face moves to the left 60% and is fitted there. The red button sends
+`{"type": "call_hangup", "id"}`; the server checks the id against the
+call on screen and calls `HoldController.complete()`, which fires the
+same registered handler as a two-second spacebar hold — there is no
+second hang-up path, and with no handler registered the tap does
+nothing. The status word is on the phone panel, not under the face;
+lost: no word at all, because a blank panel before the far end answers
+reads as broken. `dial()` gained an optional `who` for the name.
+
+**2026-10-08 — Calling family goes over a free family app (WebRTC +
+Web Push); Twilio stays only as the fallback for people who aren't
+paired.** Product owner's decision, on cost: international per-minute
+PSTN is what this product's users would make most. Lost: **Twilio PSTN**
+as the main path (≈$0.06/min to a Singapore mobile, more elsewhere,
+billed per started minute — `docs/completed/calling.md`); **WhatsApp
+Business Calling** (per-minute pricing as well, plus Meta business
+verification and a WhatsApp Business account per device); **a cheaper
+SIP trunk** (lower, but still per-minute, plus a registrar and NAT
+handling on the device). What was built, in `saathi/call/`:
+`webrtc.py` (signaling state machine), `family.py` (pairing),
+`push.py` (Web Push), `ice.py` (STUN/TURN config), `family_server.py`
+(the PWA's server), `routing.py` (paired vs Twilio),
+`family_runtime.py` (wiring); the PWA in `screen/static/family/`; the
+kiosk end in `screen/static/js/family-call.js`.
+
+**2026-10-08 — The kiosk's Chromium is the device's WebRTC end, on the
+system default mic and speaker.** Python does signaling and validation
+only; media never passes through it. Lost: aiortc in-process (a large
+native dependency whose aarch64 builds need libav/libvpx, and a second
+audio path to keep echo-free). Chromium's own echo canceller has the far
+end as its reference because Chromium plays it, which `aec.py`'s module
+would not (that pair is not the system default — the 2026-09-25 diff to
+make it so is still unapplied). Routing Chromium's streams onto the
+echo-cancel pair with `pactl move-*` lost too: double AEC, and finding
+"Chromium's stream" means matching a process. No device is named
+anywhere. The kiosk script gains `--use-fake-ui-for-media-stream` (it
+accepts the mic prompt; it does not fake the device).
+
+**2026-10-08 — Pairings live in `family.sqlite3`, owned by the call
+module, not in `IdentityStore`.** Its schema is closed (`append()`
+raises `UnknownTable`), so a table there is an interface change; and
+writing a pairing into `entities.notes` would make a new latest-wins
+"Priya" row with no phone, hiding her saved number. Joined to her
+contacts by normalised name. Secrets (pairing tokens, member keys) are
+stored as SHA-256 of 32 random bytes; tokens are single-use and expire
+in 10 minutes. Pairing does not write her memory: it is device setup a
+relative did, not something she said.
+
+**2026-10-08 — Web Push hand-written over `pycryptodomex` (now a named
+dependency), not `pywebpush`.** pywebpush pulls requests, http_ece,
+py-vapid and `cryptography` for one ECDH, one HKDF, one AES-GCM seal
+and one ES256 signature; pycryptodomex was already installed (yt-dlp's
+extras). Pinned byte-for-byte to RFC 8291's worked example. VAPID keys
+are made once (`vapid_private.pem`, 0600) and never rewritten —
+regenerating would orphan every phone's subscription. `segno` (pure
+Python, BSD) added for the pairing QR.
+
+**2026-10-08 — The family app is opt-in (`SAATHI_FAMILY_APP=on`).**
+On by default lost: it puts a server on the internet through the
+tunnel, and that should be a line someone wrote, not a side effect of
+updating the code. It also kept `tests/test_cli.py`'s Twilio-only
+wiring tests true as written. With it off, calling is exactly as before.
+
+**2026-10-08 — A stable URL is configuration; the quick tunnel is the
+labelled fallback.** `SAATHI_PUBLIC_URL` (https, e.g. a named
+cloudflared tunnel) is used as-is. Unset, a quick tunnel to the family
+port (8769) starts at boot, and the pairing screen says a pairing made
+now lasts only until restart. Mitigation, not a fix: each ring's push
+carries the *current* URL and a per-call token, so a phone paired on an
+old hostname can still answer (and decline from the notification); it
+can't start a call until re-paired. The family server is a separate
+app on its own port and loop from the screen server — the screen's
+socket moves her face and writes her preferences and must never be
+tunnelled — and the pairing QR is minted only on the screen server
+(loopback, and refused if a `Cf-*` header shows it came through a
+tunnel).
+
+**2026-10-08 — ICE servers are config, STUN-only by default.**
+`SAATHI_ICE_SERVERS` (JSON list) or Cloudflare TURN credentials minted
+per call from `SAATHI_TURN_CLOUDFLARE_KEY_ID`/`_API_TOKEN` (the token
+stays on the device; what reaches a phone expires in 24 h). Nothing was
+signed up for. A call whose ICE hasn't connected in 30 s ends, and the
+log names TURN.
+
+**2026-10-08 — Incoming calls ask with a Confirm card and answer on a
+0.2 s hold, never on their own.** The card ("Priya is calling.
+Answer?") takes a tap, or her "yes" through the existing
+`answer_card` tool (the incoming flow is one of its flows). The
+spacebar is the hold seam with a 0.2 s hold, so a press during a ring
+never starts a turn; a shorter tap is abandoned and the card re-shown.
+The phone panel appears only once answered: during a ring its End
+button would fire the hold handler, which is *answer* — a trap. Ringing
+is a two-tone in the kiosk page and a "surprised" emotion; connected is
+"happy". After answering the hold handler is the same hang-up as
+Twilio's, so the panel's End button and a two-second hold behave
+identically for both kinds of call. The device is always the WebRTC
+offerer, in both directions.
+
+**2026-10-08 — With the family app on, `call_contact` gates per path,
+not as a whole.** A paired daughter can be rung while the Twilio relay
+is still resolving, and vice versa; with it off the old whole-tool gate
+(2026-09-26) is kept unchanged.
+
+**2026-10-08 — Audio arrived in 2-second bursts; fixed at `parec`.**
+`audio/capture.py` started `parec` with no latency, so the sound server
+(PipeWire's pulse, `pulse.default.frag` = 2 s) handed over audio in
+64,000-byte bursts every 2.0 s (measured; with `--latency-msec=20`, 640
+bytes every ~20 ms). That one default explained three complaints: the
+wake word saw "Saathi" end 0-2 s late, a hands-free turn's endpointer
+could only end on a burst boundary (`turns.eou_ms` 2,027 / 4,020-4,025 /
+6,022 / 8,021-8,026 / 16,023), and a spacebar release killed `parec`
+with up to 2 s of her last words undelivered. `parec` now always asks
+for 20 ms. Lost: reading bigger chunks on our side (the delay is the
+server's fragment, not our read). `turns.eou_ms` keeps its meaning (time
+from the turn's start to its end; tests pin it); the hands-free wait
+after her last word is logged instead ("ended N ms after her last word").
+
+**2026-10-08 — The name is heard while she is still speaking; the turn
+streams from the listener's own mic.** `audio/wake.py` also checks an
+utterance in progress at 0.55/0.9/1.3 s after speech onset (skipped when
+tiny.en is busy). Measured with the real listener, Silero, tiny.en and
+endpointer over 97 clips (Piper amy/pratham, Google en-IN Chirp3 Aoede/
+Charon and Neural2, normal and 1.25x speed), simulated clock = audio +
+compute: the device wakes a median 0.50 s *before* she finishes (was
+0.33 s after the utterance's end, plus 0-2 s of bursts: ~1.3 s mean
+after). The wake hands the turn its own mic (`follow()`): no gap, no
+second `parec` mid-sentence. "Sati" added as a known spelling (tiny.en's
+usual one on Indian voices): whole-clip recall 35/56 -> 56/56, false
+wakes on deliberately close negatives ("Sahi hai", "Saath chalo",
+"Satisfied", "Sorry about that") unchanged at 7/41; with early checks
+the flow gives 55/56 and 14/41 (12/41 before) -- these negatives are
+near-homophones and a false wake costs one silent or short turn. Lost:
+dropping whisper's "Saathi" prompt (0 false wakes but recall 6/56) and a
+richer prompt (56/56 but 17/41 false).
+
+**2026-10-08 — A one-breath command ends at its short pause.** A turn
+woken early ends at the endpointer's 0.8 s pause, but the listener
+keeps cutting it at 0.3 s and asks `router.sounds_complete()` whether
+the on-device words already make a routed command ("call Udi"; tiny.en's
+"Kaul"/"Kol" read as "call"; never a question, never "call my..."). If
+so it ends there. Measured: turn end after her last word, median 0.85 s,
+0.33-0.39 s for the call clips the local transcript got right (9 of
+20). Only *when* to stop is local; the words still come from cloud STT.
+Lost: always ending at 0.3 s (the old one-breath path) -- "Saathi,
+call... Udhi" with a breath in it lost the name; "Saathi, what's the
+time?" now waits 0.8 s, not 0.3 s. The router also drops a leading name
+however spelled (`strip_wake_word`): cloud STT wrote "Sothai, call
+Udhi" and the command fell through to the model.
+
+**2026-10-08 — Warm the AI connections when a turn starts.** Measured:
+the first OpenAI call after >=70 s idle took 840-990 ms vs 610-800 warm;
+Groq ~430 vs ~230. Turns are usually minutes apart, so nearly every
+real turn paid the TLS handshake twice. `CascadeSession.start()` now
+sends a free `GET /models` on each client (if unused for 30 s) while
+she speaks. Lost: a periodic keep-alive (requests all day for the same
+saving).
+
+**2026-10-08 — gpt-4.1 stays the reply model.** Re-ran the bake-off,
+streamed, with all six tools, the real compiled context and one prior
+exchange, eight prompts (two music, two calls, set_language, three
+chat) x 6: every model called the right tool every time (gpt-4.1-mini
+too, unlike the earlier 0/4). Median whole-reply time, chat / tool:
+gpt-4.1 944 / 874 ms, gpt-4o 874 / 854, gpt-4.1-mini 930 / 794,
+gpt-5.4-nano 970 / 860, gpt-4o-mini 947 / 870 (an earlier run: 5.4-mini
+1268, 5.5 2080, 5.6-luna 1462; gpt-6.1-sol refuses reasoning "none").
+Within ~70 ms of each other -- noise against the network floor -- so not
+worth a change in how she sounds. Groq's qwen3.8-27b took 13-14 s (rate
+limited) and missed `call_contact` 4/4; gpt-oss-120b refuses reasoning
+"none". First words vs whole reply for gpt-4.1: 801 vs 944 ms here, more
+for production's longer replies; that gap needs a streaming reply, which
+still changes the `VoiceSession` contract -- not done.
+
+**2026-10-08 — The reply's mood reaches the face via a tag.** With the
+face's EmotionController, `cascade.py` asks the model to start each
+reply with a mood tag ("[happy] ..."), strips it before anything speaks,
+captions or remembers the text, and hands it to `on_mood()` (cli.py:
+`EmotionController.show`, which refuses any look it doesn't draw).
+Outside the `VoiceSession` Protocol, like `preview_heard`. Measured on
+gpt-4.1 (8 prompts x 6): tagged 18/18 chat replies, tools still 48/48,
+whole reply 1037 ms tagged vs 944-1190 untagged (noise). Lost: a tool
+(spends the turn's one call and a round trip; the registry is exactly
+what the model is offered) and a second classifier call.
+
+**2026-10-08 — The conversation stays open after a reply.** SPEC.md
+already said follow-ups need no trigger; nothing did it -- every reply
+ended at IDLE and the wake listener only listens at IDLE, so each
+follow-up needed "Saathi" again. Now a spoken reply ends in ATTENTIVE
+(`(SPEAKING, "follow_up")`, new in core.py) with `audio/listen_window.py`
+on the echo-cancelled mic: the first 0.35 s after `say()` returns are
+dropped unheard (her own voice's tail), speech must start within 7 s
+(`SAATHI_FOLLOW_UP_SECONDS`, `off` to disable) and needs ~100 ms of
+consecutive VAD speech to count, then the same 0.8 s endpointer ends the
+turn; a quiet window is `dismiss` -> IDLE. Nothing leaves the device
+until she starts. The spacebar works inside the window
+(`(ATTENTIVE, "press")`). Not opened after a reply that changed what is
+playing while it plays (the song should be heard, not held ducked), nor
+during a call. Lost: `done` -> IDLE -> `notice` (two broadcasts: the
+face blinked and the song un-ducked for a frame); reusing the wake
+listener's mic (it only listens at IDLE and only for the name).
+
+**2026-10-08 — Her name is the trigger, never the content.** Live,
+"Saathi" alone woke the device, the early-wake hand-over put the name's
+audio into the turn, cloud STT wrote "Saudi?", and the model answered
+it. The cascade now strips a leading name from the transcript before the
+router and the model (`strip_wake_word`, looping, after "hey"); on a turn
+that began with the name (`started_by_name()`, outside the Protocol) the
+cloud's other spellings count too ("Saudi", "Sorry", "Saadi"...) --
+never on a spacebar turn, where "Sorry?" means "pardon?". A transcript
+that is only the name, or a by-name turn with no speech, is no turn: no
+model call, `(THINKING, "name_only") -> ATTENTIVE`, listening; if she
+stays quiet 3.5 s (counted from when she went quiet) Saathi says a short
+fixed line in her language ("Yes?", "I'm here.", ... rotated; never
+"Sure!"), then the open window as after any reply. Lost: asking the model
+for that line (a round trip for a word); a fixed spelling list in the
+wake matcher itself (it would wake on "Saudi Arabia" and "sorry").
+
+**2026-10-08 — A search plays the most relevant result directly.** "Play
+Shape of You" offered three cards that were all Ed Sheeran's Shape of
+You. Owner's rule, `tools/media.py`'s `choose_result`: read (song,
+artist) from the raw title and channel (the part matching the channel
+is the artist, else the part made only of her words is the song, else
+"Artist - Song"); fold same-song-same-artist versions into the top one
+and play it at once with nothing said; ask (the existing card) only when
+the top results are one title by different artists ("Hello": Adele or
+Lionel Richie). An unknown artist never makes it ambiguous. The rule is
+injected (`MediaController(choose=...)`, wired by cli.py); the
+controller's default remains ask-every-time, which is what the 23
+existing media/card tests describe -- the card mechanism the ambiguous
+case still uses. Volume changes now answer with silence (`say: ""`): the
+louder song is the answer, and no reply sits on top of it ("already as
+loud as it goes" still goes to the model). Lost: a model call to judge
+sameness; asking whenever there was more than one result.
+
+**2026-10-08 — Media commands are favoured while music plays.** The
+engine reads one boolean, `media_playing()` (cli.py: the controller's
+`playing`), never the controller. While it is true: the cloud transcriber
+gets a `prompt` listing the commands; the wake listener's tiny.en gets
+the same bias, and `sounds_complete` treats "stop"/"louder"/"next" as
+whole commands so "Saathi, stop" ends at its 0.3 s pause; the router
+matches media phrases even with no search offered and takes a media
+command right after the name wherever the name falls ("...your body,
+Saathi, stop"). More phrasings added (reduce/increase the volume, next
+song, ...). Lost: matching "stop" anywhere in a mid-song transcript
+("don't stop", lyrics).
+
+**2026-10-08 — The song no longer reaches her request.** Two causes.
+(1) The browser only ducked at listening/thinking/speaking, and the wake
+word's moment (ATTENTIVE) -- when the request after the name is already
+streaming in -- played at full volume. ATTENTIVE now ducks (it is also
+the whole open window), and the duck is a tenth, not a fifth. Same
+core-state message path as before; tests/test_media_policy.py and
+tests/test_media_panel.py had pinned "attentive plays at full volume"
+and the 0.2 factor, the decision the owner reversed -- their numbers were
+updated to the new rule, nothing else. (2) The browser played to the
+hardware default sink, so the echo canceller never had the music as its
+reference. `saathi run` now makes the echo-cancel sink the default while
+it runs and puts the previous default back on exit (`aec.py`'s
+`route_default_through`; ids come from PulseAudio and `devices.py`,
+never from code). Safe because: only a sink the server lists is used;
+restore runs once, only if nobody changed the default since, and after a
+crash that left it routed it restores to the detected speaker; Saathi's
+own voice and call audio already play to that sink explicitly; PipeWire
+falls back by itself if the module goes away. Off with
+`SAATHI_AEC_DEFAULT_SINK=off`. Not yet measured live (the running
+instance was not touched). Lost: `move-sink-input` on the browser's
+stream (it changes with every video and would have to be chased).
+
+**2026-10-08 — Her name starts every turn; the open window after a reply
+is off.** Owner's call, live: a maths lecture playing in the room was
+answered seven turns running -- each reply reopened the 7 s window and
+each sentence from the video counted as her follow-up. `saathi run` now
+passes `open_after_reply=False` (screen/server.py); a reply ends at IDLE
+and only "Saathi" or the spacebar starts the next turn.
+`SAATHI_OPEN_CONVERSATION=on` brings the old window back. The window
+after her name alone stays ("Saathi" ... "Yes?" -> she answers without
+the name): there she has just addressed Saathi. SPEC.md's Triggers line
+amended to match. Lost: a shorter window (a video still talks inside
+any window); matching her voice (no speaker model on the device).
+
+**2026-10-08 — Calmer, smaller eyes.** Owner: "calm down on the
+animations ... make it smaller". Resting pair now fits 0.42 x 0.30 of
+its box (was 0.66 x 0.47, the 2026-10-07 "quite big" ask, reversed;
+tests/test_eyes_extras.py's full-screen bounds updated to the new rule).
+Same looks at about half the energy: idle drift every 4-9 s (was 2-5),
+flourishes every 15-30 s (was 5-11), a passing visitor every 1-2 min
+(was 14-30 s), attentive/listening growth 1.08/1.06 (was 1.2/1.12),
+nods every 3-7 s and half as deep, speaking bob ~half amplitude and
+slower, perk hop 10 (was 18) over 800 ms. Lost: removing flourishes and
+visitors outright -- rarer keeps it alive without busy. Not checked in a
+browser test here: no Chromium on this laptop, the JS tests skip.

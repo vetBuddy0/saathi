@@ -21,7 +21,8 @@ volume, layout — emitted by `tools/media.py`'s controller through the
 `{"type": "media_event", "event": ...}` (browser -> server: the player
 reporting `ended`/`error`). Ducking needs no new message: the browser
 lowers the player's volume on the `state` it already receives
-(`listening`/`thinking`/`speaking`) — see `static/js/media-policy.js`.
+(`attentive`/`listening`/`thinking`/`speaking`) — see
+`static/js/media-policy.js`.
 
 Cards (same day): `{"type": "card", "card": {...} | null}` (server ->
 browser: show this one card, or clear it; emitted by `screen/cards.py`'s
@@ -82,6 +83,39 @@ say. A card shown by an earlier turn, or between turns, ends nothing.
 The same run showed why a card is re-sent on connect: the browser is
 the only copy of it, and a reload left a question pending on the
 server with nothing on the screen to answer.
+
+Emotions and the phone panel (2026-10-07) ride the same broadcast
+seam. `{"type": "emotion", "emotion": ..., "seconds": ...}` (server ->
+browser) comes from `screen/emotion.py`'s EmotionController -- the one
+door for "blush now"; the browser draws it and lets it lapse. `{"type":
+"call", "call": {...} | null}` comes from `screen/call_panel.py`'s
+CallPanel, fed by the call controller, and is re-sent on connect like a
+card. `{"type": "call_hangup", "id": ...}` (browser -> server) is the
+panel's End call button: checked against the panel's current call id,
+then handed to the hold seam's `complete()` -- the very handler a
+two-second spacebar hold fires, never a direct hang-up from here.
+
+The open conversation (2026-10-08, `follow_up_seconds`): after a spoken
+reply the turn ends in ATTENTIVE, not IDLE, with a hands-free
+`ListenWindow` on the mic -- a follow-up needs no name (SPEC.md,
+"Triggers"). A quiet window closes the conversation. Not after a reply
+that changed what is playing (the song should be heard, not held ducked),
+nor during a call. A turn that was only her name goes ATTENTIVE the same
+way and, if she stays quiet, Saathi says a short "Yes?" (the session's
+`name_prompt`). Ducking needs nothing new for any of it: ATTENTIVE is
+now one of the states the media panel ducks on (media-policy.js). Off
+unless `follow_up_seconds` is given, so every older test here still
+describes a reply ending at IDLE.
+
+Only after her name (2026-10-08, `open_after_reply=False`, what `saathi
+run` passes by default): live, a lecture playing in the room kept the
+window open turn after turn -- every reply reopened it and every
+sentence from the video counted as her follow-up. The owner wants her
+name to start every turn. So the window after an ordinary reply is
+off; the window after her name alone ("Saathi" ... "Yes?") stays,
+because there she has just addressed Saathi. Lost: a shorter window
+(the video still talks within any window) and a voice match (no
+speaker model on the device).
 """
 
 from __future__ import annotations
@@ -89,6 +123,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,6 +131,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from saathi.audio.capture import Capture
+from saathi.audio.wake import Endpointer, vad_is_speech
 from saathi.core import Core, Event, State
 from saathi.identity.preferences import (
     CAPTIONS_KEY,
@@ -112,6 +148,18 @@ _CAPTURE_CHUNK_BYTES = 3200  # 100ms of 16kHz mono 16-bit PCM
 # Holding-card progress cadence: 20 updates over a 2 s hold is smooth
 # enough to read as "it's doing something" without flooding the socket.
 _HOLD_TICK_SECONDS = 0.1
+# Live captions: how often what she has said so far is re-transcribed
+# while the key is held. Each poll is one STT call on the whole buffer
+# so far, and only runs while captions are on.
+_PREVIEW_SECONDS = 1.0
+# Wake word: how long the eyes show "you called me?" before listening.
+_ATTENTIVE_SECONDS = 0.35
+# Only her name, then quiet: how long before Saathi says "Yes?". Long
+# enough to gather a thought, short enough not to feel ignored.
+_NAME_PROMPT_SECONDS = 3.5
+# Below this little of the wait left, "Yes?" is said at once rather
+# than opening a window too short to start a sentence in.
+_NAME_PROMPT_MIN_WAIT = 0.3
 
 # Robustness pass (checkpoint 2): a 401/429/timeout/connection-reset from
 # Groq used to be an uncaught exception with nowhere good to land — the
@@ -124,6 +172,23 @@ _HOLD_TICK_SECONDS = 0.1
 _FALLBACK_REPLY_TEXT = "I didn't quite catch that. Let's try again in a moment."
 
 logger = logging.getLogger(__name__)
+
+
+def _ms_since(monotonic_at: float | None) -> int | None:
+    """Milliseconds since a `time.monotonic()` reading, or None."""
+    if monotonic_at is None:
+        return None
+    return round((time.monotonic() - monotonic_at) * 1000)
+
+
+def _mark_started_by_name(session) -> None:
+    """Tells the session this turn began with her name, so a cloud
+    transcript of just the name ("Saudi?") is read as the name, not as a
+    question. Optional (cascade.py's `started_by_name`), like
+    `preview_heard`: a session without it is unaffected."""
+    mark = getattr(session, "started_by_name", None)
+    if mark is not None:
+        mark()
 
 
 def _make_on_chunk(session):
@@ -178,6 +243,8 @@ async def _run_turn(
     store,
     eou_ms: int | None,
     caption=None,
+    on_done=None,
+    on_name_only=None,
 ) -> None:
     """THINKING -> SPEAKING -> IDLE for one real turn. Runs the blocking
     STT/LLM/TTS work in an executor thread; every `core.handle()` call
@@ -187,7 +254,11 @@ async def _run_turn(
     `generation` is this turn's stamp, taken from `turn_generation` when
     it started. If a barge-in has since bumped the counter, this turn has
     been superseded and must not touch state on its way out — the press
-    that superseded it already did."""
+    that superseded it already did.
+
+    `on_done(generation)` (the open conversation) may take the turn's end
+    instead of `done`; `on_name_only(generation)` takes a turn that was
+    only her name -- see `build_app`."""
     loop = asyncio.get_running_loop()
     caption = caption or (lambda who, text: None)
     try:
@@ -199,7 +270,14 @@ async def _run_turn(
             caption("her", heard)
         caption("saathi", _FALLBACK_REPLY_TEXT)
         await _speak_and_finish(
-            session, core, generation, turn_generation, _FALLBACK_REPLY_TEXT, store, eou_ms
+            session,
+            core,
+            generation,
+            turn_generation,
+            _FALLBACK_REPLY_TEXT,
+            store,
+            eou_ms,
+            on_done=on_done,
         )
         return
     heard = getattr(session, "last_heard", None)
@@ -216,12 +294,20 @@ async def _run_turn(
         # STT, LLM or TTS time into the p95 the latency budget reads.
         if turn_generation["value"] != generation:
             return
+        if on_name_only is not None and getattr(session, "heard_only_name", False):
+            # Only her name: she is calling, not asking yet. No reply,
+            # no model call (cascade.py) -- eyes on her, still listening.
+            logger.info("only her name was said; listening for the rest")
+            on_name_only(generation)
+            return
         core.handle(Event("no_response"))
         logger.info("nothing said; turn ended silently")
         return
     logger.info("reply: %s", reply_text)
 
-    await _speak_and_finish(session, core, generation, turn_generation, reply_text, store, eou_ms)
+    await _speak_and_finish(
+        session, core, generation, turn_generation, reply_text, store, eou_ms, on_done=on_done
+    )
 
 
 async def _speak_and_finish(
@@ -232,6 +318,7 @@ async def _speak_and_finish(
     text: str,
     store=None,
     eou_ms: int | None = None,
+    on_done=None,
 ) -> None:
     """THINKING/already-SPEAKING -> SPEAKING -> IDLE. Shared by the real
     reply and the fallback: both are "say this, then go back to IDLE",
@@ -248,7 +335,8 @@ async def _speak_and_finish(
         logger.exception("speaking failed")
     if turn_generation["value"] != generation:
         return
-    core.handle(Event("done"))
+    if on_done is None or not on_done(generation):
+        core.handle(Event("done"))
     _log_turn(store, session, eou_ms)
 
 
@@ -300,6 +388,15 @@ def build_app(
     media=None,
     cards=None,
     hold=None,
+    wake=None,
+    wake_endpointer=None,
+    emotions=None,
+    calls=None,
+    family=None,
+    follow_up_seconds: float | None = None,
+    open_after_reply: bool = True,
+    listen_window=None,
+    name_prompt_seconds: float = _NAME_PROMPT_SECONDS,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -307,6 +404,7 @@ def build_app(
     turn_generation = {"value": 0}
     turn_started_at: dict[str, float | None] = {"value": None}
     hold_task: dict[str, asyncio.Task | None] = {"task": None}
+    preview_task: dict[str, asyncio.Task | None] = {"task": None}
 
     def _send_all(message: str) -> None:
         for ws in list(websockets):
@@ -320,6 +418,42 @@ def build_app(
         if store is None or read_preference(store, CAPTIONS_KEY, "off") != "on":
             return
         _send_all(json.dumps({"type": "caption", "who": who, "text": text}))
+
+    async def run_preview() -> None:
+        """Her words so far, captioned while she is still holding the
+        key -- so the person demoing sees the mic is heard before the
+        turn ends, not after. Stops at release (cancelled) or when the
+        state leaves LISTENING. A failed poll is logged and the next one
+        tried; it never touches the turn."""
+        loop = asyncio.get_running_loop()
+        last = ""
+        while True:
+            await asyncio.sleep(_PREVIEW_SECONDS)
+            if core.state not in (State.LISTENING, State.ATTENTIVE):
+                return
+            try:
+                heard = await loop.run_in_executor(None, session.preview_heard)
+            except Exception:
+                logger.exception("live caption failed")
+                continue
+            if core.state not in (State.LISTENING, State.ATTENTIVE):
+                return
+            if heard and heard != last:
+                last = heard
+                caption("her", heard)
+
+    def start_preview() -> None:
+        if getattr(session, "preview_heard", None) is None:
+            return
+        if store is None or read_preference(store, CAPTIONS_KEY, "off") != "on":
+            return
+        stop_preview()
+        preview_task["task"] = asyncio.get_running_loop().create_task(run_preview())
+
+    def stop_preview() -> None:
+        task = preview_task.pop("task", None)
+        if task is not None:
+            task.cancel()
 
     def broadcast_state(state, _event: Event) -> None:
         _send_all(json.dumps({"type": "state", "state": state.value}))
@@ -340,10 +474,14 @@ def build_app(
     # between turns, e.g. by initiative). Read from the executor thread
     # inside end_turn(), where the counter is stable for the turn.
     card_shown_in: dict[str, int | None] = {"generation": None}
+    # The turn that last changed the media (play, pause, volume...).
+    media_touched_in: dict[str, int | None] = {"generation": None}
 
     def broadcast_threadsafe(payload: dict) -> None:
         if payload.get("type") == "card" and payload.get("card") is not None:
             card_shown_in["generation"] = turn_generation["value"]
+        if payload.get("type") == "media":
+            media_touched_in["generation"] = turn_generation["value"]
         loop = loop_holder["loop"]
         if loop is None or loop.is_closed():
             return
@@ -367,7 +505,10 @@ def build_app(
             turn_generation["value"] += 1
             core.handle(Event("no_response"))
 
-    seams = [obj for obj in (media, cards) if obj is not None]
+    # `family` (call/family_runtime.py): the family-app call's device
+    # end -- `{"type": "rtc", ...}` both ways between this page and
+    # call/webrtc.py; the server only carries it.
+    seams = [obj for obj in (media, cards, emotions, calls, family) if obj is not None]
     if seams:
 
         async def install_seams(_app: web.Application) -> None:
@@ -412,6 +553,346 @@ def build_app(
     # for. Found in review.
     press_route: dict[str, str | None] = {"value": None}
 
+    def begin_capture(on_chunk, preroll: bytes = b"", follow=None, on_complete=None) -> None:
+        """Opens the mic for the turn just started (LISTENING, or
+        ATTENTIVE on the wake path). Shared by the spacebar and the
+        wake word; only the trigger differs. `preroll` is audio already
+        heard that belongs to this turn, fed before the live mic.
+        `follow` (wake path) takes over the wake listener's own mic
+        instead of starting another `parec`: no gap mid-sentence, and
+        it feeds what arrived while the name was being checked itself."""
+        session.start()
+        turn_started_at["value"] = time.monotonic()
+        if preroll:
+            on_chunk(preroll)
+        if follow is not None:
+            live_capture["capture"] = follow(on_chunk, on_complete)
+        else:
+            capture = Capture(capture_source_id, on_chunk, _CAPTURE_CHUNK_BYTES)
+            capture.start()
+            live_capture["capture"] = capture
+        start_preview()
+
+    def end_listening(waited_ms: int | None = None, quiet_since: float | None = None) -> None:
+        """LISTENING -> THINKING and the turn runs: on the key's release,
+        or when a hands-free turn's endpointer says she's finished.
+
+        `turns.eou_ms` is the time from the turn's start to here -- how
+        long she was listened to, not how long the device waited after
+        her last word (tests/test_screen_server.py pins that meaning).
+        `waited_ms`, the hands-free wait after her last word, goes to
+        the log instead, so a slow endpointer is visible. Under the old
+        2 s audio bursts (audio/capture.py) every eou_ms was a multiple
+        of ~2,000 for exactly that reason."""
+        if not core.handle(Event("release")):
+            return
+        if session is None:
+            core.handle(Event("no_response"))  # fake: no AI at checkpoint 1
+            return
+        stop_preview()
+        capture = live_capture.pop("capture", None)
+        if capture is not None:
+            capture.stop()
+        eou_ms = None
+        started_at = turn_started_at["value"]
+        if started_at is not None:
+            eou_ms = round((time.monotonic() - started_at) * 1000)
+        if waited_ms is not None:
+            logger.info("hands-free turn ended %d ms after her last word", waited_ms)
+        turn_generation["value"] += 1
+        generation = turn_generation["value"]
+        # When she last spoke (or the turn began, if she never did): how
+        # long she has already been quiet if the turn was only her name.
+        last_quiet["generation"], last_quiet["at"] = generation, quiet_since
+        asyncio.get_running_loop().create_task(
+            _run_turn(
+                session,
+                core,
+                generation,
+                turn_generation,
+                store,
+                eou_ms,
+                caption=caption,
+                on_done=open_conversation,
+                on_name_only=heard_only_name,
+            )
+        )
+
+    # The wake seam. `wake` is audio/wake.py's WakeWordListener, or
+    # anything built the same way: `wake(on_wake, should_listen)`
+    # returns an object with start()/stop(). It hears the name on a
+    # worker thread; everything it causes happens here, on the loop,
+    # through core.py like a press would -- IDLE -> ATTENTIVE (the eyes
+    # perk up) -> LISTENING, then the endpointer ends the turn, since
+    # there is no key to let go of.
+    def on_wake(pcm: bytes, rest: str, after=None, follow=None, last_speech_at=None) -> None:
+        if session is None or capture_source_id is None:
+            return
+        # Taken first: once the state leaves IDLE the listener stops
+        # collecting and clears it. Not needed with `follow`, which
+        # hands over everything after the name itself.
+        preroll = after() if after is not None and not rest and follow is None else b""
+        if core.state == State.SLEEPING:
+            core.handle(Event("wake"))
+        if not core.handle(Event("notice")):
+            return  # not idle any more: a press got there first
+        loop = asyncio.get_running_loop()
+        if rest:
+            # "Saathi, play a song" in one breath: the request is already
+            # in this audio. Run it as the turn, no further listening.
+            session.start()
+            _mark_started_by_name(session)
+            session.send_audio(pcm)
+            turn_started_at["value"] = time.monotonic()
+            core.handle(Event("confirm"))
+            end_listening(_ms_since(last_speech_at))
+            return
+        endpointer = wake_endpointer()
+
+        def on_chunk(chunk: bytes) -> None:
+            session.send_audio(chunk)
+            if endpointer.push(chunk):
+                loop.call_soon_threadsafe(end_hands_free, endpointer)
+
+        def on_complete() -> None:
+            # The wake listener heard a whole command at a short pause
+            # ("call Udhi"): end now, not at the endpointer's long one.
+            loop.call_soon_threadsafe(end_hands_free, endpointer)
+
+        live_endpointer["value"] = endpointer
+        begin_capture(on_chunk, preroll, follow=follow, on_complete=on_complete)
+        _mark_started_by_name(session)
+        # ATTENTIVE long enough for the eyes to show they heard her
+        # name; the mic is already open, so nothing she says is lost.
+        loop.call_later(_ATTENTIVE_SECONDS, confirm_attention)
+
+    def confirm_attention() -> None:
+        if core.state == State.ATTENTIVE:
+            core.handle(Event("confirm"))
+
+    def end_hands_free(endpointer) -> None:
+        if live_endpointer["value"] is not endpointer:
+            return  # a stale signal from a turn already ended
+        live_endpointer["value"] = None
+        if core.state == State.ATTENTIVE:
+            core.handle(Event("confirm"))
+        if core.state == State.LISTENING:
+            last_speech_at = getattr(endpointer, "last_speech_at", None)
+            end_listening(
+                _ms_since(last_speech_at), quiet_since=last_speech_at or turn_started_at["value"]
+            )
+
+    # The open conversation (SPEC.md, "Triggers": once a conversation is
+    # open, follow-ups need no trigger). After a spoken reply the eyes
+    # stay on her (ATTENTIVE) and a ListenWindow (audio/listen_window.py)
+    # listens hands-free: speech starting inside the window is the next
+    # turn, a quiet window closes the conversation (IDLE, the name is
+    # needed again). The window's mic is its own `Capture`; nothing goes
+    # to the session until she actually starts.
+    window_holder: dict[str, dict | None] = {"entry": None}
+    last_quiet: dict = {"generation": None, "at": None}
+    if listen_window is None:
+
+        def listen_window(seconds: float):
+            from saathi.audio.listen_window import ListenWindow
+
+            return ListenWindow(vad_is_speech(), window_seconds=seconds)
+
+    def close_window() -> None:
+        entry = window_holder["entry"]
+        window_holder["entry"] = None
+        if entry is None:
+            return
+        with entry["lock"]:
+            entry["closed"] = True
+        capture = entry["capture"]
+        if capture is not None and live_capture.get("capture") is not capture:
+            capture.stop()
+
+    def open_window(seconds: float, on_lapse) -> None:
+        close_window()
+        loop = asyncio.get_running_loop()
+        window = listen_window(seconds)
+        entry: dict = {"window": window, "lock": threading.Lock(), "closed": False}
+
+        def on_chunk(chunk: bytes) -> None:
+            with entry["lock"]:
+                if entry["closed"]:
+                    return
+                was_started = window.started
+                event = window.push(chunk)
+                if was_started:
+                    session.send_audio(chunk)
+                elif event == "start":
+                    session.start()
+                    session.send_audio(window.started_audio())
+                if event == "start":
+                    loop.call_soon_threadsafe(window_started, entry)
+                    if window.ended:
+                        event = "end"
+                if event == "end":
+                    entry["closed"] = True
+                    loop.call_soon_threadsafe(window_ended, entry)
+                elif event == "lapse":
+                    entry["closed"] = True
+                    loop.call_soon_threadsafe(window_lapsed, entry, on_lapse)
+
+        entry["capture"] = Capture(capture_source_id, on_chunk, _CAPTURE_CHUNK_BYTES)
+        window_holder["entry"] = entry
+        entry["capture"].start()
+
+    def window_started(entry: dict) -> None:
+        if window_holder["entry"] is not entry:
+            return
+        if core.state == State.ATTENTIVE:
+            core.handle(Event("confirm"))
+        if core.state != State.LISTENING:
+            close_window()
+            return
+        turn_started_at["value"] = time.monotonic()
+        live_capture["capture"] = entry["capture"]
+        start_preview()
+
+    def window_ended(entry: dict) -> None:
+        if window_holder["entry"] is not entry:
+            return
+        window_holder["entry"] = None
+        if core.state == State.LISTENING:
+            last_speech_at = entry["window"].last_speech_at
+            end_listening(
+                _ms_since(last_speech_at), quiet_since=last_speech_at or turn_started_at["value"]
+            )
+
+    def window_lapsed(entry: dict, on_lapse) -> None:
+        if window_holder["entry"] is not entry:
+            return
+        close_window()
+        if core.state == State.ATTENTIVE:
+            on_lapse()
+
+    def conversation_can_stay_open(generation: int) -> bool:
+        if follow_up_seconds is None or follow_up_seconds <= 0:
+            return False
+        if session is None or capture_source_id is None:
+            return False
+        if calls is not None and calls.current_id is not None:
+            return False  # a call is on: its audio is not for her turn
+        if hold is not None and hold.active:
+            return False
+        if (
+            media is not None
+            and media_touched_in["generation"] == generation
+            and getattr(media, "playing", False)
+            and not getattr(media, "paused", False)
+        ):
+            # The reply was a media command ("louder", "next") and the
+            # song is playing: the action was the answer, and a window
+            # would hold the song ducked for seconds right after she
+            # asked to hear it. Closed; her name opens the next one.
+            return False
+        return True
+
+    def open_conversation(generation: int, *, after_her_name: bool = False) -> bool:
+        """`on_done` for every spoken reply: SPEAKING -> ATTENTIVE with
+        the window open, or False (the caller sends `done`). With
+        `open_after_reply` off, only the "Yes?" after her name opens it."""
+        if not open_after_reply and not after_her_name:
+            return False
+        if not conversation_can_stay_open(generation):
+            return False
+        if not core.handle(Event("follow_up")):
+            return False
+        open_window(follow_up_seconds, close_conversation)
+        return True
+
+    def close_conversation() -> None:
+        core.handle(Event("dismiss"))
+
+    def heard_only_name(generation: int) -> None:
+        """The turn was only her name ("Saathi", heard by the cloud as
+        "Saudi?"). She is calling, not asking: eyes on her (ATTENTIVE),
+        listening; if she stays quiet for `name_prompt_seconds`, a short
+        "Yes?" out loud, then the usual open window."""
+        if follow_up_seconds is None or capture_source_id is None:
+            core.handle(Event("no_response"))
+            return
+        if not core.handle(Event("name_only")):
+            return
+        # Counted from when she went quiet, not from now: the turn already
+        # waited for her pause and its transcript.
+        since = last_quiet["at"] if last_quiet["generation"] == generation else None
+        remaining = name_prompt_seconds - (time.monotonic() - since if since else 0.0)
+        if remaining <= _NAME_PROMPT_MIN_WAIT:
+            prompt_her(generation)
+            return
+        open_window(remaining, lambda: prompt_her(generation))
+
+    def prompt_her(generation: int) -> None:
+        if turn_generation["value"] != generation:
+            return
+        if not core.handle(Event("prompt")):
+            return
+        name_prompt = getattr(session, "name_prompt", None)
+        line = name_prompt() if name_prompt is not None else "Yes?"
+        turn_generation["value"] += 1
+        asyncio.get_running_loop().create_task(
+            _speak_and_finish(
+                session,
+                core,
+                turn_generation["value"],
+                turn_generation,
+                line,
+                None,  # not an exchange: no `turns` row
+                None,
+                on_done=lambda g: open_conversation(g, after_her_name=True),
+            )
+        )
+
+    async def close_window_on_cleanup(_app: web.Application) -> None:
+        close_window()
+
+    app.on_cleanup.append(close_window_on_cleanup)
+
+    live_endpointer: dict[str, object | None] = {"value": None}
+    if wake_endpointer is None:
+
+        def wake_endpointer():
+            if follow_up_seconds:
+                # Only her name and then nothing: the turn ends when it
+                # is time for "Yes?", not at the endpointer's 5 s.
+                return Endpointer(vad_is_speech(), no_speech_seconds=name_prompt_seconds)
+            return Endpointer(vad_is_speech())
+
+    if wake is not None:
+        listener_holder: dict[str, object | None] = {"listener": None}
+
+        async def start_wake(_app: web.Application) -> None:
+            loop = asyncio.get_running_loop()
+
+            def on_wake_threadsafe(pcm: bytes, rest: str, after=None, **handover) -> None:
+                loop.call_soon_threadsafe(lambda: on_wake(pcm, rest, after, **handover))
+
+            # Deaf to her name while a call is on screen (Twilio or the
+            # family app -- both drive the call panel): "Saathi" said to
+            # her son mid-call would otherwise start a turn that talks
+            # over him. Found in review, 2026-10-08.
+            def should_listen() -> bool:
+                if calls is not None and calls.current_id is not None:
+                    return False
+                return core.state in (State.IDLE, State.SLEEPING)
+
+            listener = wake(on_wake_threadsafe, should_listen)
+            listener.start()
+            listener_holder["listener"] = listener
+
+        async def stop_wake(_app: web.Application) -> None:
+            listener = listener_holder.pop("listener", None)
+            if listener is not None:
+                listener.stop()
+
+        app.on_startup.append(start_wake)
+        app.on_cleanup.append(stop_wake)
+
     async def index(_request: web.Request) -> web.FileResponse:
         return web.FileResponse(_STATIC_DIR / "index.html")
 
@@ -426,6 +907,10 @@ def build_app(
             # reload too: the server holds the question, the browser
             # only draws it.
             await ws.send_str(json.dumps({"type": "card", "card": cards.current.as_message()}))
+        if calls is not None:
+            call_message = calls.message()
+            if call_message is not None:
+                await ws.send_str(json.dumps(call_message))
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -505,6 +990,32 @@ def build_app(
                             else:
                                 logger.info("tap on %s dropped: not the current card", card_id)
                     continue
+                if payload.get("type") == "rtc":
+                    # The kiosk's half of a family-app call (offer, ICE,
+                    # connected/failed). Validated in call/webrtc.py.
+                    if family is not None:
+                        family.on_device_message(payload)
+                    continue
+                if payload.get("type") == "call_hangup":
+                    # The phone panel's End call button. Not a hang-up
+                    # here: the same registered hold handler a 2 s hold
+                    # fires, and only for the call the panel is showing.
+                    call_id = payload.get("id")
+                    if (
+                        calls is not None
+                        and hold is not None
+                        and isinstance(call_id, str)
+                        and call_id == calls.current_id
+                        and hold.active
+                    ):
+                        task = hold_task["task"]
+                        if task is not None:
+                            task.cancel()
+                            hold_task["task"] = None
+                        hold.complete()
+                    else:
+                        logger.info("end-call tap dropped: no such call on screen")
+                    continue
                 if payload.get("type") != "input":
                     continue
                 kind = payload.get("event")
@@ -535,7 +1046,18 @@ def build_app(
                     # capture. See core.py's module docstring for the bug
                     # that taught us this the first time.
                     was_speaking = core.state == State.SPEAKING
+                    was_attentive = core.state == State.ATTENTIVE
                     transitioned = core.handle(Event("press"))
+                    if transitioned and was_attentive:
+                        # A press during an open window (or the wake
+                        # path's moment of attention): the key wins.
+                        # Whatever mic that window had is let go first.
+                        close_window()
+                        stop_preview()
+                        live_endpointer["value"] = None
+                        old_capture = live_capture.pop("capture", None)
+                        if old_capture is not None:
+                            old_capture.stop()
                     if transitioned and session is not None and capture_source_id is not None:
                         if was_speaking:
                             # Barge-in: this press just superseded whatever
@@ -545,44 +1067,18 @@ def build_app(
                             # been superseded the moment it checks.
                             turn_generation["value"] += 1
                             session.interrupt()
-                        session.start()
-                        turn_started_at["value"] = time.monotonic()
-                        capture = Capture(
-                            capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
-                        )
-                        capture.start()
-                        live_capture["capture"] = capture
+                        begin_capture(_make_on_chunk(session))
                 elif kind == "release":
-                    if core.handle(Event("release")):
-                        if session is None:
-                            core.handle(Event("no_response"))  # fake: no AI at checkpoint 1
-                        else:
-                            capture = live_capture.pop("capture", None)
-                            if capture is not None:
-                                capture.stop()
-                            eou_ms = None
-                            started_at = turn_started_at["value"]
-                            if started_at is not None:
-                                eou_ms = round((time.monotonic() - started_at) * 1000)
-                            turn_generation["value"] += 1
-                            generation = turn_generation["value"]
-                            asyncio.get_running_loop().create_task(
-                                _run_turn(
-                                    session,
-                                    core,
-                                    generation,
-                                    turn_generation,
-                                    store,
-                                    eou_ms,
-                                    caption=caption,
-                                )
-                            )
+                    end_listening()
         finally:
             websockets.discard(ws)
         return ws
 
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
+    if family is not None:
+        # Ctrl+P's pairing QR: loopback-only, never on the tunnelled app.
+        family.install_local_routes(app)
     app.router.add_static("/static/", _STATIC_DIR)
     return app
 
@@ -597,6 +1093,12 @@ def run(
     media=None,
     cards=None,
     hold=None,
+    wake=None,
+    emotions=None,
+    calls=None,
+    family=None,
+    follow_up_seconds: float | None = None,
+    open_after_reply: bool = True,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
@@ -608,6 +1110,12 @@ def run(
             media=media,
             cards=cards,
             hold=hold,
+            wake=wake,
+            emotions=emotions,
+            calls=calls,
+            family=family,
+            follow_up_seconds=follow_up_seconds,
+            open_after_reply=open_after_reply,
         ),
         host=host,
         port=port,

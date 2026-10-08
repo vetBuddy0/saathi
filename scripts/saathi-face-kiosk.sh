@@ -40,6 +40,11 @@ if [ -z "$CHROMIUM_BIN" ]; then
     exit 1
 fi
 
+# --use-fake-ui-for-media-stream: family-app calls (saathi/call/webrtc.py)
+# open the microphone from this page, and nobody is at a kiosk to click
+# "Allow". It accepts the prompt; it does not fake the device -- the
+# system default mic is used. Safe here because this kiosk only ever
+# loads Saathi's own page on loopback.
 exec "$CHROMIUM_BIN" \
     --kiosk \
     --ozone-platform=wayland \
@@ -52,6 +57,7 @@ exec "$CHROMIUM_BIN" \
     --overscroll-history-navigation=0 \
     --disable-pinch \
     --autoplay-policy=no-user-gesture-required \
+    --use-fake-ui-for-media-stream \
     --check-for-update-interval=31536000 \
     --password-store=basic \
     "$URL"

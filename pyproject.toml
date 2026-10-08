@@ -7,6 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.10",
     "deno>=2.9.7",
+    # audio/wake.py: hears "Saathi" on-device (tiny.en). Was the
+    # `hardware` group, for smoke.py's AEC check only, until the wake
+    # word needed it in every run. MIT; aarch64 wheels via ctranslate2.
+    "faster-whisper>=1.0",
     "groq>=1.7.0",
     "numpy>=2.5.3",
     # identity/embed.py's local sentence embeddings (MiniLM, Apache 2.0).
@@ -16,9 +20,17 @@ dependencies = [
     "onnxruntime>=1.30.0",
     "openai>=3.19.2",
     "piper-tts>=1.8.0",
+    # call/push.py: Web Push (VAPID ES256 + RFC 8291 aes128gcm) for the
+    # family app's ring. Already installed via yt-dlp[default]; named
+    # here because ringing must not depend on a YouTube library's
+    # extras. BSD-2; abi3 aarch64 wheels.
+    "pycryptodomex>=3.21",
     "pysilero-vad>=3.4.0",
     "pyudev>=0.24; sys_platform == 'linux'",
     "pywebrtc-audio>=0.2.0",
+    # call/family_server.py: the pairing QR code. Pure Python, no
+    # dependencies, BSD-3; py3-none-any wheel.
+    "segno>=1.6",
     # cascade.py's STT upload: FLAC instead of raw WAV. Real, small
     # aarch64 wheel (1.2MB, wraps libsndfile) -- measured live against
     # the real Whisper endpoint, ~11% faster median time-to-response
@@ -36,12 +48,6 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
-]
-# STT for smoke.py's hardware-in-the-loop AEC check only (SPEC.md,
-# "Audio"). Not a dependency of the default install or CI: that check
-# needs a real speaker and mic, so it never runs headless.
-hardware = [
-    "faster-whisper>=1.0",
 ]
 # saathi/voice/tts/kokoro_backend.py. Not installed by default or in CI:
 # torch is an unconditional dependency (a real aarch64 wheel exists, but

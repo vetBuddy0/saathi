@@ -45,6 +45,8 @@ from pywebrtc_audio import AudioProcessor
 
 _BLOCK_RE = re.compile(r"^(Source|Sink) #(\d+)\n((?:.*\n?)*?)(?=\n\S|\Z)", re.MULTILINE)
 _FIELD_RE = re.compile(r"^\t(Name|Owner Module): (.*)$", re.MULTILINE)
+_MODULE_RE = re.compile(r"^Module #(\d+)\n((?:.*\n?)*?)(?=\n\S|\Z)", re.MULTILINE)
+_MODULE_FIELD_RE = re.compile(r"^\t(Name|Argument): (.*)$", re.MULTILINE)
 _PROP_RE = re.compile(r'^\t{1,2}([\w.]+) = "(.*)"$', re.MULTILINE)
 
 PactlRunner = Callable[[list[str]], str]
@@ -55,17 +57,18 @@ def _default_pactl(args: list[str]) -> str:
     return result.stdout
 
 
-def _filter_devices(output: str) -> list[dict]:
+def _filter_devices(output: str, *, any_class: bool = False) -> list[dict]:
     """Parse `pactl list sources|sinks` text for entries PulseAudio itself
     tags `device.class = "filter"` — the echo-cancel module's own virtual
     devices, never real hardware (see `audio/devices.py`, which excludes
-    exactly these for the opposite reason)."""
+    exactly these for the opposite reason). `any_class` drops that
+    filter, for `_scoped_modules`' path: PipeWire sets no device.class."""
     devices = []
     for match in _BLOCK_RE.finditer(output + "\n\n"):
         block = match.group(3)
         fields = dict(_FIELD_RE.findall(block))
         props = dict(_PROP_RE.findall(block))
-        if props.get("device.class") != "filter":
+        if not any_class and props.get("device.class") != "filter":
             continue
         name = fields.get("Name")
         if not name:
@@ -78,6 +81,21 @@ def _filter_devices(output: str) -> list[dict]:
             }
         )
     return devices
+
+
+def _scoped_modules(output: str, mic_id: str, speaker_id: str) -> list[str]:
+    """Indexes of the `module-echo-cancel`s in `pactl list modules` text
+    that were loaded for exactly this mic/speaker pair -- read from the
+    module's own load arguments, which both servers report verbatim."""
+    found = []
+    for match in _MODULE_RE.finditer(output + "\n\n"):
+        fields = dict(_MODULE_FIELD_RE.findall(match.group(2)))
+        if fields.get("Name") != "module-echo-cancel":
+            continue
+        args = dict(a.split("=", 1) for a in fields.get("Argument", "").split() if "=" in a)
+        if args.get("source_master") == mic_id and args.get("sink_master") == speaker_id:
+            found.append(match.group(1))
+    return found
 
 
 @dataclass(frozen=True)
@@ -113,15 +131,32 @@ class SystemEchoCancel:
         a gap to close: matching an unscoped module by guesswork would be
         exactly the kind of assumption SPEC.md's "no device name" rule
         exists to rule out."""
-        sources = _filter_devices(self._run(["list", "sources"]))
-        sinks = _filter_devices(self._run(["list", "sinks"]))
+        sources_text = self._run(["list", "sources"])
+        sinks_text = self._run(["list", "sinks"])
+        sources = _filter_devices(sources_text)
+        sinks = _filter_devices(sinks_text)
         source = next((s for s in sources if s["master"] == mic_id), None)
         sink = next((s for s in sinks if s["master"] == speaker_id), None)
-        if source is None or sink is None:
-            return None
-        return EchoCancelHandles(
-            module_index=source["module"], source_id=source["name"], sink_id=sink["name"]
-        )
+        if source is not None and sink is not None:
+            return EchoCancelHandles(
+                module_index=source["module"], source_id=source["name"], sink_id=sink["name"]
+            )
+        # PipeWire's pulse server (found live, 2026-10-07, PipeWire
+        # 1.6) reports neither device.class nor device.master_device on
+        # the module's nodes, so the match above never succeeds there:
+        # every run loaded another module, failed to find it, and
+        # started with no voice engine. The module's own arguments name
+        # the pair on both servers; its nodes are the ones it owns.
+        all_sources = _filter_devices(sources_text, any_class=True)
+        all_sinks = _filter_devices(sinks_text, any_class=True)
+        for module in _scoped_modules(self._run(["list", "modules"]), mic_id, speaker_id):
+            source = next((s for s in all_sources if s["module"] == module), None)
+            sink = next((s for s in all_sinks if s["module"] == module), None)
+            if source is not None and sink is not None:
+                return EchoCancelHandles(
+                    module_index=module, source_id=source["name"], sink_id=sink["name"]
+                )
+        return None
 
     def load(self, mic_id: str, speaker_id: str) -> EchoCancelHandles:
         """Loads a new `module-echo-cancel` for this pair. Re-queries
@@ -149,6 +184,55 @@ class SystemEchoCancel:
 
     def unload(self, handles: EchoCancelHandles) -> None:
         self._run(["unload-module", handles.module_index])
+
+    def default_sink(self) -> str | None:
+        """The server's default sink right now, or None if it won't say."""
+        name = self._run(["get-default-sink"]).strip()
+        if name:
+            return name
+        match = re.search(r"^Default Sink: (.+)$", self._run(["info"]), re.MULTILINE)
+        return match.group(1).strip() if match else None
+
+    def route_default_through(
+        self, handles: EchoCancelHandles, speaker_id: str
+    ) -> Callable[[], None] | None:
+        """Makes the echo-cancel sink the default while Saathi runs, so
+        audio from anything that plays to "the default" -- the kiosk's
+        YouTube player above all -- passes through the canceller and is
+        part of its reference. Returns `restore()` (puts the previous
+        default back, once, and only if nobody has changed it since), or
+        None when nothing was changed.
+
+        Why (2026-10-08): live, the song on screen was transcribed into
+        her request. Saathi's own voice is played to `handles.sink_id`
+        explicitly and cancelled; the browser played to the hardware
+        default, so the canceller never saw the music and the mic heard
+        all of it. Every id here is one PulseAudio reported -- the sink
+        the module created and the speaker `devices.py` detected -- never
+        a name in code. If the previous default was already this sink (a
+        run that died without restoring), restore goes to the detected
+        speaker instead. Lost: moving only the browser's stream
+        (`move-sink-input`) -- the kiosk's stream comes and goes with
+        every video, and would have to be chased."""
+        if handles.sink_id not in self._run(["list", "short", "sinks"]).split():
+            return None  # not a sink this server has: change nothing
+        previous = self.default_sink()
+        if previous is None:
+            return None
+        if previous != handles.sink_id:
+            self._run(["set-default-sink", handles.sink_id])
+        back_to = previous if previous != handles.sink_id else speaker_id
+        restored = False
+
+        def restore() -> None:
+            nonlocal restored
+            if restored:
+                return
+            restored = True
+            if self.default_sink() == handles.sink_id:
+                self._run(["set-default-sink", back_to])
+
+        return restore
 
 
 class WebrtcAec:

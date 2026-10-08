@@ -1555,3 +1555,340 @@ async def test_a_captions_value_outside_on_off_is_dropped(monkeypatch):
             reply = await ws.receive_json()
     store.close()
     assert reply["key"] == "language"  # the malformed one produced nothing
+
+
+# -- live captions: her words while the key is still held ------------------
+
+
+class PreviewSession(HeardSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.preview_calls = 0
+
+    def preview_heard(self) -> str:
+        self.preview_calls += 1
+        return "play a song"
+
+
+async def test_live_captions_arrive_before_release(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    monkeypatch.setattr(server_module, "_PREVIEW_SECONDS", 0.01)
+    store = _tmp_store()
+    session = PreviewSession()
+    app = build_app(Core(), session=session, capture_source_id="src", store=store)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "set_preference", "key": "captions", "value": "on"})
+            await ws.receive_json()  # preference_result
+            await ws.receive_json()  # settings
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            # Still holding: her words so far, once -- an unchanged
+            # preview is not re-sent.
+            assert await ws.receive_json() == {
+                "type": "caption",
+                "who": "her",
+                "text": "play a song",
+            }
+            await asyncio.sleep(0.05)
+            calls_before_release = session.preview_calls
+            assert calls_before_release > 1
+            await ws.send_json({"type": "input", "event": "release"})
+            got = []
+            while True:
+                message = await ws.receive_json()
+                got.append(message)
+                if message == {"type": "state", "state": "idle"}:
+                    break
+            await asyncio.sleep(0.05)
+    store.close()
+    assert got[0] == {"type": "state", "state": "thinking"}
+    # Polling stopped at release (at most one poll already in flight).
+    assert session.preview_calls <= calls_before_release + 1
+
+
+async def test_no_live_captions_while_captions_are_off(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    monkeypatch.setattr(server_module, "_PREVIEW_SECONDS", 0.01)
+    store = _tmp_store()
+    session = PreviewSession()
+    app = build_app(Core(), session=session, capture_source_id="src", store=store)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            await ws.receive_json()  # listening
+            await asyncio.sleep(0.05)
+            await ws.send_json({"type": "input", "event": "release"})
+            got = []
+            while True:
+                message = await ws.receive_json()
+                got.append(message)
+                if message == {"type": "state", "state": "idle"}:
+                    break
+    store.close()
+    assert session.preview_calls == 0  # no STT spent on captions nobody sees
+    assert not [m for m in got if m["type"] == "caption"]
+
+
+# -- wake word: "Saathi" starts a turn with no key --------------------------
+
+
+class ChunkCapture(FakeCapture):
+    """A FakeCapture that keeps `on_chunk`, so a test can feed audio."""
+
+    def __init__(self, source_id, on_chunk, chunk_bytes) -> None:
+        super().__init__(source_id, on_chunk, chunk_bytes)
+        self.on_chunk = on_chunk
+
+
+class FakeWake:
+    def __init__(self) -> None:
+        self.on_wake = None
+        self.should_listen = None
+        self.started = False
+
+    def __call__(self, on_wake, should_listen):
+        self.on_wake, self.should_listen = on_wake, should_listen
+        return self
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        pass
+
+
+class FakeEndpointer:
+    def push(self, audio: bytes) -> bool:
+        return audio == b"END"
+
+
+class RecordingSession(FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.audio: list[bytes] = []
+
+    def start(self) -> None:
+        super().start()
+        self.audio = []
+
+    def send_audio(self, chunk: bytes) -> None:
+        self.audio.append(chunk)
+
+
+async def _states_until_idle(ws) -> list[str]:
+    states = []
+    while True:
+        message = await ws.receive_json()
+        if message["type"] == "state":
+            states.append(message["state"])
+            if message["state"] == "idle":
+                return states
+
+
+async def test_her_name_alone_perks_up_listens_then_ends_on_a_pause(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    monkeypatch.setattr(server_module, "_ATTENTIVE_SECONDS", 0.01)
+    ChunkCapture.instances.clear()
+    wake, session = FakeWake(), RecordingSession()
+    app = build_app(
+        Core(initial=State.IDLE),
+        session=session,
+        capture_source_id="src",
+        wake=wake,
+        wake_endpointer=FakeEndpointer,
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            assert wake.started and wake.should_listen() is True
+            wake.on_wake(b"saathi", "")
+            assert await ws.receive_json() == {"type": "state", "state": "attentive"}
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            assert wake.should_listen() is False  # the turn has the mic now
+            capture = ChunkCapture.instances[-1]
+            capture.on_chunk(b"play a song")
+            capture.on_chunk(b"END")  # the endpointer: she paused
+            states = await _states_until_idle(ws)
+    assert states == ["thinking", "speaking", "idle"]
+    assert capture.stopped
+    # The name itself is not part of the turn; what she said after it is.
+    assert session.audio == [b"play a song", b"END"]
+    assert session.spoken == ["reply"]
+
+
+async def test_name_and_request_in_one_breath_runs_the_turn_at_once(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    ChunkCapture.instances.clear()
+    wake, session = FakeWake(), RecordingSession()
+    app = build_app(
+        Core(initial=State.IDLE),
+        session=session,
+        capture_source_id="src",
+        wake=wake,
+        wake_endpointer=FakeEndpointer,
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            wake.on_wake(b"saathi play a song", "play a song")
+            states = await _states_until_idle(ws)
+    assert states == ["attentive", "listening", "thinking", "speaking", "idle"]
+    assert session.audio == [b"saathi play a song"]
+    assert ChunkCapture.instances == []  # no extra listening
+
+
+async def test_a_wake_from_sleep_still_starts_a_turn(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    wake, session = FakeWake(), RecordingSession()
+    app = build_app(
+        Core(), session=session, capture_source_id="src", wake=wake, wake_endpointer=FakeEndpointer
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            assert (await ws.receive_json())["state"] == "sleeping"
+            await ws.receive_json()  # settings
+            assert wake.should_listen() is True
+            wake.on_wake(b"saathi play", "play")
+            states = await _states_until_idle(ws)  # sleeping -> idle first
+            states += await _states_until_idle(ws)
+    assert states == ["idle", "attentive", "listening", "thinking", "speaking", "idle"]
+
+
+async def test_a_wake_mid_turn_is_ignored(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    ChunkCapture.instances.clear()
+    wake, session = FakeWake(), RecordingSession()
+    app = build_app(
+        Core(initial=State.IDLE),
+        session=session,
+        capture_source_id="src",
+        wake=wake,
+        wake_endpointer=FakeEndpointer,
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert (await ws.receive_json())["state"] == "listening"
+            wake.on_wake(b"saathi", "")
+            await asyncio.sleep(0.05)
+            assert len(ChunkCapture.instances) == 1  # only the key's capture
+            await ws.send_json({"type": "input", "event": "release"})
+            states = await _states_until_idle(ws)
+    assert states == ["thinking", "speaking", "idle"]
+
+
+async def test_what_she_said_after_the_name_starts_the_turn(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    monkeypatch.setattr(server_module, "_ATTENTIVE_SECONDS", 0.01)
+    ChunkCapture.instances.clear()
+    wake, session = FakeWake(), RecordingSession()
+    app = build_app(
+        Core(initial=State.IDLE),
+        session=session,
+        capture_source_id="src",
+        wake=wake,
+        wake_endpointer=FakeEndpointer,
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            wake.on_wake(b"saathi", "", lambda: b"play a")
+            assert (await ws.receive_json())["state"] == "attentive"
+            assert (await ws.receive_json())["state"] == "listening"
+            ChunkCapture.instances[-1].on_chunk(b" song")
+            ChunkCapture.instances[-1].on_chunk(b"END")
+            await _states_until_idle(ws)
+    assert session.audio == [b"play a", b" song", b"END"]
+
+
+class FakeFollow:
+    """What the wake listener's `follow()` hands back: its mic, for the turn."""
+
+    def __init__(self) -> None:
+        self.on_chunk = None
+        self.on_complete = None
+        self.stopped = False
+
+    def __call__(self, on_chunk, on_complete=None):
+        self.on_chunk, self.on_complete = on_chunk, on_complete
+        return self
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+async def test_an_early_wake_streams_the_listeners_own_mic_into_the_turn(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    monkeypatch.setattr(server_module, "_ATTENTIVE_SECONDS", 0.01)
+    ChunkCapture.instances.clear()
+    wake, session, follow = FakeWake(), RecordingSession(), FakeFollow()
+    app = build_app(
+        Core(initial=State.IDLE),
+        session=session,
+        capture_source_id="src",
+        wake=wake,
+        wake_endpointer=FakeEndpointer,
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            wake.on_wake(b"saathi ca", "", lambda: b"unused", follow=follow)
+            assert (await ws.receive_json())["state"] == "attentive"
+            follow.on_chunk(b"ll udhi")
+            follow.on_chunk(b"END")
+            states = await _states_until_idle(ws)
+    assert ChunkCapture.instances == []  # no second parec mid-sentence
+    assert follow.stopped
+    assert session.audio == [b"ll udhi", b"END"]
+    assert states[-3:] == ["thinking", "speaking", "idle"]
+
+
+async def test_a_whole_command_heard_at_a_short_pause_ends_the_turn(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    monkeypatch.setattr(server_module, "_ATTENTIVE_SECONDS", 0.01)
+    wake, session, follow = FakeWake(), RecordingSession(), FakeFollow()
+    app = build_app(
+        Core(initial=State.IDLE),
+        session=session,
+        capture_source_id="src",
+        wake=wake,
+        wake_endpointer=FakeEndpointer,
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            wake.on_wake(b"saathi", "", None, follow=follow)
+            assert (await ws.receive_json())["state"] == "attentive"
+            follow.on_chunk(b"call udhi")
+            follow.on_complete()  # from the listener's worker thread
+            states = await _states_until_idle(ws)
+    assert "thinking" in states and states[-1] == "idle"
+    assert follow.stopped
+    assert session.spoken == ["reply"]
+
+
+async def test_her_name_is_not_heard_while_a_call_is_on_screen(monkeypatch):
+    # "Saathi" said to her son mid-call must not start a turn that
+    # talks over him -- Twilio and family-app calls both drive the panel.
+    from saathi.screen.call_panel import CallPanel, CallView
+
+    monkeypatch.setattr(server_module, "Capture", ChunkCapture)
+    wake, calls = FakeWake(), CallPanel()
+    app = build_app(
+        Core(initial=State.IDLE),
+        session=RecordingSession(),
+        capture_source_id="src",
+        wake=wake,
+        wake_endpointer=FakeEndpointer,
+        calls=calls,
+    )
+    async with TestClient(TestServer(app)):
+        assert wake.should_listen() is True
+        calls.update(CallView("Udhi", "+65", "connected", connected_at=0.0))
+        assert wake.should_listen() is False
+        calls.update(None)
+        assert wake.should_listen() is True

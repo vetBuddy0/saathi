@@ -29,6 +29,14 @@ html, body {
   cursor: none;
 }
 
+/* Shown while the mouse moves (main.js), hidden again when it rests: the
+   face stays clean, but whoever sets the device up can still click Yes,
+   No, Unpair. Always-hidden lost -- found live, 2026-10-08: no way to
+   click the pairing screen's buttons. */
+html.pointer-active, html.pointer-active body {
+  cursor: default;
+}
+
 #face-container {
   position: fixed;
   inset: 0;
@@ -491,4 +499,108 @@ body.media--fullscreen.card--open #face-container {
   object-fit: cover;
   border-radius: 1.2vh;
   background: #000;
+}
+
+/* Phone panel (call-panel.js, 2026-10-07): while a call is on, the right
+   40% is a phone's own screen -- who, their number, the timer, and one big
+   red End call button. The face moves to the left 60% and eyes-face.js
+   fits the eyes to that box. Above the captions so they can never cover
+   the button; below a Holding card (the spacebar hold still shows its
+   progress over it). */
+#call-panel {
+  position: fixed;
+  inset: 0 0 0 60%;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4vh;
+  padding: 6vh 3vw;
+  box-sizing: border-box;
+  background: linear-gradient(180deg, #1d1814 0%, #120f0d 100%);
+  border-left: 1px solid rgba(255, 206, 133, 0.12);
+  color: var(--card-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK SC",
+    sans-serif;
+  text-align: center;
+  cursor: default;
+}
+#call-panel[hidden] {
+  display: none;
+}
+body.call--open #face-container {
+  inset: 0 40% 0 0;
+}
+/* A fullscreen video during a call: the face keeps its corner. */
+body.media--fullscreen.call--open #face-container {
+  inset: auto auto 3vh 3vh;
+}
+
+.call-panel__who {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5vh;
+  max-width: 100%;
+}
+.call-panel__name {
+  font-size: clamp(44px, 4.2vw, 96px);
+  line-height: 1.1;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.call-panel__number {
+  font-size: clamp(32px, 2.2vw, 52px);
+  color: #d9cfc0;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.call-panel__number:empty {
+  display: none;
+}
+.call-panel__status {
+  font-size: clamp(32px, 2vw, 46px);
+  color: var(--card-accent);
+}
+#call-panel[data-status="calling"] .call-panel__status,
+#call-panel[data-status="ringing"] .call-panel__status {
+  animation: call-pulse 1.6s ease-in-out infinite;
+}
+@keyframes call-pulse {
+  50% { opacity: 0.55; }
+}
+.call-panel__timer {
+  font-size: clamp(48px, 4vw, 92px);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  min-height: 1.2em;
+}
+.call-panel__end {
+  min-height: 140px;
+  min-width: min(100%, 420px);
+  padding: 0 4vw;
+  border: 0;
+  border-radius: 999px;
+  background: #b3261e;
+  color: #ffffff;
+  font: inherit;
+  font-size: clamp(40px, 2.8vw, 64px);
+  font-weight: 650;
+  cursor: pointer;
+  box-shadow: 0 1.2vh 3vh rgba(179, 38, 30, 0.35);
+  -webkit-tap-highlight-color: transparent;
+}
+.call-panel__end:active {
+  background: #8c1d16;
+}
+.call-panel__end:disabled {
+  background: #5a2420;
+  color: #e9d6d3;
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #call-panel[data-status] .call-panel__status {
+    animation: none;
+  }
 }

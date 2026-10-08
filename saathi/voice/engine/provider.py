@@ -53,24 +53,41 @@ class ProviderUnavailable(RuntimeError):
     """No usable provider: the chosen one's API key is missing."""
 
 
+def stt_reports_language(stt_model: str) -> bool:
+    """Whisper-family models return the detected language
+    (`response_format="verbose_json"`); OpenAI's newer transcribers
+    accept only plain `json` and return text alone. Without it the
+    cascade reads the language from the transcript's script."""
+    return stt_model.startswith("whisper")
+
+
+def stt_response_format(stt_model: str) -> str:
+    return "verbose_json" if stt_reports_language(stt_model) else "json"
+
+
 @dataclass(frozen=True)
 class AIProvider:
     name: str
     client: Any
     llm_model: str
     stt_model: str
+    # Hearing her can use a different service from replying to her (see
+    # provider_from_env). None: `client` does both. `stt_fallback` is
+    # (client, model) to try when `stt_client` fails.
+    stt_client: Any = None
+    stt_fallback: tuple[Any, str] | None = None
+
+    @property
+    def transcriber(self) -> Any:
+        return self.stt_client if self.stt_client is not None else self.client
 
     @property
     def stt_reports_language(self) -> bool:
-        """Whisper-family models return the detected language
-        (`response_format="verbose_json"`); OpenAI's newer transcribers
-        accept only plain `json` and return text alone. Without it the
-        cascade reads the language from the transcript's script."""
-        return self.stt_model.startswith("whisper")
+        return stt_reports_language(self.stt_model)
 
     @property
     def stt_response_format(self) -> str:
-        return "verbose_json" if self.stt_reports_language else "json"
+        return stt_response_format(self.stt_model)
 
     @property
     def llm_extra(self) -> dict[str, Any]:
@@ -135,24 +152,51 @@ def provider_from_env(
         key = environ.get(_key_name(name))
         if not key:
             raise ProviderUnavailable(f"{_key_name(name)} is not set in the environment")
-        # IPv4 only. Found live 2026-09-25: this network advertises IPv6
-        # addresses for api.openai.com but can't route IPv6, so every new
-        # connection burned seconds on dead addresses before falling back
-        # (STT 2-5 s, replies up to 5 s, retries). Binding the local side
-        # to 0.0.0.0 makes httpx skip AAAA records entirely. Cheap to
-        # remove when the network is fixed; nothing else here depends on it.
-        import httpx
-
-        http_client = httpx.Client(
-            transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=1),
-            timeout=httpx.Timeout(20.0, connect=5.0),
+        client = _sdk_client(name, key)
+        # Hearing her on Groq while OpenAI replies (2026-10-07): measured
+        # from the demo laptop, Groq's whisper-large-v3-turbo transcribed
+        # the test sentence in 270 ms median against gpt-transcribe's
+        # 731 ms -- the largest single cut to a turn's latency that
+        # didn't touch what she hears. OpenAI stays the fallback if a
+        # Groq call fails (its free tier rate-limits). Off with
+        # SAATHI_STT_PROVIDER=openai, or by naming SAATHI_STT_MODEL.
+        split = (
+            name == "openai"
+            and environ.get("GROQ_API_KEY")
+            and not environ.get("SAATHI_STT_MODEL")
+            and environ.get("SAATHI_STT_PROVIDER", "groq").strip().lower() == "groq"
         )
-        if name == "openai":
-            from openai import OpenAI
-
-            client = OpenAI(api_key=key, http_client=http_client, max_retries=1)
-        else:
-            from groq import Groq
-
-            client = Groq(api_key=key, http_client=http_client, max_retries=1)
+        if split:
+            return AIProvider(
+                name=name,
+                client=client,
+                llm_model=llm,
+                stt_model=GROQ_STT_MODEL,
+                # No retry and a short deadline: a 429 or a slow call
+                # should reach the fallback now, not after a backoff.
+                stt_client=_sdk_client("groq", environ["GROQ_API_KEY"], retries=0, timeout=4.0),
+                stt_fallback=(client, stt),
+            )
     return AIProvider(name=name, client=client, llm_model=llm, stt_model=stt)
+
+
+def _sdk_client(name: str, key: str, *, retries: int = 1, timeout: float = 20.0) -> Any:
+    # IPv4 only. Found live 2026-09-25: this network advertises IPv6
+    # addresses for api.openai.com but can't route IPv6, so every new
+    # connection burned seconds on dead addresses before falling back
+    # (STT 2-5 s, replies up to 5 s, retries). Binding the local side
+    # to 0.0.0.0 makes httpx skip AAAA records entirely. Cheap to
+    # remove when the network is fixed; nothing else here depends on it.
+    import httpx
+
+    http_client = httpx.Client(
+        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=1),
+        timeout=httpx.Timeout(timeout, connect=5.0),
+    )
+    if name == "openai":
+        from openai import OpenAI
+
+        return OpenAI(api_key=key, http_client=http_client, max_retries=retries)
+    from groq import Groq
+
+    return Groq(api_key=key, http_client=http_client, max_retries=retries)

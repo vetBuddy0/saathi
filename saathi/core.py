@@ -58,6 +58,20 @@ removes the architecture" describes — and it produced overlapping turns
 and doubled audio, live, in testing. The fix is this return value, not a
 flag in `screen/server.py`: the server was never wrong to want to know
 whether to act, it just had no way to ask.
+
+The open conversation (2026-10-08). SPEC.md: "Once a conversation is
+open, follow-ups need no trigger." `(SPEAKING, "follow_up") -> ATTENTIVE`
+is that window: her reply is over, the eyes stay on her, and the server
+listens hands-free; speech in the window is `confirm` (-> LISTENING),
+a quiet window is `dismiss` (-> IDLE, the name is needed again), and the
+spacebar still works there (`(ATTENTIVE, "press") -> LISTENING`). Lost:
+going `done` -> IDLE -> `notice` -> ATTENTIVE with the existing edges --
+two broadcasts, so the face blinked to idle and the media panel un-ducked
+the song for a frame between them. `(THINKING, "name_only") -> ATTENTIVE`
+is the same look for a turn that turned out to be only her name ("Saathi"
+and nothing else): no reply, eyes on her, still listening; and
+`(ATTENTIVE, "prompt") -> SPEAKING` is the short "Yes?" said when she
+then stays quiet.
 """
 
 from __future__ import annotations
@@ -98,10 +112,14 @@ _TRANSITIONS: dict[tuple[State | None, str], State] = {
     (State.IDLE, "notice"): State.ATTENTIVE,
     (State.ATTENTIVE, "confirm"): State.LISTENING,
     (State.ATTENTIVE, "dismiss"): State.IDLE,
+    (State.ATTENTIVE, "press"): State.LISTENING,
+    (State.ATTENTIVE, "prompt"): State.SPEAKING,
     (State.LISTENING, "release"): State.THINKING,
     (State.THINKING, "response_ready"): State.SPEAKING,
     (State.THINKING, "no_response"): State.IDLE,
+    (State.THINKING, "name_only"): State.ATTENTIVE,
     (State.SPEAKING, "done"): State.IDLE,
+    (State.SPEAKING, "follow_up"): State.ATTENTIVE,
     (State.SPEAKING, "barge_in"): State.LISTENING,
     (State.SPEAKING, "press"): State.LISTENING,
     (State.HANDOFF, "resolved"): State.THINKING,

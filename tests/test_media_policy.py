@@ -90,17 +90,24 @@ def policy_results() -> dict:
     return json.loads(match.group(1).replace("&quot;", '"'))
 
 
-def test_a_press_ducks_the_video_to_a_fifth_and_holds_it_through_the_reply(policy_results):
-    assert policy_results["duck_factor"] == 0.2
-    assert policy_results["duck_listening"] == 14
-    assert policy_results["duck_thinking"] == 14
-    assert policy_results["duck_speaking"] == 14
-    assert policy_results["duck_handoff"] == 14
+def test_a_press_ducks_the_video_to_a_tenth_and_holds_it_through_the_reply(policy_results):
+    # A tenth since 2026-10-08 (the song was transcribed into her request
+    # at a fifth) -- see media-policy.js.
+    assert policy_results["duck_factor"] == 0.1
+    assert policy_results["duck_listening"] == 7
+    assert policy_results["duck_thinking"] == 7
+    assert policy_results["duck_speaking"] == 7
+    assert policy_results["duck_handoff"] == 7
 
 
-def test_idle_attentive_and_sleeping_play_at_the_asked_for_level(policy_results):
+def test_attentive_ducks_too_her_name_was_just_heard(policy_results):
+    # The wake word's moment of attention and the open follow-up window
+    # are both ATTENTIVE: she is talking (or about to) over the song.
+    assert policy_results["attentive"] == 7
+
+
+def test_idle_and_sleeping_play_at_the_asked_for_level(policy_results):
     assert policy_results["idle"] == 70
-    assert policy_results["attentive"] == 70
     assert policy_results["sleeping"] == 70
 
 

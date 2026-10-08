@@ -85,3 +85,16 @@ def test_tool_to_openai_schema_shape(store):
     assert schema["function"]["name"] == "set_language"
     assert schema["function"]["description"] == "a description"
     assert schema["function"]["parameters"] is tool.schema
+
+
+def test_set_language_works_from_another_thread(store):
+    # The handler runs on the turn's executor thread. Found live: it
+    # used the main thread's connection and raised sqlite3's
+    # "objects created in a thread" error.
+    from concurrent.futures import ThreadPoolExecutor
+
+    tool = make_set_language_tool(store)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(tool.handler, language="hindi").result()
+    assert result["status"] == "ok"
+    assert read_preference(store, LANGUAGE_KEY) == "hindi"

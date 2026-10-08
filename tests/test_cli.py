@@ -360,3 +360,62 @@ def test_without_an_echo_cancelled_pair_calling_is_unavailable(calling_seams):
     assert runtime.calling is None and runtime.session is None
     reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
     assert reply["status"] == "unavailable" and "echo-cancel" in reply["note"]
+
+
+def test_the_media_controller_plays_the_most_relevant_result_directly(wired):
+    # 2026-10-08: the owner's rule is what `saathi run` wires, not the
+    # controller's ask-every-time default.
+    from saathi.tools.media import choose_result
+
+    assert wired.media._choose is choose_result
+
+
+def test_the_session_learns_whether_music_is_playing(wired):
+    session = FakeCascadeSession.instances[-1]
+    assert session.kwargs["media_playing"]() is False
+    wired.media.playing = True
+    assert session.kwargs["media_playing"]() is True
+
+
+def test_follow_up_seconds_reads_the_environment(monkeypatch):
+    monkeypatch.delenv("SAATHI_FOLLOW_UP_SECONDS", raising=False)
+    assert cli.follow_up_seconds() == cli.DEFAULT_FOLLOW_UP_SECONDS
+    monkeypatch.setenv("SAATHI_FOLLOW_UP_SECONDS", "off")
+    assert cli.follow_up_seconds() is None
+    monkeypatch.setenv("SAATHI_FOLLOW_UP_SECONDS", "5")
+    assert cli.follow_up_seconds() == 5.0
+    monkeypatch.setenv("SAATHI_FOLLOW_UP_SECONDS", "0")
+    assert cli.follow_up_seconds() is None
+
+
+def test_open_after_reply_is_off_unless_asked_for(monkeypatch):
+    monkeypatch.delenv("SAATHI_OPEN_CONVERSATION", raising=False)
+    assert cli.open_after_reply() is False
+    monkeypatch.setenv("SAATHI_OPEN_CONVERSATION", "on")
+    assert cli.open_after_reply() is True
+    monkeypatch.setenv("SAATHI_OPEN_CONVERSATION", "off")
+    assert cli.open_after_reply() is False
+
+
+def test_run_opens_the_conversation_window_when_there_is_a_voice(wired, monkeypatch):
+    captured = {}
+    monkeypatch.setattr("saathi.screen.server.run", lambda *a, **k: captured.update(k))
+    monkeypatch.setattr(cli, "build_runtime", lambda: wired)
+    monkeypatch.setattr(cli, "_route_default_sink", lambda runtime: None)
+    monkeypatch.delenv("SAATHI_FOLLOW_UP_SECONDS", raising=False)
+    assert cli.main(["run"]) == 0
+    assert captured["follow_up_seconds"] == cli.DEFAULT_FOLLOW_UP_SECONDS
+    assert captured["open_after_reply"] is False
+
+
+def test_run_routes_the_default_sink_and_restores_it_on_exit(wired, monkeypatch):
+    events = []
+    monkeypatch.setattr("saathi.screen.server.run", lambda *a, **k: events.append("run"))
+    monkeypatch.setattr(cli, "build_runtime", lambda: wired)
+    monkeypatch.setattr(
+        cli, "_route_default_sink", lambda runtime: lambda: events.append("restored")
+    )
+    monkeypatch.setattr("atexit.register", lambda fn: None)
+    assert cli.main(["run"]) == 0
+    assert events == ["run", "restored"]
+    assert wired.aec_handles.sink_id == "aec-sink" and wired.speaker_id == "output-device"

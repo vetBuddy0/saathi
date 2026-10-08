@@ -1317,3 +1317,170 @@ def test_call_my_son_routes_without_any_results_on_offer(no_real_playback):
     assert session.end_turn() == "There's no number saved for your son."
     assert intents == [("call_contact", {"contact": "my son"})]
     assert len(client.chat.completions.calls) == 1  # the follow-up only, never the tool choice
+
+
+# -- live captions: preview_heard() -----------------------------------------
+
+
+def test_preview_heard_transcribes_the_buffer_so_far_and_leaves_the_turn_alone(
+    no_real_playback,
+):
+    client = FakeClient(heard="  play a song  ")
+    session, _backend = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.preview_heard() == "play a song"
+    assert client.chat.completions.calls == []  # no model call for a caption
+    assert session.last_heard is None
+
+    # The audio is still there for the real turn on release.
+    session.end_turn()
+    assert len(client.audio.transcriptions.calls) == 2
+    assert session.last_heard == "play a song"
+
+
+def test_preview_heard_on_silence_spends_no_stt_call(no_real_playback):
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=lambda pcm: False,
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.preview_heard() == ""
+    assert client.audio.transcriptions.calls == []
+
+
+def test_a_gated_turn_says_why_in_the_log(no_real_playback, caplog):
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=lambda pcm: False,
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 16000)
+
+    with caplog.at_level("INFO", logger=cascade_module.__name__):
+        assert session.end_turn() == ""
+    assert "speech gate: no speech in 1.0s of audio (rms 0)" in caplog.text
+
+
+class _FailingTranscriptions:
+    def create(self, **kwargs):
+        raise RuntimeError("429 rate limited")
+
+
+def test_a_failed_transcription_falls_back_to_the_other_service(no_real_playback):
+    from saathi.voice.engine.provider import AIProvider
+
+    reply_client = FakeClient(heard="call my son", reply="Calling him now.")
+    groq = SimpleNamespace(audio=SimpleNamespace(transcriptions=_FailingTranscriptions()))
+    provider = AIProvider(
+        "openai",
+        reply_client,
+        "gpt-4.1",
+        "whisper-large-v3-turbo",
+        stt_client=groq,
+        stt_fallback=(reply_client, "gpt-transcribe"),
+    )
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        provider=provider,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.end_turn() == "Calling him now."
+    call = reply_client.audio.transcriptions.calls[0]
+    assert call["model"] == "gpt-transcribe" and call["response_format"] == "json"
+
+
+def test_starting_a_turn_warms_cold_connections_once(monkeypatch):
+    # The first call after a minute of quiet pays a fresh TLS handshake
+    # (~200 ms each for STT and the reply, measured 2026-10-07); start()
+    # opens the connection while she is still speaking instead.
+    import threading as _threading
+
+    from saathi.voice.engine import cascade as cascade_module
+
+    listed = []
+
+    class Models:
+        def list(self):
+            listed.append(True)
+
+    client = FakeClient()
+    client.models = Models()
+    session, _ = _session(client)
+    ran = []
+    real_thread = _threading.Thread
+
+    class InlineThread(real_thread):
+        def start(self):
+            ran.append(True)
+            self.run()
+
+    monkeypatch.setattr(cascade_module.threading, "Thread", InlineThread)
+    session.start()
+    assert listed == [True]  # one client: chat and STT share it here
+    session.start()  # moments later: still warm, nothing sent
+    assert listed == [True]
+
+
+# -- the reply's mood, for the face (2026-10-07) ------------------------------
+
+
+def _mood_session(reply: str, moods=frozenset({"happy", "sad", "neutral"})):
+    client = FakeClient(reply=reply)
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        moods=moods,
+    )
+    intents = []
+    session.on_intent(lambda name, arguments: intents.append((name, arguments)) or {})
+    session.on_mood(lambda mood: intents.append(("mood", mood)))
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    return session, client, intents
+
+
+def test_a_mood_tag_goes_to_the_face_and_never_into_her_ears():
+    session, client, intents = _mood_session("[Happy] That's lovely news!")
+    assert session.end_turn() == "That's lovely news!"
+    assert intents == [("mood", "happy")]  # and no tool intent
+    system = [m["content"] for m in client.chat.completions.calls[0]["messages"]]
+    assert any("mood tag" in text for text in system)
+
+
+def test_a_mood_the_face_cannot_draw_is_stripped_and_dropped():
+    session, _, intents = _mood_session("[smug] Of course.")
+    assert session.end_turn() == "Of course."
+    assert intents == []
+
+
+def test_a_reply_without_a_tag_is_untouched():
+    session, _, intents = _mood_session("Hello there.")
+    assert session.end_turn() == "Hello there."
+    assert intents == []
+
+
+def test_without_moods_nothing_is_asked_or_stripped_of_the_model():
+    session, client, intents = _mood_session("Hello there.", moods=None)
+    session.end_turn()
+    system = [m["content"] for m in client.chat.completions.calls[0]["messages"]]
+    assert not any("mood tag" in (text or "") for text in system)

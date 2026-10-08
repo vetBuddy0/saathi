@@ -45,6 +45,27 @@ a headset jack with no mic:
 pactl set-source-port alsa_input.pci-0000_00_1f.3.analog-stereo analog-input-internal-mic
 ```
 
+If presses end silently on the right port, the mic may be clipping: on
+the 800-series laptop, 100% input volume is +60 dB over base and ~40% of
+samples hit full scale (2026-10-07). 15% gave a clean signal:
+
+```sh
+pactl set-source-volume @DEFAULT_SOURCE@ 15%
+```
+
+`saathi smoke` needs `pactl` (`sudo apt install pulseaudio-utils`); without
+it, it reports no mic and no speaker even when both work.
+
+## Wake word
+
+Say "Saathi" and it listens; no key needed. "Saathi, play a song" in one
+breath works too. The name is heard on this device (faster-whisper
+`tiny.en`, downloaded on first run); `SAATHI_WAKE_WORD=off` turns it off.
+
+Every turn needs the name (or the spacebar): after a reply it goes back
+to idle, so a TV or video in the room isn't answered.
+`SAATHI_OPEN_CONVERSATION=on` keeps the mic open 7 s after each reply.
+
 ## AI provider
 
 OpenAI whenever `OPENAI_API_KEY` is set: `gpt-transcribe` hears her,
@@ -96,6 +117,93 @@ Hold nothing — tap space, speak, and it answers.
 - Hold space 2 s to hang up; a short tap during a call does nothing; an
   unanswered call clears itself after 45 s.
 - Keep the phone away from the laptop, or it howls.
+
+## Family app: free calls to a paired phone
+
+Calls to family go over the internet (WebRTC), at no cost per minute.
+Anyone paired is rung through the app; Twilio is used only for people
+who aren't paired (DECISIONS 2026-10-08).
+
+**Turn it on.** Add this to `~/.saathi/env` and restart `saathi run`:
+
+```sh
+SAATHI_FAMILY_APP=on
+# Recommended: a permanent address (see "Stable URL" below)
+# SAATHI_PUBLIC_URL=https://saathi.example.org
+```
+
+If `SAATHI_PUBLIC_URL` isn't set, a quick tunnel starts at boot. It is
+reachable about a minute later, and its address changes every restart.
+
+**Pair a phone** (Android Chrome, or iPhone Safari on iOS 16.4+):
+1. On Saathi, press **Ctrl+P**. A QR code appears; it works once, for
+   10 minutes. Esc closes it.
+2. Scan it with the phone's camera and open the link.
+3. Enter your name, your relationship to her, and what you call her
+   ("Mum"). Tap **Pair this phone**.
+4. Tap **Turn on call alerts** and allow notifications. Without this the
+   phone can't ring.
+5. Install the app. On Android: menu → *Install app* / *Add to Home
+   screen*. On iPhone: Share → **Add to Home Screen**, then open Saathi
+   from the home screen and do step 4 there. iOS only delivers
+   notifications to installed web apps.
+
+Ctrl+P also lists paired phones, each with **Unpair**.
+
+**Use it**
+- She says "call Priya" or "call my daughter". The phone shows
+  "Saathi — Mum" with Answer and Decline buttons. The panel on the right
+  of her screen shows the call and its End button; holding space for
+  2 s also hangs up.
+- From the app, **Call Mum** rings Saathi: a ring tone plays and a card
+  says "Priya is calling. Answer?". She answers by tapping Yes or
+  pressing space. "Saathi … yes" also works if the model calls
+  `answer_card`. A call is never answered without her doing one of
+  these. An unanswered ring stops after 45 s.
+
+**Stable URL** (do this before pairing anyone for real). A quick
+tunnel's address changes on every restart. An installed app keeps the
+old address, so it stops being able to start calls. Rings still get
+through, because each one carries the current address. To give Saathi a
+permanent address, set up a named Cloudflare tunnel. This needs a free
+Cloudflare account and a domain on Cloudflare:
+
+```sh
+cloudflared tunnel login
+cloudflared tunnel create saathi
+cloudflared tunnel route dns saathi saathi.example.org
+cat > ~/.cloudflared/config.yml <<CFG
+tunnel: saathi
+credentials-file: /home/$USER/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: saathi.example.org
+    service: http://127.0.0.1:8769
+  - service: http_status:404
+CFG
+cloudflared tunnel run saathi        # or: sudo cloudflared service install
+```
+
+Then set `SAATHI_PUBLIC_URL=https://saathi.example.org`. Point the
+tunnel only at port **8769** (the family app), never at 8765 (her
+screen). `SAATHI_FAMILY_PORT` changes the port, and
+`SAATHI_VAPID_SUBJECT` (e.g. `mailto:you@example.org`) is the contact
+address push services see.
+
+**TURN** (if calls ring but never connect). The default is free public
+STUN. That works between most home networks, but some mobile carriers
+need a TURN relay. A call that doesn't connect within 30 s ends, and
+the log mentions TURN. Two options:
+- Cloudflare Realtime TURN (has a free tier): in the Cloudflare
+  dashboard, create a TURN key, then set
+  `SAATHI_TURN_CLOUDFLARE_KEY_ID` and
+  `SAATHI_TURN_CLOUDFLARE_API_TOKEN`. Short-lived credentials are made
+  for each call.
+- Any TURN server (e.g. coturn):
+  `SAATHI_ICE_SERVERS='[{"urls":["stun:stun.cloudflare.com:3478"]},{"urls":"turn:turn.example.org:3478","username":"u","credential":"p"}]'`.
+
+**Keys and data.** The device's push key is
+`~/.saathi/vapid_private.pem`. Deleting it unpairs every phone's alerts.
+Pairings are in `~/.saathi/family.sqlite3`.
 
 ## Known gaps (TODO.md has details)
 

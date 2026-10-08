@@ -70,3 +70,26 @@ def test_reasoning_off_only_for_openai_reasoning_families():
     assert AIProvider("openai", FAKE, "gpt-5.6-luna", "s").llm_extra == {"reasoning_effort": "none"}
     assert AIProvider("openai", FAKE, "gpt-4.1", "s").llm_extra == {}
     assert AIProvider("groq", FAKE, "gpt-5-lookalike", "s").llm_extra == {}
+
+
+# -- hearing on Groq, replying on OpenAI (2026-10-07) -----------------------
+
+
+def test_with_both_keys_groq_hears_her_and_openai_covers_for_it():
+    provider = provider_from_env({"OPENAI_API_KEY": "sk-x", "GROQ_API_KEY": "gsk-x"})
+    assert provider.name == "openai" and provider.llm_model == OPENAI_LLM_MODEL
+    assert provider.stt_model == GROQ_STT_MODEL
+    assert type(provider.transcriber).__module__.startswith("groq")
+    fallback_client, fallback_model = provider.stt_fallback
+    assert fallback_client is provider.client and fallback_model == OPENAI_STT_MODEL
+
+
+def test_the_split_can_be_turned_off():
+    for extra in ({"SAATHI_STT_PROVIDER": "openai"}, {"SAATHI_STT_MODEL": "whisper-1"}):
+        provider = provider_from_env({"OPENAI_API_KEY": "sk-x", "GROQ_API_KEY": "gsk-x", **extra})
+        assert provider.transcriber is provider.client and provider.stt_fallback is None
+
+
+def test_openai_alone_hears_and_replies():
+    provider = provider_from_env({"OPENAI_API_KEY": "sk-x"})
+    assert provider.stt_model == OPENAI_STT_MODEL and provider.transcriber is provider.client

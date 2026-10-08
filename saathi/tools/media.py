@@ -70,6 +70,11 @@ The exchange is still recorded (`did`) so the next turn knows what is
 playing. A tap needs nothing here: `screen/server.py` ends the turn
 that was still reading the options when the tap lands.
 
+Why a search usually just plays (2026-10-08): "play Shape of You"
+offered three cards that were all the same song. `choose_result` plays
+the top result at once and asks only when the top results are one title
+by different artists -- see its comment for the rule and what lost.
+
 Why titles are cleaned as hard as they are (2026-09-26): the first live
 search returned "推荐50多岁以上的人真正喜欢的歌曲 ♣ 50首70、80、90年代唱遍
 大街小巷的歌曲今天给大家推荐 , 林淑容 , 李茂山 , 李茂山" and a track listing
@@ -94,7 +99,8 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+import difflib
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from saathi.screen.cards import Answer, Card, CardController, choice, confirm
@@ -211,8 +217,9 @@ MEDIA_DESCRIPTION = (
     "Use action 'search' with a query when she asks to hear something ('play some "
     "old Chinese songs', 'search for Teresa Teng', 'something else'); the query is "
     "her own words for what she wants, not your guess at something more specific. "
-    "It finds up to three results, shows them on screen, and returns their titles "
-    "for you to offer out loud by number. Use 'play' with choice 1, 2 or 3 when she "
+    "It plays the best match straight away. Only when the same song title is sung by "
+    "different artists does it show them on screen and return their titles for you "
+    "to offer out loud by number. Use 'play' with choice 1, 2 or 3 when she "
     "picks one ('the second one', 'the first one'); 'play' with no choice means the one she most "
     "recently meant ('that one'). 'again' replays what last played. 'next' plays "
     "the next result ('another one', 'a different video', 'skip this'). "
@@ -235,6 +242,12 @@ class MediaResult:
     # YouTube's 320x180 thumbnail, shown beside the number on the card so
     # she can pick by picture as well as by title (user's request 2026-09-25).
     thumbnail: str | None = None
+    # The title as YouTube gave it and the uploading channel: what
+    # `choose_result` reads song and artist from. `clean_title` is for the
+    # ear and drops the en dash in "Ed Sheeran – Shape of You", which is
+    # exactly the line between the two. Not part of a result's identity.
+    raw_title: str = field(default="", compare=False)
+    channel: str = field(default="", compare=False)
 
     def as_message(self) -> dict[str, Any]:
         # `label` is the word she hears ("Two"), sent so the screen shows
@@ -387,7 +400,14 @@ def parse_search_response(body: dict[str, Any], limit: int = MAX_RESULTS) -> lis
         if not video_id or not title:
             continue
         results.append(
-            MediaResult(index=len(results) + 1, video_id=video_id, title=title, thumbnail=thumbnail)
+            MediaResult(
+                index=len(results) + 1,
+                video_id=video_id,
+                title=title,
+                thumbnail=thumbnail,
+                raw_title=html.unescape(snippet.get("title", "")),
+                channel=snippet.get("channelTitle") or "",
+            )
         )
         if len(results) == limit:
             break
@@ -483,13 +503,117 @@ def youtube_search(query: str, api_key: str | None = None) -> list[MediaResult]:
         if dropped:
             logger.info("search dropped %d non-embeddable video(s): %s", len(dropped), dropped)
     kept = [c for c in candidates if c.video_id in playable][:MAX_RESULTS]
-    return [
-        MediaResult(index=i + 1, video_id=c.video_id, title=c.title) for i, c in enumerate(kept)
-    ]
+    return _renumber(kept)
+
+
+def _renumber(results: list[MediaResult]) -> list[MediaResult]:
+    """One, Two, Three again after some were dropped -- everything else
+    about each result (thumbnail, song, channel) kept."""
+    return [replace(r, index=i + 1) for i, r in enumerate(results)]
+
+
+# -- which result she means (2026-10-08) ------------------------------------
+#
+# "Play Shape of You" offered three cards that were all Ed Sheeran's
+# Shape of You (official video, lyric video, audio). The owner's rule: play
+# the top result at once; ask only when the top results are the same song
+# by *different* artists ("Hello": Adele or Lionel Richie?). Variants of one
+# song by one artist fold into the top one. Lost: asking whenever there was
+# more than one result (the old flow) -- a choice between three copies of
+# the same thing is a question with no answer, and she had asked for a song
+# by name. Lost too: a model call to judge sameness -- a round trip on every
+# search for what string comparison does on these titles.
+
+_TITLE_PARTS = re.compile(r"\s+[-–—~|:]\s+|\s*[|｜]\s*|\s+[–—]|[–—]\s+")
+_FEATURING = re.compile(r"\s+(?:feat|ft|featuring)\b.*$")
+_CHANNEL_NOISE = re.compile(r"vevo|\btopic\b|\bofficial\b|\bchannel\b")
+_SAME_SONG = 0.85
+_SAME_ARTIST = 0.8
+
+
+def _name_key(text: str) -> str:
+    """A part of a title as comparable words: boilerplate, brackets,
+    featured artists and punctuation gone, lower case."""
+    text = _BRACKETED.sub(" ", text)
+    text = _QUOTE_MARKS.sub(" ", text)
+    text = _LATIN_BOILERPLATE.sub(" ", text)
+    text = re.sub(r"\b(?:audio|video|lyric|visualizer|visualiser|live)\b", " ", text, flags=re.I)
+    text = "".join(ch if unicodedata.category(ch)[0] in "LNM" else " " for ch in text.lower())
+    text = re.sub(r"\s+", " ", text).strip()
+    return _FEATURING.sub("", text).strip()
+
+
+def _channel_key(channel: str) -> str:
+    return _name_key(_CHANNEL_NOISE.sub(" ", channel.lower()))
+
+
+def _same_name(a: str, b: str) -> bool:
+    a, b = a.replace(" ", ""), b.replace(" ", "")
+    if not a or not b:
+        return False
+    if a == b or (min(len(a), len(b)) >= 4 and (a in b or b in a)):
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= _SAME_ARTIST
+
+
+def song_and_artist(result: MediaResult, query: str = "") -> tuple[str, str | None]:
+    """(song, artist) as comparable words, artist None when unknown.
+    "Artist - Song" and "Song - Artist" both occur; the part matching
+    the uploading channel is the artist, else the part made only of
+    words she asked for is the song, else YouTube's usual order (artist
+    first). A one-part title is the song, sung by the channel."""
+    raw = _BRACKETED.sub(" ", html.unescape(result.raw_title or result.title))
+    parts = [p for p in (_name_key(x) for x in _TITLE_PARTS.split(raw)) if p][:2]
+    channel = _channel_key(result.channel)
+    if len(parts) == 2:
+        for i, part in enumerate(parts):
+            if channel and _same_name(part, channel):
+                return parts[1 - i], part
+        asked = set(_name_key(query).split())
+        in_query = [i for i, part in enumerate(parts) if asked and set(part.split()) <= asked]
+        if len(in_query) == 1:
+            return parts[in_query[0]], parts[1 - in_query[0]]
+        return parts[1], parts[0]
+    song = parts[0] if parts else _name_key(result.title)
+    return song, channel or None
+
+
+def _same_song(a: str, b: str) -> bool:
+    return a == b or difflib.SequenceMatcher(None, a, b).ratio() >= _SAME_SONG
+
+
+def choose_result(
+    results: list[MediaResult], query: str = ""
+) -> tuple[MediaResult | None, list[MediaResult]]:
+    """`(top, kept)` to play the top one at once -- `kept` is what stays
+    referenceable ("next"), with the top one's other versions folded
+    away -- or `(None, options)` when the top results are one song title
+    by different artists and she has to say which."""
+    if not results:
+        return None, []
+    keyed = [(r, *song_and_artist(r, query)) for r in results]
+    _, top_song, top_artist = keyed[0]
+    same = [k for k in keyed if _same_song(k[1], top_song)]
+    artists: list[MediaResult] = [keyed[0][0]]
+    known = [top_artist] if top_artist else []
+    for result, _song, artist in same[1:]:
+        if artist is None or not known:
+            continue  # an unknown singer is not a second singer
+        if not any(_same_name(artist, k) for k in known):
+            artists.append(result)
+            known.append(artist)
+    if len(artists) >= 2:
+        return None, _renumber(artists)
+    kept = _renumber([keyed[0][0]] + [k[0] for k in keyed[1:] if k not in same])
+    return kept[0], kept
 
 
 Broadcast = Callable[[dict[str, Any]], None]
 Search = Callable[[str], list[MediaResult]]
+# (results, query) -> (play this now, what stays on offer) or (None, ask
+# which of these). `choose_result` is the owner's rule; None on the
+# controller means "always ask", the flow before 2026-10-08.
+Chooser = Callable[[list[MediaResult], str], tuple[MediaResult | None, list[MediaResult]]]
 
 
 class MediaController:
@@ -508,8 +632,13 @@ class MediaController:
         search: Search | None = None,
         broadcast: Broadcast | None = None,
         cards: CardController | None = None,
+        choose: Chooser | None = None,
     ) -> None:
         self._search: Search = search or youtube_search
+        # Which result a search plays at once, if any (`choose_result`,
+        # wired by cli.py). None: every search asks, as it did before --
+        # the card flow below is still how an ambiguous search asks.
+        self._choose = choose
         self._broadcast: Broadcast | None = broadcast
         # With a CardController, the offer is a Choice card (screen/
         # cards.py): the same three numbered titles, but tappable and
@@ -647,10 +776,7 @@ class MediaController:
         if self._cards is None or failed not in {r.video_id for r in self.last_results}:
             return
         remaining = [r for r in self.last_results if r.video_id not in self.unplayable]
-        self.last_results = [
-            MediaResult(index=i + 1, video_id=r.video_id, title=r.title)
-            for i, r in enumerate(remaining)
-        ]
+        self.last_results = _renumber(remaining)
         if self.now_playing is not None and self.now_playing.video_id == failed:
             self.now_playing = None
         if self.last_results:
@@ -706,17 +832,27 @@ class MediaController:
         # by voice or on a card -- so a tap can't land on one. Renumbered
         # so what she hears and taps is still One, Two, Three.
         if self.unplayable:
-            playable = [r for r in results if r.video_id not in self.unplayable]
-            results = [
-                MediaResult(index=i + 1, video_id=r.video_id, title=r.title)
-                for i, r in enumerate(playable)
-            ]
+            results = _renumber([r for r in results if r.video_id not in self.unplayable])
         if not results:
             return {
                 "status": "none",
                 "query": query,
                 "note": "Nothing was found for that. Say so briefly and ask what else she'd like.",
             }
+        top = None
+        if self._choose is not None:
+            top, results = self._choose(results, query)
+        if top is not None:
+            # The most relevant result, played at once (see
+            # choose_result). The rest stay referenceable: "next", "the
+            # second one".
+            self.last_results = results
+            self.last_query = query
+            played = self._play(top)
+            if played.get("status") == "ok":
+                played["query"] = query
+                played["results"] = [r.spoken for r in results]
+            return played
         # A new search means she wants something else: whatever was
         # playing stops so the offer isn't read over it (see DECISIONS).
         self.last_results = results
@@ -896,7 +1032,16 @@ class MediaController:
         if at_limit:
             edge = "as loud as it goes" if level == MAX_VOLUME else "as quiet as it goes"
             return {"status": "ok", "volume": level, "note": f"It's already {edge}. Say so."}
-        return {"status": "ok", "volume": level, "note": "Done. One word is enough."}
+        # The change is the answer: she hears it louder. Nothing is said
+        # (no second model call, and no reply held over the song) --
+        # 2026-10-08, "volume up" mid-song should be quick.
+        return {
+            "status": "ok",
+            "volume": level,
+            "say": "",
+            "did": f"Set the volume to {level}.",
+            "note": "Done.",
+        }
 
     def _do_louder(self) -> dict[str, Any]:
         return self._set_volume(self.volume + VOLUME_STEP)
