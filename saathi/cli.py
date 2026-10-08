@@ -116,6 +116,10 @@ class Runtime:
     capture_source_id: str | None = None
     notes: list[str] = field(default_factory=list)
     calling: "CallingRuntime | None" = None
+    # The /audio seam (audio/remote.py): always built, with or without
+    # an engine, so the screen server always has the route to offer a
+    # phone; it only does anything once a client connects.
+    remote_audio: Any = None
 
 
 @dataclass
@@ -134,6 +138,7 @@ class CallingRuntime:
 
 
 def build_runtime() -> Runtime:
+    from saathi.audio.remote import RemoteAudio
     from saathi.config import Config
     from saathi.core import Core
     from saathi.identity.store import IdentityStore
@@ -142,6 +147,7 @@ def build_runtime() -> Runtime:
 
     config = Config.load()
     core = Core()
+    remote_audio = RemoteAudio()
 
     store = IdentityStore(config.identity_db_path)
     store.create()
@@ -156,7 +162,15 @@ def build_runtime() -> Runtime:
     cards = CardController()
     hold = HoldController(cards)
     media = MediaController(cards=cards)
-    runtime = Runtime(config=config, core=core, store=store, cards=cards, hold=hold, media=media)
+    runtime = Runtime(
+        config=config,
+        core=core,
+        store=store,
+        cards=cards,
+        hold=hold,
+        media=media,
+        remote_audio=remote_audio,
+    )
 
     # The voice engine needs a speech-to-text + chat provider: OpenAI if
     # OPENAI_API_KEY is set (the demo choice), else Groq. See
@@ -247,6 +261,9 @@ def build_runtime() -> Runtime:
         language_preference=threadsafe_reader(store, LANGUAGE_KEY),
         identity_store=store,
         tool_schemas=tool_schemas,
+        # Every sentence goes through the /audio seam: to the phone when
+        # one is attached, to the echo-cancelled sink otherwise.
+        player=remote_audio.player,
     )
     session.on_intent(handle_intent)
     runtime.session = session
@@ -435,6 +452,7 @@ def _run() -> int:
         media=runtime.media,
         cards=runtime.cards,
         hold=runtime.hold,
+        remote_audio=runtime.remote_audio,
     )
     if runtime.calling is not None:
         runtime.calling.controller.shutdown()

@@ -1374,3 +1374,36 @@ the search's refused-filter and the re-offer all rebuilt each
 `MediaResult` from id and title, so the picture the card was given on
 2026-09-25 never reached it from a real search. `dataclasses.replace`
 now; one new test pins it.
+
+**2026-10-08 — The phone is the microphone and the speaker; the engine
+stays on the Pi or the laptop. One WAV per sentence over `/audio`, not
+a PCM stream.** `audio/remote.py`'s `RemoteAudio` is the engine's side
+of the Android shell: a second WebSocket path, one client at a time,
+binary PCM16/16 kHz frames in (forwarded to the session only between
+a press and its release on `/ws`, whatever the client sends), and for
+each TTS sentence a `play` header, one binary WAV and a `played` ack
+back; `stop` cuts it short. `CascadeSession` gained a `player`
+constructor seam with `play()`'s signature; `cli.py` hands it
+`RemoteAudio.player`, which sends to the attached client and falls
+back to the local `paplay` when none is -- the session never knows
+which. With no client the server is byte-for-byte what it was. Lost:
+streaming the reply as PCM chunks the way the mic comes in. The
+cascade already synthesises and plays one whole sentence at a time
+(`synthesize_stream`), so chunking would have bought no
+time-to-first-audio and cost a jitter buffer on the phone and a second
+barge-in clock on the engine; a client is a dumb speaker -- play this
+file to the end, then say so. Also lost: the engine in the APK now.
+The seam is shaped so it can move later without the shell changing.
+Decided alone, and recorded here, four smaller things. A play waits
+for its ack at most the WAV's length plus 3 s, then moves on with a
+warning -- a dead phone costs one sentence, never a face stuck on
+"speaking"; the client leaving mid-sentence releases the wait at once.
+Every send to the client joins one ordered chain on the loop, so a
+`stop` cannot overtake the frames of the play it stops. A press with a
+client attached needs no local capture source to run a turn -- the
+phone *is* the mic -- though `cli.py` still only builds a session when
+the local echo-cancelled pair exists, so this matters to tests today
+and to a mic-less laptop later. And the route is registered only when
+`build_app` is given a `remote_audio` (always, from `cli.py`), so
+every checkpoint-1 test and the fake press/release path see no
+difference at all.

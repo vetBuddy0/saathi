@@ -1317,3 +1317,76 @@ def test_call_my_son_routes_without_any_results_on_offer(no_real_playback):
     assert session.end_turn() == "There's no number saved for your son."
     assert intents == [("call_contact", {"contact": "my son"})]
     assert len(client.chat.completions.calls) == 1  # the follow-up only, never the tool choice
+
+
+# -- the player seam (audio/remote.py, 2026-10-08) --------------------------
+
+
+def test_the_player_seam_is_used_for_every_sentence_when_given(monkeypatch):
+    def never_local(sink_id, path):
+        raise AssertionError("the module's play must not run when a player is given")
+
+    monkeypatch.setattr(cascade_module, "play", never_local)
+    calls: list[tuple[str, bytes]] = []
+
+    def player(sink_id, path):
+        calls.append((sink_id, path.read_bytes()))
+        return SimpleNamespace(wait=lambda: None, stop=lambda: None, finished=True)
+
+    backend = FakeTTSBackend()
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=FakeClient(),
+        backends={"fake": backend},
+        backend_preference=lambda: "fake",
+        player=player,
+    )
+    session.say("One. Two.")
+    assert backend.synthesized == ["One.", "Two."]
+    assert [sink for sink, _ in calls] == ["fake-sink", "fake-sink"]
+    assert all(data == b"\x00\x00" * 10 for _, data in calls)
+
+
+def test_the_default_player_is_still_the_modules_play(monkeypatch):
+    calls: list[str] = []
+
+    def local_play(sink_id, path):
+        calls.append(sink_id)
+        return SimpleNamespace(wait=lambda: None, stop=lambda: None, finished=True)
+
+    monkeypatch.setattr(cascade_module, "play", local_play)
+    session, _backend = _session(FakeClient())
+    session.say("Hello.")
+    assert calls == ["fake-sink"]
+
+
+def test_interrupt_stops_the_seams_handle_too():
+    stopped = threading.Event()
+    released = threading.Event()
+
+    class SeamHandle:
+        finished = False
+
+        def wait(self) -> None:
+            released.wait(timeout=2.0)
+
+        def stop(self) -> None:
+            stopped.set()
+            released.set()
+
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=FakeClient(),
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        player=lambda sink_id, path: SeamHandle(),
+    )
+    say_thread = threading.Thread(target=session.say, args=("a long reply",))
+    say_thread.start()
+    time.sleep(0.05)
+    assert say_thread.is_alive()
+    session.interrupt()
+    say_thread.join(timeout=1.0)
+    assert not say_thread.is_alive() and stopped.is_set()

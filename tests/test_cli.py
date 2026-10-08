@@ -111,6 +111,12 @@ def test_the_session_is_built_on_the_echo_cancelled_sink_and_reads_the_store(wir
     assert session.kwargs["identity_store"] is wired.store
     assert session.kwargs["language_preference"]() is None
     assert wired.store.path == seams["data_dir"] / "identity.sqlite3"
+    # Every sentence goes through the /audio seam (audio/remote.py): the
+    # phone when one is attached, the local sink otherwise.
+    from saathi.audio.remote import RemoteAudio
+
+    assert isinstance(wired.remote_audio, RemoteAudio)
+    assert session.kwargs["player"] == wired.remote_audio.player
 
 
 def test_a_database_with_no_preference_speaks_with_chirp(wired):
@@ -140,6 +146,7 @@ def test_run_hands_the_screen_server_exactly_what_was_built(wired, monkeypatch):
     assert captured["media"] is wired.media
     assert captured["cards"] is wired.cards
     assert captured["hold"] is wired.hold
+    assert captured["remote_audio"] is wired.remote_audio
     assert (captured["host"], captured["port"]) == (
         wired.config.screen_host,
         wired.config.screen_port,
@@ -152,6 +159,7 @@ def test_without_a_groq_key_the_screen_still_gets_the_controllers(seams, monkeyp
     assert runtime.session is None and runtime.capture_source_id is None
     assert runtime.registry is None
     assert runtime.cards is not None and runtime.hold is not None and runtime.media is not None
+    assert runtime.remote_audio is not None  # the /audio route exists with or without an engine
     assert FakeCascadeSession.instances == []
 
 

@@ -80,6 +80,16 @@ after an interrupt lands, since that prefetch was already kicked off
 before the interrupt could be seen. Never two sentences ahead — the
 next prefetch after that one only starts once the current one is
 actually consumed, which an interrupted turn never reaches.
+
+The speaker is a seam since 2026-10-08: `player` (constructor) is
+anything with `play()`'s signature returning something with `wait()`,
+`stop()` and `finished`. `cli.py` passes `audio/remote.py`'s, which
+sends each sentence to an attached phone and otherwise plays locally;
+this class never knows which. The alternative -- the session holding
+the remote client itself -- would have had the engine reaching through
+the screen server's socket, the thing the five interfaces exist to
+stop. Nothing else about `_speak()` changed: one WAV per sentence,
+`interrupt()` still stops whatever handle is current.
 """
 
 from __future__ import annotations
@@ -328,6 +338,7 @@ class CascadeSession:
         tool_schemas: list[dict] | None = None,
         speech_gate: Callable[[bytes], bool] | None = None,
         provider: AIProvider | None = None,
+        player: Callable[[str, Path], PlaybackHandle] | None = None,
     ) -> None:
         # Which service hears her and replies (voice/engine/provider.py).
         # A bare `client` (tests, smoke.py) keeps the Groq-shaped defaults
@@ -347,6 +358,11 @@ class CascadeSession:
         self._backend_preference = backend_preference
         self._language_preference = language_preference
         self._sink_id = sink_id
+        # Where a synthesized sentence goes (audio/remote.py's seam, since
+        # 2026-10-08). None means this module's `play` -- looked up at
+        # call time, not bound here, so a test that monkeypatches `play`
+        # still intercepts every sentence.
+        self._player = player
         self._identity_store = identity_store
         # No store: exactly the old, static behavior -- persona_stub.txt,
         # read once, never refreshed. A store: compile_context() runs
@@ -865,7 +881,7 @@ class CascadeSession:
                             first_tts_chunk_ms=round((time.monotonic() - speak_started_at) * 1000)
                         )
                         first_chunk = False
-                    handle = play(self._sink_id, tmp_path)
+                    handle = (self._player or play)(self._sink_id, tmp_path)
                     self._current_playback = handle
                 handle.wait()
             finally:

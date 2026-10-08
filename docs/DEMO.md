@@ -38,6 +38,14 @@ Open the page in Chrome (or `scripts/saathi-face-kiosk.sh`). Tests:
 `env PYTHONPATH= uv run pytest -q` (PYTHONPATH must be cleared on this
 laptop — ROS plugins break pytest otherwise).
 
+**Phone as mic and speaker (2026-10-08):** the Android shell connects to
+`ws://<laptop>:8765/audio` as well as `/ws`. While it is connected, a
+press takes the microphone from the phone and every reply sentence plays
+on the phone, not the laptop; disconnect it and the laptop's parec/paplay
+path is back at the next press. The protocol both sides implement is in
+`saathi/screen/server.py`'s docstring; the engine side is
+`saathi/audio/remote.py`.
+
 **Mic:** if every press ends silently, the input has probably switched to
 a headset jack with no mic:
 

@@ -31,6 +31,24 @@ reports its failures as `media_event` errors with code "browser" or
 message to every client and hands every report to the controller,
 which owns the rule (`tools/media.py`).
 
+A second path, `/audio` (2026-10-08), is the Android shell as the
+microphone and the speaker while the engine stays here -- see
+`audio/remote.py` for why that split and not the engine in the APK.
+One client at a time; a new connection replaces the old. Its frames:
+client -> server text `{"type": "hello", "client": ..., "sample_rate":
+16000}` on connect, then binary frames of raw PCM16 mono 16 kHz mic
+audio (about 100 ms each), which the server forwards to the session
+only between a press and its release on `/ws`, whatever the client
+sends in between; server -> client text `{"type": "play", "id": ...,
+"format": "wav"}` followed by exactly one binary frame holding one
+complete WAV (one TTS sentence), answered by text `{"type": "played",
+"id": ...}` once it has played out; and server -> client text
+`{"type": "stop"}`, which the client answers with `played` for whatever
+it cut short. While a client is attached, a press starts no `parec`
+capture and TTS goes to the client, not the local sink; with none, the
+device behaves exactly as it did before this path existed. The route is
+only registered when `build_app` is given a `remote_audio`.
+
 Cards (same day): `{"type": "card", "card": {...} | null}` (server ->
 browser: show this one card, or clear it; emitted by `screen/cards.py`'s
 CardController through the same seam, and re-sent to a fresh connection
@@ -308,6 +326,7 @@ def build_app(
     media=None,
     cards=None,
     hold=None,
+    remote_audio=None,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -545,7 +564,16 @@ def build_app(
                     # that taught us this the first time.
                     was_speaking = core.state == State.SPEAKING
                     transitioned = core.handle(Event("press"))
-                    if transitioned and session is not None and capture_source_id is not None:
+                    # The phone as the microphone: with an /audio client
+                    # attached the mic is its frames, not parec's -- and
+                    # a device with no usable local mic can still hold a
+                    # turn through it.
+                    remote_mic = remote_audio is not None and remote_audio.attached
+                    if (
+                        transitioned
+                        and session is not None
+                        and (capture_source_id is not None or remote_mic)
+                    ):
                         if was_speaking:
                             # Barge-in: this press just superseded whatever
                             # turn was still speaking. Bump the generation
@@ -556,11 +584,14 @@ def build_app(
                             session.interrupt()
                         session.start()
                         turn_started_at["value"] = time.monotonic()
-                        capture = Capture(
-                            capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
-                        )
-                        capture.start()
-                        live_capture["capture"] = capture
+                        if remote_mic:
+                            remote_audio.start_listening(_make_on_chunk(session))
+                        else:
+                            capture = Capture(
+                                capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
+                            )
+                            capture.start()
+                            live_capture["capture"] = capture
                 elif kind == "release":
                     if core.handle(Event("release")):
                         if session is None:
@@ -569,6 +600,12 @@ def build_app(
                             capture = live_capture.pop("capture", None)
                             if capture is not None:
                                 capture.stop()
+                            if remote_audio is not None:
+                                # Idempotent, and asked for whichever way
+                                # the press went: a client that attached
+                                # or left while the key was down must not
+                                # leave the sink open past this release.
+                                remote_audio.stop_listening()
                             eou_ms = None
                             started_at = turn_started_at["value"]
                             if started_at is not None:
@@ -590,8 +627,52 @@ def build_app(
             websockets.discard(ws)
         return ws
 
+    async def audio_handler(request: web.Request) -> web.WebSocketResponse:
+        """The /audio path -- see the module docstring's inventory. The
+        socket is handed to `remote_audio` whole: this handler only
+        parses frames and routes them; what a frame *means* for the turn
+        (forwarded or dropped, the ack of which play) is decided there."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        replaced = remote_audio.attach(ws, asyncio.get_running_loop())
+        if replaced is not None and not replaced.closed:
+            # Its handler's loop ends on the close and its detach then
+            # finds it is no longer the client, so nothing is undone.
+            asyncio.ensure_future(replaced.close())
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.BINARY:
+                    remote_audio.feed(msg.data)
+                    continue
+                if msg.type != WSMsgType.TEXT:
+                    continue
+                try:
+                    payload = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    logger.warning("dropped malformed audio message: %r", msg.data)
+                    continue
+                kind = payload.get("type")
+                if kind == "hello":
+                    rate = payload.get("sample_rate")
+                    logger.info("audio client: %s at %s Hz", payload.get("client"), rate)
+                    if rate != 16000:
+                        # The contract says 16 kHz; the session assumes it.
+                        # Said once, loudly, rather than transcribing noise.
+                        logger.warning("audio client sample_rate %r is not 16000", rate)
+                elif kind == "played":
+                    play_id = payload.get("id")
+                    if isinstance(play_id, str):
+                        remote_audio.on_played(play_id)
+                else:
+                    logger.warning("dropped unknown audio message: %r", payload)
+        finally:
+            remote_audio.detach(ws)
+        return ws
+
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
+    if remote_audio is not None:
+        app.router.add_get("/audio", audio_handler)
     app.router.add_static("/static/", _STATIC_DIR)
     return app
 
@@ -606,6 +687,7 @@ def run(
     media=None,
     cards=None,
     hold=None,
+    remote_audio=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
@@ -617,6 +699,7 @@ def run(
             media=media,
             cards=cards,
             hold=hold,
+            remote_audio=remote_audio,
         ),
         host=host,
         port=port,
