@@ -9,7 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 import saathi.voice.engine.cascade as cascade_module
-from saathi.voice.engine.cascade import MEDIA_STT_PROMPT, NAME_PROMPTS, CascadeSession
+from saathi.voice.engine.cascade import (
+    MEDIA_STT_PROMPT,
+    NAME_PROMPTS,
+    CascadeSession,
+)
 from tests.test_cascade import FakeClient, FakeTTSBackend, _hears_speech
 
 
@@ -95,8 +99,8 @@ def test_the_name_prompt_varies_and_speaks_her_language():
     lines = [session.name_prompt() for _ in range(len(NAME_PROMPTS["english"]))]
     assert len(set(lines)) == len(lines)
     assert all(not line.lower().startswith(("sure", "certainly")) for line in lines)
-    session._last_language = "hindi"
-    assert session.name_prompt() in NAME_PROMPTS["hindi"]
+    session._last_language = "chinese"
+    assert session.name_prompt() in NAME_PROMPTS["chinese"]
 
 
 def test_while_music_plays_the_transcriber_is_primed_with_media_commands():
@@ -134,3 +138,34 @@ def test_her_name_then_silence_is_still_her_calling():
     assert session.heard_only_name is True
     assert _turn(session) == ""
     assert session.heard_only_name is False  # over the spacebar: nothing said
+
+
+def test_a_wake_the_transcriber_doesnt_confirm_is_no_turn_and_no_model_call():
+    # Live, 2026-10-09: tiny.en heard "Kaki" in two people's chat across
+    # the table; the cloud transcript had no name. Nobody called her.
+    client = FakeClient(heard="Then how? We need to finish the report.")
+    session = _session(client)
+    assert _turn(session, by_name=True) == ""
+    assert session.heard_only_name is False  # no "Yes?" either
+    assert client.chat.completions.calls == []
+
+
+def test_the_same_words_over_the_spacebar_are_still_answered():
+    client = FakeClient(heard="Then how? We need to finish the report.")
+    session = _session(client)
+    assert _turn(session) != ""
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_the_transcriber_is_told_her_language_and_never_given_her_name():
+    # 2026-10-09: a "Kaki." hint on wake turns came back as the whole
+    # transcript of unclear speech -- read as her calling. And left to
+    # guess, Whisper heard Spanish, French and Hindi in the room.
+    client = FakeClient(heard="Kaki, what time is it?")
+    session = _session(client)
+    _turn(session, by_name=True)
+    session._last_language = "chinese"
+    _turn(session)
+    first, second = client.audio.transcriptions.calls
+    assert "prompt" not in first and first["language"] == "en"
+    assert second["language"] == "zh"

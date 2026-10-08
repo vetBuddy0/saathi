@@ -28,8 +28,7 @@ re-litigated:
    Singapore endpoint shows `cmn-CN` has WaveNet A–D and Chirp3-HD
    only. The class was already named `Neural2WaveNet` with WaveNet as
    "an alternative voice ID within the same class" (2026-09-18), so
-   Mandarin on this backend is `cmn-CN-Wavenet-A`, and Bengali
-   (`bn-IN`, also no Neural2) is `bn-IN-Wavenet-A`. Per-language voice
+   Mandarin on this backend is `cmn-CN-Wavenet-A`. Per-language voice
    table below, instead of one hardcoded `en-US-*` name sent with every
    language code — which the API rejected for Mandarin.
 
@@ -126,8 +125,6 @@ _SAMPLE_RATE_HZ = 24000
 _LANGUAGE_CODES = {
     "english": "en-US",
     "chinese": "cmn-CN",
-    "hindi": "hi-IN",
-    "bengali": "bn-IN",
 }
 
 
@@ -150,15 +147,13 @@ def chirp3_hd_voice_name(speaker: str, language: str) -> str:
 # user's ears, not a label. One constant to change.
 DEFAULT_CHIRP_SPEAKER = "Sulafat"
 
-# Neural2 where it exists, WaveNet where it doesn't (cmn-CN and bn-IN
-# have no Neural2 voices -- list_voices() at the Singapore endpoint,
+# Neural2 where it exists, WaveNet where it doesn't (cmn-CN has
+# no Neural2 voices -- list_voices() at the Singapore endpoint,
 # 2026-09-25). All female, to stay as close to one character as a
 # per-language voice set allows.
 _NEURAL2_WAVENET_VOICES = {
     "english": "en-US-Neural2-C",
     "chinese": "cmn-CN-Wavenet-A",
-    "hindi": "hi-IN-Neural2-A",
-    "bengali": "bn-IN-Wavenet-A",
 }
 
 

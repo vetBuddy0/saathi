@@ -22,7 +22,8 @@
 
 export const AMBIENT_KINDS = Object.freeze(["ball", "leaf", "star"]);
 
-const DURATION_MS = { ball: 7000, leaf: 8500, star: 6500 };
+// Slow enough for the eyes to follow without darting (2026-10-09).
+const DURATION_MS = { ball: 11000, leaf: 13000, star: 10000 };
 
 function between(random, min, max) {
   return min + random() * (max - min);

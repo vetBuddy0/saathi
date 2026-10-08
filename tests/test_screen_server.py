@@ -1843,7 +1843,10 @@ async def test_an_early_wake_streams_the_listeners_own_mic_into_the_turn(monkeyp
             states = await _states_until_idle(ws)
     assert ChunkCapture.instances == []  # no second parec mid-sentence
     assert follow.stopped
-    assert session.audio == [b"ll udhi", b"END"]
+    # The name's own audio leads the turn: the cloud transcript must
+    # contain the name to confirm the wake (cascade.py, mentions_name),
+    # and the start of her request was in that audio too.
+    assert session.audio == [b"saathi ca", b"ll udhi", b"END"]
     assert states[-3:] == ["thinking", "speaking", "idle"]
 
 

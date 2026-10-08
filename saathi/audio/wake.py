@@ -143,7 +143,12 @@ def match_wake_word(text: str) -> tuple[bool, str]:
 # wakes the device (match_wake_word doesn't use them). For "Kaki" these
 # are the likely English respellings, not yet seen live -- add what the
 # logs show.
-_CLOUD_MISHEARINGS = frozenset({"khaki", "cocky", "kacky", "cakey", "kakki", "caki"})
+# Seen 2026-10-09 (gpt-transcribe, Chirp3-HD and Piper voices saying
+# "Kaki, ..."): tacky, packy, kaggy, paki -- the name read as the
+# nearest English word. They also confirm a wake (`mentions_name`).
+_CLOUD_MISHEARINGS = frozenset({
+    "khaki", "cocky", "kacky", "cakey", "kakki", "caki", "tacky", "packy", "kaggy", "paki",
+})
 # Said before the name, never meant as content: "Hey Kaki".
 _GREETINGS = frozenset({"hey", "hi", "hello", "ok", "okay", "oh"})
 
@@ -186,6 +191,32 @@ def strip_wake_word(text: str, *, loose: bool = False) -> str:
         for word in words[:drop]:
             position = text.index(word, position) + len(word)
         text = text[position:].lstrip(" ,.!?;:-")
+
+
+# How the cloud transcriber writes the name in Chinese characters when
+# she says it in a Mandarin sentence (measured 2026-10-09, gpt-transcribe
+# on Chirp3-HD cmn-CN clips: "卡奇，今天天气怎么样？").
+_CLOUD_NAME_HANZI = ("卡奇", "咖奇", "卡琪", "卡吉", "卡key")
+
+
+def mentions_name(text: str) -> bool:
+    """Whether the cloud transcript of a turn the wake listener started
+    has her name in it -- the second, independent check that the name
+    was really said. tiny.en, primed with "Kaki", turns short bits of
+    ordinary talk into the name ("Cookie or cake?" -> "Kaki or Kaki?";
+    4-8 in 90 everyday sentences, 2026-10-09), and a room of people
+    talking produces those bits all day. The cloud model is far larger
+    and isn't primed, so both agreeing is a much rarer accident.
+
+    Anywhere, not only first: with music playing the lyrics come before
+    her ("in love with your body, Kaki, stop"). Loose: the cloud's own
+    respellings count (`_CLOUD_MISHEARINGS`)."""
+    if any(name in text for name in _CLOUD_NAME_HANZI):
+        return True
+    words = re.findall(r"[^\W_]+(?:'[^\W_]+)?", text.lower(), flags=re.UNICODE)
+    return any(_is_name(w) or w in _CLOUD_MISHEARINGS for w in words) or any(
+        _is_name(a + b) for a, b in zip(words, words[1:])
+    )
 
 
 def is_only_name(text: str, *, loose: bool = False) -> bool:

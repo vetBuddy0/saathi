@@ -190,6 +190,46 @@ def test_cloudflare_turn_credentials_are_minted_cached_and_failures_fall_back():
     assert config.servers() == ice.DEFAULT_STUN  # STUN only, never no call
 
 
+def test_twilio_turn_is_opt_in_and_needs_the_keys():
+    keys = {"TWILIO_ACCOUNT_SID": "AC1", "TWILIO_API_KEY": "SK1", "TWILIO_API_SECRET": "s"}
+    assert not ice.IceConfig.from_env(keys).has_turn  # keys alone start no bill
+    assert ice.IceConfig.from_env({**keys, "SAATHI_TURN_TWILIO": "on"}).has_turn
+    assert not ice.IceConfig.from_env({"SAATHI_TURN_TWILIO": "on"}).has_turn
+
+
+def test_twilio_turn_credentials_keep_turn_entries_as_urls_and_fall_back():
+    import base64
+
+    calls = []
+    minted = {"ttl": "14400", "ice_servers": [
+        {"url": "stun:global.stun.twilio.com:3478", "urls": "stun:global.stun.twilio.com:3478"},
+        {"url": "turn:global.turn.twilio.com:3478?transport=udp",
+         "urls": "turn:global.turn.twilio.com:3478?transport=udp",
+         "username": "u", "credential": "c"},
+    ]}
+
+    def post(url, body, headers, timeout):
+        calls.append((url, body, headers))
+        return minted
+
+    now = {"t": 0.0}
+    config = ice.IceConfig(ice.DEFAULT_STUN, post=post, clock=lambda: now["t"],
+                           twilio=("AC1", "SK1", "secret"))
+    servers = config.servers()
+    assert servers[len(ice.DEFAULT_STUN):] == [{
+        "urls": "turn:global.turn.twilio.com:3478?transport=udp",
+        "username": "u", "credential": "c",
+    }]
+    url, body, headers = calls[0]
+    assert "/Accounts/AC1/Tokens.json" in url and b"Ttl=" in body
+    assert headers["Authorization"] == "Basic " + base64.b64encode(b"SK1:secret").decode()
+    config.servers()
+    assert len(calls) == 1  # cached
+    now["t"] = ice.TWILIO_TTL_SECONDS
+    minted = {"code": 20003, "message": "Authenticate"}
+    assert config.servers() == ice.DEFAULT_STUN  # STUN only, never no call
+
+
 def test_the_pairing_qr_scales_to_its_box_instead_of_cropping():
     # A fixed width/height with no viewBox let the page's CSS crop the
     # code (found live). The SVG must carry a viewBox and no fixed size.

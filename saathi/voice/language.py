@@ -14,6 +14,11 @@ backend actually covers them: detecting a language and having nothing to
 say it in fails worse than a wrong detection, because it fails silently,
 mid-reply, with no voice at all.
 
+Narrowed again 2026-10-09 to English and Mandarin only, by the product
+owner: Hindi and Bengali had voices but no one using this device speaks
+them, and every extra language is one more thing a bad detection can
+switch her into. Lost: keeping them as harmless extras.
+
 Keys are Groq Whisper's own detected-language names, lowercased (its
 `verbose_json` response returns `"English"`, `"Chinese"`, ... — confirmed
 against a real transcription, not the ISO codes some other STT APIs use).
@@ -27,15 +32,23 @@ on.
 
 from __future__ import annotations
 
+import unicodedata
+
 # Whisper's detected-language name (lowercased) -> Piper voice name.
 SUPPORTED_LANGUAGES: dict[str, str] = {
     "english": "en_US-amy-medium",
     "chinese": "zh_CN-huayan-medium",
-    "hindi": "hi_IN-pratham-medium",
-    "bengali": "bn_BD-google-medium",
 }
 
 DEFAULT_LANGUAGE = "english"
+
+# The ISO-639-1 code each language is transcribed as. The transcriber is
+# always told which language to expect (2026-10-09, owner): left to
+# guess, Whisper heard Spanish, French and Hindi in a room of English
+# and Singlish. Choosing English means she speaks English; choosing
+# Mandarin means Mandarin. Lost: auto-detecting her language per turn
+# -- it switched on noise, and nobody here speaks a third language.
+STT_LANGUAGE_CODES: dict[str, str] = {"english": "en", "chinese": "zh"}
 
 
 def resolve_language(detected: str | None, last_used: str) -> str:
@@ -60,21 +73,18 @@ def resolve_language(detected: str | None, last_used: str) -> str:
 # per letter; digits, spaces and punctuation don't vote.
 def script_language(text: str, default: str = DEFAULT_LANGUAGE) -> str:
     """The language `text`'s letters are mostly written in: "chinese"
-    for Han characters, "hindi" for Devanagari, "bengali" for Bengali
-    script, "english" for Latin letters (the one Latin-script language
-    with a voice here). `default` when there are no letters at all, e.g.
-    "One: 50". Latin wins ties only over nothing: "三: The Moon Represents
-    My Heart" is English, "Two: 月亮代表我的心" is Chinese."""
-    counts = {"chinese": 0, "hindi": 0, "bengali": 0, "english": 0}
+    for Han characters, "english" for Latin letters (the one Latin-script
+    language with a voice here). Other scripts (Devanagari, kana, ...)
+    don't vote: the English voice reading them is noise too. `default`
+    when no letter votes, e.g. "One: 50". Latin wins ties only over
+    nothing: "三: The Moon Represents My Heart" is English, "Two:
+    月亮代表我的心" is Chinese."""
+    counts = {"chinese": 0, "english": 0}
     for ch in text:
         point = ord(ch)
         if 0x4E00 <= point <= 0x9FFF or 0x3400 <= point <= 0x4DBF or 0xF900 <= point <= 0xFAFF:
             counts["chinese"] += 1
-        elif 0x0900 <= point <= 0x097F:
-            counts["hindi"] += 1
-        elif 0x0980 <= point <= 0x09FF:
-            counts["bengali"] += 1
-        elif ch.isalpha():
+        elif ch.isalpha() and unicodedata.name(ch, "").startswith("LATIN"):
             counts["english"] += 1
     best = max(counts, key=lambda language: counts[language])
     if counts[best] == 0:

@@ -33,7 +33,7 @@ they are part of what a voice *is* to the operator: nobody can choose a
 voice from a name, so every selection speaks one sentence immediately,
 in her current language, and that sentence has to exist for every
 language in `SUPPORTED_LANGUAGES` or a preview would fail silently for a
-Hindi or Bengali speaker. Same rules as the language list
+Mandarin speaker. Same rules as the language list
 (`voice/language.py`): the list is code, tests pin its shape, the panel
 renders whatever is here.
 
@@ -98,8 +98,6 @@ DEFAULT_VOICE_ID = "warm"
 PREVIEW_SENTENCES: dict[str, str] = {
     "english": "Hello. I'm here whenever you'd like to talk.",
     "chinese": "你好。你想聊天的时候，我都在。",
-    "hindi": "नमस्ते। जब भी आप बात करना चाहें, मैं यहीं हूँ।",
-    "bengali": "নমস্কার। আপনি যখনই কথা বলতে চান, আমি এখানেই আছি।",
 }
 
 

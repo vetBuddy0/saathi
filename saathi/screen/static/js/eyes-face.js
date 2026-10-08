@@ -53,6 +53,13 @@
 // and a gentler speaking bob, perk and syllable squash (roboeyes.js).
 // Lost: removing the flourishes and visitors outright -- they are what
 // makes it read as alive rather than a screensaver; rarer keeps that.
+//
+// Calmer again (2026-10-09, owner: "move less fast ... suitable for an
+// old person to look at and feel calm"): every glide eases at less than
+// half the old rate (roboeyes.js EASE_RATE 12 -> 5), idle drift every
+// 8-14 s, flourishes every 45-90 s, blinks every 3-7 s, slower breathing,
+// rarer and slower nods, a smaller perk, and a sway in place of the
+// confused/laugh shakes. Speed, not presence: the same looks, slower.
 // Still no mouth, no eyebrows, no words.
 
 import { Mood, RoboEyesModel } from "./roboeyes.js";
@@ -260,8 +267,8 @@ export default class EyesFace {
     this._glowCtx = glow.getContext("2d");
     this._model = new RoboEyesModel(EYE_CONFIG);
     this._model.setMood(Mood.DEFAULT);
-    this._model.setAutoblinker(true, 1, 4);
-    this._model.setIdleMode(true, 4, 5);
+    this._model.setAutoblinker(true, 3, 4);
+    this._model.setIdleMode(true, 8, 6);
     this._lastState = null;
     this._lastFrameAt = performance.now();
     this._ambient = new AmbientDirector({ minGapMs: 60000, maxGapMs: 120000 });
@@ -463,7 +470,7 @@ export default class EyesFace {
     this._following = false;
     if (idle && !this._emotion) {
       model.setGazeTarget(0, 0);
-      model.setIdleMode(true, 4, 5);
+      model.setIdleMode(true, 8, 6);
       if (Math.random() < 0.6) model.anim_squint(900);
     }
   }
@@ -472,9 +479,9 @@ export default class EyesFace {
   // enough to feel like a personality, not a screensaver.
   _idleFlourish(dtMs) {
     if (this._lastState !== "idle" && this._lastState !== null) return;
-    this._flourishInMs = (this._flourishInMs ?? randomBetween(15000, 30000)) - dtMs;
+    this._flourishInMs = (this._flourishInMs ?? randomBetween(45000, 90000)) - dtMs;
     if (this._flourishInMs > 0) return;
-    this._flourishInMs = randomBetween(15000, 30000);
+    this._flourishInMs = randomBetween(45000, 90000);
     if (Math.random() < 0.5) {
       this._model.anim_squint(1100);
     } else {
@@ -537,7 +544,7 @@ export default class EyesFace {
     model.setTiltTarget(0);
     model.setSparkle(0.5);
     model.setBrightness(1);
-    model.setAutoblinker(true, 1, 4);
+    model.setAutoblinker(true, 3, 4);
 
     switch (state) {
       case "sleeping":
@@ -548,7 +555,7 @@ export default class EyesFace {
         model.setSizeScale(1);
         model.setSparkle(0);
         model.setBrightness(0.5);
-        model.setBreathing(true, 0.04, 5);
+        model.setBreathing(true, 0.03, 7);
         model.close();
         break;
       case "idle":
@@ -556,8 +563,8 @@ export default class EyesFace {
         model.setMood(Mood.DEFAULT);
         model.setSizeScale(1);
         model.setGazeTarget(0, 0);
-        model.setIdleMode(true, 4, 5);
-        model.setBreathing(true, 0.012, 4.5);
+        model.setIdleMode(true, 8, 6);
+        model.setBreathing(true, 0.01, 6.5);
         break;
       case "attentive":
         model.open();
@@ -584,8 +591,8 @@ export default class EyesFace {
         model.setWarmth(0.16);
         model.setSparkle(0.9);
         model.setBrightness(1.1);
-        model.setBreathing(true, 0.015, 4.5);
-        model.setAttentiveNods(true, 3, 4);
+        model.setBreathing(true, 0.012, 6.5);
+        model.setAttentiveNods(true, 6, 6);
         model.setBlinkSpeed(6);
         model.setAutoblinker(true, 2.5, 3.5);
         break;
@@ -599,7 +606,7 @@ export default class EyesFace {
           if (entering) model.setGazeTarget(-x * 0.6, -y * 0.8);
         }
         // Wander along the top, always away from her.
-        model.setIdleMode(true, 2, 2.5, { x: [-0.8, 0.8], y: [-0.9, -0.55] });
+        model.setIdleMode(true, 4, 3, { x: [-0.8, 0.8], y: [-0.9, -0.55] });
         model.setTiltTarget(-0.05);
         break;
       case "speaking":

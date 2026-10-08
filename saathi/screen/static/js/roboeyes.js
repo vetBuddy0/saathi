@@ -61,11 +61,16 @@ export const Mood = Object.freeze({
 
 // How quickly a "current" value closes the gap to its "target" per
 // second. 1 - exp(-RATE * dt) is the fraction of the remaining gap
-// closed in `dt` seconds; ~12 gives a snappy but not instant settle.
-const EASE_RATE = 12;
+// closed in `dt` seconds. 5 is an unhurried glide (~0.6 s to settle);
+// it was 12, a snappy settle that read as darting to an older viewer
+// (2026-10-09, owner: "calmer, suitable for an old person"). Blinks
+// keep their own, quicker rate: a blink as slow as a glide reads as
+// drowsy.
+const EASE_RATE = 5;
+const BLINK_RATE = 9;
 
-const PERK_MS = 800;
-const NOD_MS = 520;
+const PERK_MS = 1200;
+const NOD_MS = 900;
 
 function approach(current, target, dtSeconds, rate = EASE_RATE) {
   const factor = 1 - Math.exp(-rate * dtSeconds);
@@ -110,7 +115,7 @@ class Eye {
     this.open = true;
     // Only the height (what a blink moves) gets its own rate, so a slow
     // blink doesn't also make every resize sluggish.
-    this.heightRate = EASE_RATE;
+    this.heightRate = BLINK_RATE;
     // The height an open eye rests at: the default times the current
     // size scale. A blink reopens to this, not to the default — before,
     // a blink while LISTENING snapped the eyes back to idle size.
@@ -264,7 +269,7 @@ export class RoboEyesModel {
   }
 
   // How fast a blink closes and reopens; the default is EASE_RATE.
-  setBlinkSpeed(rate = EASE_RATE) {
+  setBlinkSpeed(rate = BLINK_RATE) {
     this.left.heightRate = rate;
     this.right.heightRate = rate;
   }
@@ -340,11 +345,11 @@ export class RoboEyesModel {
   // -- one-shot macro animations ----------------------------------------
 
   anim_confused() {
-    this._confusedUntilMs = this._clockMs + 500;
+    this._confusedUntilMs = this._clockMs + 1200;
   }
 
   anim_laugh() {
-    this._laughUntilMs = this._clockMs + 500;
+    this._laughUntilMs = this._clockMs + 1200;
   }
 
   // "Oh — you called me?": a quick hop up and a widen that overshoots
@@ -410,10 +415,10 @@ export class RoboEyesModel {
 
     this.left.step(dtSeconds);
     this.right.step(dtSeconds);
-    this.tilt = approach(this.tilt, this.tiltTarget, dtSeconds, 5);
-    this.sparkle = approach(this.sparkle, this.sparkleTarget, dtSeconds, 6);
-    this.brightness = approach(this.brightness, this.brightnessTarget, dtSeconds, 8);
-    this.blush = approach(this.blush, this.blushTarget, dtSeconds, 4);
+    this.tilt = approach(this.tilt, this.tiltTarget, dtSeconds, 2.5);
+    this.sparkle = approach(this.sparkle, this.sparkleTarget, dtSeconds, 3);
+    this.brightness = approach(this.brightness, this.brightnessTarget, dtSeconds, 3);
+    this.blush = approach(this.blush, this.blushTarget, dtSeconds, 2.5);
 
     let scale = 1;
     let happyExtra = 0;
@@ -428,8 +433,9 @@ export class RoboEyesModel {
       } else {
         // Decaying horizontal oscillation, not RoboEyes' raw alternating
         // offset (see module docstring) — same "shake left and right" cue.
-        const envelope = remaining / 500;
-        shakeX = Math.sin(this._clockMs / 30) * 12 * envelope;
+        // One slow sway, not a shake (was 12 px at ~5 Hz).
+        const envelope = remaining / 1200;
+        shakeX = Math.sin(this._clockMs / 160) * 5 * envelope;
       }
     }
 
@@ -438,16 +444,17 @@ export class RoboEyesModel {
       if (remaining <= 0) {
         this._laughUntilMs = null;
       } else {
-        const envelope = remaining / 500;
-        shakeY = Math.sin(this._clockMs / 25) * 8 * envelope;
+        const envelope = remaining / 1200;
+        shakeY = Math.sin(this._clockMs / 140) * 3 * envelope;
       }
     }
 
     if (this._speaking) {
-      // Two incommensurate waves: a lively bob that never visibly loops,
-      // plus a small squash that loosely suggests syllables.
-      shakeY += Math.sin(this._clockMs / 420) * 1.2 + Math.sin(this._clockMs / 180) * 0.5;
-      scale *= 1 - Math.max(0, Math.sin(this._clockMs / 240)) * 0.015;
+      // Two incommensurate slow waves: a gentle sway that never visibly
+      // loops, plus a faint squash that loosely suggests speech. Was a
+      // lively bob at 420/180 ms with a 1.5% squash -- busy to watch.
+      shakeY += Math.sin(this._clockMs / 950) * 0.9 + Math.sin(this._clockMs / 610) * 0.3;
+      scale *= 1 - Math.max(0, Math.sin(this._clockMs / 520)) * 0.006;
     }
 
     if (this._breathing) {
@@ -464,7 +471,7 @@ export class RoboEyesModel {
         this.setTiltTarget(this.tiltTarget * 0.3);
       } else {
         // A small dip and back: half a sine over the nod.
-        shakeY += Math.sin(Math.PI * (1 - remaining / NOD_MS)) * 3;
+        shakeY += Math.sin(Math.PI * (1 - remaining / NOD_MS)) * 2;
       }
     }
 
@@ -475,8 +482,8 @@ export class RoboEyesModel {
       } else {
         const t = 1 - remaining / PERK_MS; // 0 -> 1
         // A hop up, then a little overshoot down, then rest.
-        shakeY += -Math.sin(Math.PI * Math.min(1, t * 1.6)) * 10 * (1 - t);
-        scale *= 1 + Math.sin(Math.PI * t) * 0.08 * (1 - t * 0.5);
+        shakeY += -Math.sin(Math.PI * Math.min(1, t * 1.6)) * 4 * (1 - t);
+        scale *= 1 + Math.sin(Math.PI * t) * 0.04 * (1 - t * 0.5);
       }
     }
 

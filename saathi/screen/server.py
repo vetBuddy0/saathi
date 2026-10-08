@@ -629,9 +629,16 @@ def build_app(
         if session is None or capture_source_id is None:
             return
         # Taken first: once the state leaves IDLE the listener stops
-        # collecting and clears it. Not needed with `follow`, which
-        # hands over everything after the name itself.
-        preroll = after() if after is not None and not rest and follow is None else b""
+        # collecting and clears it. With `follow`, which hands over
+        # everything after the name, the preroll is the name's own
+        # audio: the cloud transcript must contain the name for the
+        # turn to count (cascade.py, `mentions_name`). Lost: leaving
+        # it out -- the cloud then never heard the name and the second
+        # check had nothing to confirm.
+        if follow is not None:
+            preroll = pcm if not rest else b""
+        else:
+            preroll = after() if after is not None and not rest else b""
         if core.state == State.SLEEPING:
             core.handle(Event("wake"))
         if not core.handle(Event("notice")):

@@ -380,3 +380,15 @@ def test_a_second_caller_hears_busy(world):
     conn = world["calls"].attach(other_member, other)
     world["calls"].on_member_message(conn, {"type": "call"})
     assert other.of("type", "ended")[0]["reason"] == "busy"
+
+
+def test_describe_signal_names_the_kind_never_the_address():
+    from saathi.call.webrtc import _describe_signal
+
+    assert _describe_signal({"sdp": {"type": "offer", "sdp": "v=0..."}}) == "offer"
+    line = "candidate:1 1 UDP 2122 192.168.1.5 50000 typ host generation 0"
+    described = _describe_signal({"candidate": {"candidate": line}})
+    assert described == "candidate host udp"
+    assert "192.168" not in described
+    assert _describe_signal({"candidate": {"candidate": ""}}) == "candidate ? ?"
+    assert _describe_signal({}) == "other"

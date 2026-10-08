@@ -1805,3 +1805,90 @@ blocky low-res copy of the eye shows at its rim); the eyes are drawn
 straight onto the face canvas, no offscreen copy; and the redraw box is
 the pair's rectangle, not a square of its width. Pixel output compared
 old vs new: the same eyes and glow. No browser test here (no Chromium).
+
+**2026-10-09 — English and Mandarin only; Hindi and Bengali removed.**
+Product owner's decision. `SUPPORTED_LANGUAGES` is now those two, so the
+Ctrl+L panel, `set_language`'s enum, detection and every voice table
+follow from it. A stored "hindi"/"bengali" preference is ignored like
+any unsupported one (falls back to the last language, then English).
+`script_language` counts only Han and *Latin* letters: Devanagari or
+other scripts no longer vote, so the English voice is never handed them.
+Lost: keeping them as extras that cost nothing — each extra language is
+one more thing a bad detection can switch her into. Kept: `call/match.py`'s
+Devanagari/Bengali transliteration (a contact's name can still come back
+from the transcriber in those scripts) and `call/phone.py`'s
+`LANGUAGE_COUNTRY` (now unreachable, harmless).
+
+**2026-10-09 — No AI noise suppression (RNNoise) in front of the mic;
+measured, it made things worse.** Offline A/B, the v1.10 LADSPA plugin
+(VAD gate off) vs raw: 18 phrases (12 English, 6 Mandarin, Chirp3-HD
+voices) mixed with fan hum, pink noise and TV-style speech at 10/5/0 dB
+SNR, transcribed by `gpt-transcribe` and the `tiny.en` wake listener.
+Word/char error on the request (name excluded), English raw vs RNNoise:
+steady noise 1.5–7.6% vs 1.5–12.1% (a wash; the cloud model already
+copes), TV speech at 5 dB 21% vs 39%, at 0 dB 59% vs 89%. Mandarin was
+mixed, no clear gain. Wake word, English, over all noisy clips: 61/108
+raw vs 43/108 with RNNoise — its artefacts cost a missed "Kaki" in about
+one clip in six. Lost: wiring it in as a PipeWire filter (a
+`module-ladspa-source` after the echo canceller). Caveats: synthetic
+speech, one run, small sample; a real-room recording could differ.
+The problem it can't touch either way is TV *speech*, which a denoiser
+keeps by design — that needs a beamforming mic array, not software.
+Harness: kept out of the repo (scratch), described here so it can be
+rebuilt.
+
+**2026-10-09 — A wake needs two models to agree: tiny.en hears "Kaki",
+then the cloud transcript must contain the name, or the turn ends
+silently.** Live: two people chatting across the table were answered
+again and again; the name was never said. Measured: tiny.en primed with
+"Kaki" turned 4–8 of 90 everyday sentences into the name ("Cookie or
+cake?" -> "Kaki or Kaki?", "Wait ah..." -> "Kaki Kaki Kaki"). The cloud
+transcriber, hinted with "Kaki." (`NAME_STT_PROMPT`) on wake turns only,
+put the name in 10/12 real requests and in 0/30 ordinary sentences.
+`mentions_name` accepts it anywhere (lyrics come first while music
+plays) and accepts the cloud's respellings (tacky, packy, kaggy, ...).
+To make that possible the name's own audio now leads the turn on the
+early-wake path (screen/server.py); before, it was dropped, along with
+any words inside it ("Kaki ca|ll Udhi" reached the cloud as "ll Udhi").
+Lost, all measured: rejecting transcripts that repeat the name (7/90
+still false); dropping the 0.55 s early check (2/90, but the name heard
+11/18 instead of 15/18); no prompt for tiny.en (0/90 false, but the name
+heard 7/18); RNNoise in front (worse). Cost: a real "Kaki" is missed
+when the cloud misspells it past the list -- 2 in 12 English requests in
+the test. Unmeasured: Mandarin, where the cloud wrote the name 卡奇 or
+not at all ("开启", "咳嗽", 2026-10-09 Chirp clips, no hint); a missed
+Mandarin wake is likelier than an English one until measured with a
+real voice.
+
+**2026-10-09 — Twilio TURN as a second relay option
+(`SAATHI_TURN_TWILIO=on`).** Campus wifi (NUS_STU) failed every host and
+STUN pair, so calls stuck on "Connecting…". The Twilio keys calling
+already has can mint TURN credentials (Network Traversal Service,
+verified live), so no new account is needed. Per-GB billing, so opt-in;
+Cloudflare wins when both are set. See call/ice.py.
+
+**2026-10-09 — Her language is the one chosen, never detected; the
+transcriber is told it (`language=en|zh`).** Owner: "if I select
+English I'm only speaking English; if Mandarin then Mandarin." Live,
+Groq's whisper-large-v3-turbo guessing per utterance put Spanish, French
+and Hindi in the captions. `STT_LANGUAGE_CODES` (voice/language.py) is
+passed on every STT call, primary and fallback; the per-turn detection
+block in cascade.py is gone. Her language changes only through Ctrl+L or
+`set_language` ("speak to me in Mandarin"). Lost: auto-switching when
+she changes language mid-conversation -- it switched on noise.
+
+**2026-10-09 — The "Kaki." STT hint on wake turns is withdrawn, the same
+day.** It was measured on gpt-transcribe, but the live transcriber is
+Groq's Whisper (provider.py's split), which answered unclear speech with
+the hint itself: "Kaki." alone read as her calling, opened "listening for
+the rest", and the friend's next sentence was answered. Without it,
+`mentions_name` relies on the cloud's own spelling plus the respelling
+list. Lesson recorded: measure on the transcriber that is actually live.
+
+**2026-10-09 — The face moves at under half the speed.** Owner: calmer,
+for an old person to look at. EASE_RATE 12 -> 5 (blinks keep a quicker
+BLINK_RATE 9), slower tilt/brightness/sparkle, idle drift 8-14 s,
+flourishes 45-90 s, blinks every 3-7 s, breathing 6.5 s, nods every
+6-12 s and slower, a smaller perk, a sway instead of the confused/laugh
+shake, slower visitors. Browser tests (tests/test_eyes_*.py) could not be
+run on this laptop: snap Chromium can't read /tmp and hangs headless.

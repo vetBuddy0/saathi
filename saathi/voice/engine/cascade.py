@@ -102,7 +102,7 @@ import soundfile as sf
 from groq import Groq
 
 from saathi.audio.playback import PlaybackHandle, play
-from saathi.audio.wake import is_only_name, strip_wake_word
+from saathi.audio.wake import is_only_name, mentions_name, strip_wake_word
 from saathi.audio.vad import contains_speech
 from saathi.identity.compile import compile_context
 from saathi.identity.digest import digest_turn, write_episode
@@ -118,8 +118,8 @@ from saathi.voice.engine.provider import (
 )
 from saathi.voice.language import (
     DEFAULT_LANGUAGE,
+    STT_LANGUAGE_CODES,
     SUPPORTED_LANGUAGES,
-    resolve_language,
     script_language,
 )
 from saathi.voice.router import Command, Context, route
@@ -170,7 +170,6 @@ _WARM_IF_IDLE_SECONDS = 30.0
 # sentence would be worst.
 NAME_PROMPTS: dict[str, tuple[str, ...]] = {
     "english": ("Yes?", "I'm here.", "Yes, I'm listening.", "What's up?"),
-    "hindi": ("हाँ?", "हाँ, बोलिए।", "मैं सुन रही हूँ।"),
     "chinese": ("嗯？", "我在呢。", "我在听。"),
 }
 
@@ -621,6 +620,14 @@ class CascadeSession:
         # Only passed when there is one: an absent prompt is the
         # transcriber's own default, exactly as before.
         bias = {"prompt": MEDIA_STT_PROMPT} if self._media_playing_now() else {}
+        # Never a hint with her name in it on a wake turn: tried
+        # 2026-10-09, and Whisper answered unclear speech with the hint
+        # itself ("Kaki."), which read as her calling and opened the
+        # conversation to whoever spoke next.
+        # Always the language she chose, never a guess (voice/language.py).
+        bias["language"] = STT_LANGUAGE_CODES.get(
+            self._last_language, STT_LANGUAGE_CODES[DEFAULT_LANGUAGE]
+        )
         try:
             transcription = provider.transcriber.audio.transcriptions.create(
                 model=provider.stt_model,
@@ -704,8 +711,7 @@ class CascadeSession:
         # case's priority against detection, nothing about what counts
         # as trustworthy in the first place.
         preferred = self._language_preference()
-        language_pinned = preferred in SUPPORTED_LANGUAGES
-        if language_pinned:
+        if preferred in SUPPORTED_LANGUAGES:
             self._last_language = preferred
 
         # Betting on last turn's language (or the pinned preference just
@@ -717,7 +723,7 @@ class CascadeSession:
         self._preload_voice_in_background(self._last_language)
 
         stt_started_at = time.monotonic()
-        transcription, reports_language = self._transcribe("turn.flac", flac_bytes)
+        transcription, _reports_language = self._transcribe("turn.flac", flac_bytes)
         self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
         heard = transcription.text.strip()
         if not heard:
@@ -726,6 +732,16 @@ class CascadeSession:
             logger.info("speech gate passed but the transcript was empty; turn ends silently")
             self._pending_stt_ms = None
             self.heard_only_name = self._started_by_name
+            return ""
+        # A turn the wake listener started must also have her name
+        # somewhere in the cloud's transcript, or it was a false wake (live,
+        # 2026-10-09: two people chatting across the table were answered
+        # again and again, the name never said). Ends silently, with no
+        # "Yes?": nobody called her.
+        if self._started_by_name and not mentions_name(heard):
+            logger.info("woken by name but the transcript has no name (%r); no reply", heard[:60])
+            self.heard_only_name = False
+            self._pending_stt_ms = None
             return ""
         # Her name is the trigger, never the content (live, 2026-10-08:
         # "Saathi" alone was transcribed "Saudi?" and answered). Only
@@ -739,17 +755,9 @@ class CascadeSession:
             return ""
         heard = strip_wake_word(heard, loose=self._started_by_name) or heard
         self.last_heard = heard
-        if not language_pinned:
-            if reports_language:
-                detected = (getattr(transcription, "language", None) or "").lower()
-            else:
-                # OpenAI's newer transcribers return text only. Her
-                # language is read from the script she was transcribed
-                # in instead: Han -> chinese, Devanagari -> hindi, ...
-                # Latin can't tell English from Malay; English is the
-                # only Latin-script language with a voice here anyway.
-                detected = script_language(heard, self._last_language)
-            self._last_language = resolve_language(detected, self._last_language)
+        # No per-turn detection (2026-10-09, owner): the transcriber was
+        # told her language, so the transcript can't name another one.
+        # Her language changes only when she or the panel says so.
 
         # Three layers of memory, oldest to newest, then her words.
         # Layer 3 (episodes, via compile_context) and layer 2 (the

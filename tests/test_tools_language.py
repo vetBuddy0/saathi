@@ -95,6 +95,6 @@ def test_set_language_works_from_another_thread(store):
 
     tool = make_set_language_tool(store)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        result = pool.submit(tool.handler, language="hindi").result()
+        result = pool.submit(tool.handler, language="chinese").result()
     assert result["status"] == "ok"
-    assert read_preference(store, LANGUAGE_KEY) == "hindi"
+    assert read_preference(store, LANGUAGE_KEY) == "chinese"

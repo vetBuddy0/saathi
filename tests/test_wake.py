@@ -358,3 +358,15 @@ def test_a_leading_name_is_stripped(text, stripped):
     from saathi.audio.wake import strip_wake_word
 
     assert strip_wake_word(text) == stripped
+
+
+def test_mentions_name_confirms_the_cloud_heard_her_name():
+    from saathi.audio.wake import mentions_name
+
+    assert mentions_name("Kaki, call my son.")
+    assert mentions_name("in love with your body, Kaki, stop.")  # lyrics first
+    assert mentions_name("Khaki, what time is it?")
+    assert mentions_name("卡奇，今天天气怎么样？")
+    assert not mentions_name("Then how? We need to finish the report.")
+    assert not mentions_name("Cookie or cake?")
+    assert not mentions_name("今天天气怎么样？")

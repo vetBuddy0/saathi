@@ -230,12 +230,14 @@ def test_send_audio_chunks_are_joined_for_transcription(no_real_playback):
     assert len(client.audio.transcriptions.calls) == 2
 
 
-def test_end_turn_resolves_a_supported_detected_language(no_real_playback):
+def test_a_detected_language_never_switches_hers(no_real_playback):
+    # 2026-10-09, owner: her language is the one she chose, never a
+    # per-turn guess (Whisper guessed Spanish, French and Hindi live).
     client = FakeClient(detected_language="Chinese")
     session, _backend = _session(client)
     session.start()
     session.end_turn()
-    assert session._last_language == "chinese"
+    assert session._last_language == "english"
 
 
 def test_end_turn_falls_back_when_detected_language_is_unsupported(no_real_playback):
@@ -243,21 +245,22 @@ def test_end_turn_falls_back_when_detected_language_is_unsupported(no_real_playb
     # supported set must not change what language Saathi replies in.
     client = FakeClient(detected_language="Portuguese")
     session, _backend = _session(client)
-    session._last_language = "hindi"
+    session._last_language = "chinese"
     session.start()
     session.end_turn()
-    assert session._last_language == "hindi"
+    assert session._last_language == "chinese"
 
 
 def test_end_turn_tells_the_llm_which_language_to_reply_in(no_real_playback):
-    client = FakeClient(detected_language="Hindi")
+    client = FakeClient(detected_language="English")
     session, _backend = _session(client)
+    session._last_language = "chinese"
     session.start()
     session.end_turn()
 
     messages = client.chat.completions.calls[0]["messages"]
     system_messages = [m["content"].lower() for m in messages if m["role"] == "system"]
-    assert any("hindi" in content for content in system_messages)
+    assert any("reply in chinese" in content for content in system_messages)
 
 
 def test_say_synthesizes_one_sentence_at_a_time_via_the_selected_backend(no_real_playback):
@@ -562,10 +565,10 @@ def test_end_turn_ignores_an_unsupported_stored_language_preference(no_real_play
         backend_preference=lambda: "fake",
         language_preference=lambda: "klingon",
     )
-    session._last_language = "hindi"
+    session._last_language = "chinese"
     session.start()
     session.end_turn()
-    assert session._last_language == "hindi"
+    assert session._last_language == "chinese"
 
 
 def test_construction_preloads_the_backends_voice_immediately():
@@ -777,11 +780,11 @@ def test_a_tool_call_emits_an_intent_and_speaks_the_follow_up_reply(no_real_play
 
 
 def test_a_tool_calls_result_is_fed_back_as_a_tool_message(no_real_playback):
-    tool_call = _fake_tool_call("call_1", "set_language", {"language": "hindi"})
+    tool_call = _fake_tool_call("call_1", "set_language", {"language": "chinese"})
     client = FakeClient(
         chat_responses=[
             _fake_completion(content=None, tool_calls=[tool_call]),
-            _fake_completion(content="ठीक है।"),
+            _fake_completion(content="好的。"),
         ]
     )
     session, _backend = _session(client)
@@ -794,7 +797,7 @@ def test_a_tool_calls_result_is_fed_back_as_a_tool_message(no_real_playback):
     tool_messages = [m for m in follow_up_messages if m["role"] == "tool"]
     assert len(tool_messages) == 1
     assert tool_messages[0]["tool_call_id"] == "call_1"
-    assert json.loads(tool_messages[0]["content"]) == {"status": "ok", "language": "hindi"}
+    assert json.loads(tool_messages[0]["content"]) == {"status": "ok", "language": "chinese"}
 
 
 def test_a_tool_call_with_no_registered_intent_handler_still_gets_a_reply(no_real_playback):
@@ -1184,19 +1187,21 @@ def _openai_session(client, *, llm="gpt-4.1", stt="gpt-transcribe"):
     )
 
 
-def test_openai_transcriber_is_asked_for_json_and_language_comes_from_the_script(
+def test_openai_transcriber_is_asked_for_json_and_told_her_language(
     no_real_playback,
 ):
-    # OpenAI's newer transcribers return text only; a Mandarin transcript
-    # must still switch her reply language, from its script.
+    # OpenAI's newer transcribers return text only. She chose Mandarin:
+    # the transcriber is told so, and she is answered in it.
     client = FakeClient(heard="请帮我播放一首邓丽君的歌。", detected_language="english")
     session = _openai_session(client)
+    session._last_language = "chinese"
     session.start()
     session.send_audio(b"\x00\x00" * 100)
     session.end_turn()
 
     stt = client.audio.transcriptions.calls[0]
     assert stt["model"] == "gpt-transcribe" and stt["response_format"] == "json"
+    assert stt["language"] == "zh"
     chat = client.chat.completions.calls[0]
     assert chat["model"] == "gpt-4.1"
     assert {"role": "system", "content": "Reply in chinese."} in chat["messages"]

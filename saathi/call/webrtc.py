@@ -77,6 +77,23 @@ from saathi.call.push import PushError, PushSender, cancel_payload, ring_payload
 
 logger = logging.getLogger(__name__)
 
+
+def _describe_signal(data: dict) -> str:
+    """One loggable word or two for a relayed signal -- its kind and, for
+    a candidate, its type (host/srflx/relay) -- never the SDP or an
+    address. Enough to see from the log alone where call setup stops."""
+    sdp = data.get("sdp")
+    if isinstance(sdp, dict):
+        return str(sdp.get("type", "sdp"))
+    candidate = data.get("candidate")
+    if isinstance(candidate, dict):
+        text = str(candidate.get("candidate", ""))
+        words = text.split()
+        kind = words[words.index("typ") + 1] if "typ" in words[:-1] else "?"
+        proto = words[2].lower() if len(words) > 2 else "?"
+        return f"candidate {kind} {proto}"
+    return "other"
+
 RING_TIMEOUT_SECONDS = 45.0
 # ICE that hasn't connected in this long won't: almost always a NAT that
 # needs TURN (docs/DEMO.md, "TURN").
@@ -413,6 +430,7 @@ class FamilyCalls:
             elif kind == "signal" and call.conn is conn and call.device_peer is not None:
                 data = message.get("data")
                 if isinstance(data, dict):
+                    logger.info("family call signal, phone -> device: %s", _describe_signal(data))
                     self._to_device(
                         fx,
                         {
@@ -565,6 +583,8 @@ class FamilyCalls:
             return
         fx = _Effects()
         end_reason: str | None = None
+        if action != "signal":
+            logger.info("family call, device says: %s", action)
         with self._lock:
             call = self._call
             if call is None or message.get("call_id") != call.id:
@@ -582,6 +602,7 @@ class FamilyCalls:
             elif action == "signal":
                 data = message.get("data")
                 if isinstance(data, dict):
+                    logger.info("family call signal, device -> phone: %s", _describe_signal(data))
                     self._to_member(
                         fx, call.conn, {"type": "signal", "call_id": call.id, "data": data}
                     )
