@@ -112,10 +112,11 @@ Hold nothing — tap space, speak, and it answers.
   player (error 150). The player reports it, and from then on that video
   is sent with `target: "browser"` — the real youtube.com page, which
   only the Android shell's YouTube pane can show (DECISIONS.md
-  2026-10-08). On a laptop with just the face page, a browser-target
-  play has no taker: the panel goes blank and nothing plays. Pick the
-  other results in a laptop demo. (The yt-dlp direct stream that covered
-  this is gone: it breached YouTube's terms.)
+  2026-10-08). On a laptop with just the face page there is no taker,
+  so the refusal is treated as the browser's would be: the video is
+  dropped for the session and the other results come back on a card.
+  (The yt-dlp direct stream that covered this is gone: it breached
+  YouTube's terms.)
 - **Name matching** can dial a near-miss ("Deepa" → Deepak) and mixes up
   two people with the same name or relation (S2–S4). Stick to "call my
   son" / the test number in a demo.

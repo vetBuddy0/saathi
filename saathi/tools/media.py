@@ -72,6 +72,20 @@ and losing it every time was the complaint that produced the yt-dlp
 detour. A play that switches target (the embed was playing, the next
 one goes to the browser, or back) is preceded by `stop`, so the two
 never play over each other; the clients need no rule of their own.
+Two things found in review the same day: with no client that can show
+the watch page connected -- the Pi kiosk with the face page alone, a
+laptop demo -- an embed refusal is treated as the browser's verdict
+would be (refused for the session, the rest re-offered on a card,
+which is what happened before the target rule), because a
+browser-target play nobody takes is a blank panel she is told is
+playing; `browser_available` is how the controller knows, and `cli.py`
+hands it the /audio seam's `attached` (the Android shell is the one
+client with a watch page, and its /audio socket is the one sign of it
+the engine already has -- lost: a hello on `/ws`, a protocol change
+the face page would also have to make). And a `reset` -- a page saying
+it has no player -- counts only from the client whose target is
+playing: the face page reconnecting while the watch page plays used to
+un-play it, and "carry on" then started it over.
 
 Why `urllib` and not `aiohttp` here: the handler is synchronous by
 contract and already off the loop thread; a blocking GET is the simple,
@@ -511,9 +525,19 @@ class MediaController:
         search: Search | None = None,
         broadcast: Broadcast | None = None,
         cards: CardController | None = None,
+        browser_available: Callable[[], bool] | None = None,
     ) -> None:
         self._search: Search = search or youtube_search
         self._broadcast: Broadcast | None = broadcast
+        # Whether a client that can show the real watch page is connected
+        # right now; asked at the moment an embed refusal would send a
+        # video there, never cached. None (an older wiring, a unit test)
+        # means "assume so" and keeps the target rule as it was. `cli.py`
+        # passes the /audio seam's `attached`: the Android shell is the
+        # one client with a watch page, and its /audio socket is how the
+        # engine knows it is there -- without a hello on /ws, which the
+        # face page would also have to learn (see the module docstring).
+        self._browser_available = browser_available
         # With a CardController, the offer is a Choice card (screen/
         # cards.py): the same three numbered titles, but tappable and
         # dismissable, and spoken from the card's own text. The panel's
@@ -623,15 +647,24 @@ class MediaController:
     # -- the browser reporting back ------------------------------------
 
     def on_browser_event(
-        self, event: str, video_id: str | None = None, code: str | int | None = None
+        self,
+        event: str,
+        video_id: str | None = None,
+        code: str | int | None = None,
+        target: str | None = None,
     ) -> None:
-        """`ended`/`error`/`reset` from the browser. The browser reports,
+        """`ended`/`error`/`reset` from a player. The player reports,
         it doesn't decide: the controller is the one place media state
         lives, so "play that again" after a video ended still knows
         what "that" was. `reset` is a freshly loaded page saying it has
-        no player -- whatever was playing isn't any more; the memory of
-        what was offered and last played is kept, so "carry on" starts
-        it again instead of insisting it's already on.
+        no player -- *its* player: `target` names which ("embed" from
+        the face page, "browser" from the shell; absent means the face
+        page, whose frames predate the field), and a reset about the
+        target that is not playing changes nothing. The one that is
+        playing isn't any more; the memory of what was offered and last
+        played is kept, so "carry on" starts it again instead of
+        insisting it's already on. An `ended` naming a video other than
+        the one playing is a late report and changes nothing either.
 
         An `error` is never silent: it is logged with the player's
         code, and which player decides what happens next (the module
@@ -641,7 +674,11 @@ class MediaController:
         or "wall") refuses the video for the session, and if it was one
         of the results on offer, the rest are put back on a card naming
         it, so she sees the device noticed and can pick another -- by
-        tap, or by number on the next turn."""
+        tap, or by number on the next turn. With no client able to show
+        the watch page connected (`browser_available`), the embed's
+        refusal is treated as the browser's would be: there is nobody to
+        hand the video to, and a play nobody takes is a blank panel she
+        is told is playing."""
         if event == "error":
             failed = video_id or (self.now_playing.video_id if self.now_playing else None)
             logger.warning("player could not play %s (code %s)", failed, code)
@@ -655,7 +692,7 @@ class MediaController:
                 self.paused = False
             if failed is None:
                 return
-            if code in BROWSER_FAILURE_CODES:
+            if code in BROWSER_FAILURE_CODES or not self._browser_taker():
                 self.refused.add(failed)
                 self._reoffer_without(failed)
                 return
@@ -670,9 +707,27 @@ class MediaController:
             if waiting:
                 assert self.now_playing is not None
                 self._play(self.now_playing)  # the fallback, not asked for
-        elif event in ("ended", "reset"):
+        elif event == "reset":
+            source = target if target in (TARGET_EMBED, TARGET_BROWSER) else TARGET_EMBED
+            if self.target not in (None, source):
+                # The other player's page reloaded (the face page's socket
+                # reconnecting while the watch page plays, most often);
+                # what is playing is still playing.
+                logger.info("reset from the %s player ignored; %s is playing", source, self.target)
+                return
             self.playing = False
             self.paused = False
+        elif event == "ended":
+            playing_id = self.now_playing.video_id if self.now_playing is not None else None
+            if video_id is not None and playing_id is not None and video_id != playing_id:
+                logger.info("ended for %s ignored; %s is playing", video_id, playing_id)
+                return
+            self.playing = False
+            self.paused = False
+
+    def _browser_taker(self) -> bool:
+        """Whether a browser-target play would have a client to play it."""
+        return self._browser_available is None or bool(self._browser_available())
 
     def _reoffer_without(self, failed: str) -> None:
         offered = {r.video_id: r for r in self.last_results}

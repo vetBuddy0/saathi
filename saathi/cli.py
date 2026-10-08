@@ -161,7 +161,9 @@ def build_runtime() -> Runtime:
     # from here rather than build its own.
     cards = CardController()
     hold = HoldController(cards)
-    media = MediaController(cards=cards)
+    # The browser target has a taker only while the Android shell's
+    # /audio socket is attached -- the one client with a watch page.
+    media = MediaController(cards=cards, browser_available=lambda: remote_audio.attached)
     runtime = Runtime(
         config=config,
         core=core,

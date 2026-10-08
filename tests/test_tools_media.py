@@ -986,3 +986,114 @@ def test_an_error_for_a_video_not_on_offer_marks_it_and_offers_nothing(results):
     controller.on_browser_event("error", "some-other-video", code=100)
     assert "some-other-video" in controller.unplayable
     assert not [m for m in sent if m["type"] == "card" and m["card"] is not None][1:]
+
+
+# -- who is there to take a browser play, and whose report is whose ------
+
+
+def test_without_a_browser_client_an_embed_refusal_is_refused_and_reoffered(results):
+    # The Pi kiosk with the face page alone, or a laptop demo: nothing
+    # can show the watch page, so the embed's refusal is the browser's
+    # verdict too -- the rule from before the target existed. Nothing is
+    # re-emitted, and "carry on" does not insist it is playing.
+    sent: list = []
+    controller = MediaController(
+        search=lambda q: results, broadcast=sent.append, browser_available=lambda: False
+    )
+    controller.handle("search", query="q")
+    controller.handle("play", choice=2)
+    before = len(sent)
+    controller.on_browser_event("error", results[1].video_id, code=150)
+    assert len(sent) == before
+    assert controller.playing is False
+    assert results[1].video_id in controller.refused
+    assert results[1].video_id not in controller.unplayable
+    reply = controller.handle("resume")
+    assert reply["status"] == "unplayable" and len(reply["results"]) == 2
+    assert len(sent) == before
+
+
+def test_the_browser_client_is_asked_for_at_the_moment_of_the_refusal(results):
+    present = {"value": True}
+    sent: list = []
+    controller = MediaController(
+        search=lambda q: results, broadcast=sent.append, browser_available=lambda: present["value"]
+    )
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.on_browser_event("error", results[0].video_id, code=150)
+    assert sent[-1]["action"] == "play" and sent[-1]["target"] == "browser"
+    present["value"] = False  # the phone left before the next refusal
+    controller.handle("play", choice=2)
+    controller.on_browser_event("error", results[1].video_id, code=101)
+    assert sent[-1]["action"] == "play" and sent[-1]["target"] == "embed"  # nothing re-emitted
+    assert results[1].video_id in controller.refused
+
+
+def test_without_a_browser_client_the_retry_card_comes_back_as_it_used_to(results):
+    from saathi.screen.cards import CardController
+
+    sent: list = []
+    cards = CardController(broadcast=sent.append)
+    controller = MediaController(
+        search=lambda q: results,
+        broadcast=sent.append,
+        cards=cards,
+        browser_available=lambda: False,
+    )
+    controller.handle("search", query="q")
+    cards.answer(controller.card_id, {"choice": 2}, source="tap")
+    controller.on_browser_event("error", results[1].video_id, code="no_ready")
+    card = sent[-1]["card"]
+    assert card["kind"] == "choice"
+    assert card["title"] == f"{results[1].title} won't play here. Which instead?"
+    assert [o["label"] for o in card["options"]] == [results[0].title, results[2].title]
+    assert controller.playing is False and controller.now_playing is None
+
+
+def test_a_face_page_reset_while_the_browser_target_plays_changes_nothing(results):
+    # The face page sends `reset` on every socket open it has no player
+    # for -- including a reconnect while the shell's watch page plays.
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.on_browser_event("error", results[0].video_id, code=150)  # now on the browser
+    assert controller.playing is True and controller.target == "browser"
+    controller.on_browser_event("reset")  # no target: the face page's
+    controller.on_browser_event("reset", target="embed")
+    assert controller.playing is True
+    assert controller.handle("pause")["status"] == "ok"
+    assert sent[-1]["action"] == "pause"
+    # The shell's own reset (it restarted) is the one that counts here.
+    controller.on_browser_event("reset", target="browser")
+    assert controller.playing is False and controller.paused is False
+    controller.handle("resume")
+    assert sent[-1]["action"] == "play" and sent[-1]["target"] == "browser"
+
+
+def test_a_shell_reset_while_the_embed_plays_changes_nothing(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.on_browser_event("reset", target="browser")
+    controller.on_browser_event("reset", target="something-new")  # unknown: the face page's
+    assert controller.playing is False  # the second one counted, as a face-page reset does
+    controller.handle("play", choice=1)
+    controller.on_browser_event("reset", target="browser")
+    assert controller.playing is True
+    # With nothing playing, any reset is harmless and idempotent.
+    controller.handle("stop")
+    controller.on_browser_event("reset", target="browser")
+    controller.on_browser_event("reset")
+    assert controller.playing is False and controller.target == "embed"
+
+
+def test_an_ended_naming_another_video_is_a_late_report(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.handle("play", choice=2)
+    controller.on_browser_event("ended", results[0].video_id)  # the first one, long gone
+    assert controller.playing is True
+    controller.on_browser_event("ended", results[1].video_id)
+    assert controller.playing is False

@@ -49,7 +49,13 @@
 // panel that reacted to the other target's plays would be two clients
 // each half-deciding the same thing. Rejected: this panel opening the
 // watch page itself (youtube.com refuses to load in a frame; a
-// navigation would take the face with it).
+// navigation would take the face with it). The one thing this panel
+// does remember about a "browser" play is that it happened: the
+// controller addresses pause/resume/volume to whichever target is
+// playing, and a hidden, stopped embed player (kept after the `stop`
+// that preceded the switch -- see above) answering her "carry on" with
+// the previous video's audio was found in review. `activeTarget` is
+// that memory, cleared by `stop`.
 
 import {
   ALL_LAYOUT_CLASSES,
@@ -131,6 +137,13 @@ export function createMediaPanel(send, options = {}) {
   let baseVolume = 70;
   let fullscreen = false;
   let coreState = "sleeping";
+
+  // Where the last `play` went -- "embed" (ours) or "browser" (the
+  // watch-page client's) -- until a `stop`; null when nothing plays.
+  // pause/resume/volume are addressed to whichever target is playing,
+  // so they act here only while that is the embed: the hidden player
+  // kept after a target switch must not restart on her "carry on".
+  let activeTarget = null;
 
   let player = null; // YT.Player once the API has attached
   let playerReady = false;
@@ -319,6 +332,7 @@ export function createMediaPanel(send, options = {}) {
         if (player && playerReady) player.stopVideo();
         break;
       case "play":
+        activeTarget = message.target === "browser" ? "browser" : "embed";
         if (message.target === "browser") break; // the watch-page client's, not ours (see above)
         current = { video_id: message.video_id, title: message.title, index: message.index };
         if (typeof message.volume === "number") baseVolume = message.volume;
@@ -328,19 +342,20 @@ export function createMediaPanel(send, options = {}) {
         startPlayback(message.video_id);
         break;
       case "pause":
-        if (player && playerReady) player.pauseVideo();
+        if (activeTarget === "embed" && player && playerReady) player.pauseVideo();
         break;
       case "resume":
-        if (player && playerReady) player.playVideo();
+        if (activeTarget === "embed" && player && playerReady) player.playVideo();
         break;
       case "stop":
+        activeTarget = null;
         view = "none";
         render();
         if (player && playerReady) player.stopVideo();
         break;
       case "volume":
         if (typeof message.level === "number") baseVolume = message.level;
-        applyVolume();
+        if (activeTarget !== "browser") applyVolume();
         break;
       case "layout":
         fullscreen = message.mode === "fullscreen";
@@ -386,7 +401,7 @@ export function createMediaPanel(send, options = {}) {
     },
     // For tests only: the state this module holds, read-only.
     _debug() {
-      return { view, fullscreen, baseVolume, coreState, playerReady, loadedVideoId };
+      return { view, fullscreen, baseVolume, coreState, playerReady, loadedVideoId, activeTarget };
     },
   };
 }

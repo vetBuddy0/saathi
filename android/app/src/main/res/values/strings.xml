@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The button says what it is for; the dialog speaks to whoever sets the
+     device up, not to her. No string here may describe a state. -->
+<resources>
+    <string name="app_name">Saathi</string>
+    <string name="talk_button">Hold to talk</string>
+    <string name="setup_title">Where is Saathi\'s engine?</string>
+    <string name="setup_message">The address the engine prints when it starts, on this home\'s own network.</string>
+    <string name="setup_kiosk">Keep Saathi on the screen (kiosk)</string>
+    <string name="setup_save">Save</string>
+    <string name="setup_cancel">Cancel</string>
+    <string name="setup_rejected">That address is not on the home network, so it was not saved.</string>
+</resources>

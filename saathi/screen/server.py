@@ -27,9 +27,13 @@ Since 2026-10-08 every `play` also carries `target` ("embed" or
 ignores "browser"; a client that can show the real youtube.com page
 (the Android shell, on its own `/ws` connection) plays "browser" and
 reports its failures as `media_event` errors with code "browser" or
-"wall". This server tells the two apart by nothing: it broadcasts every
-message to every client and hands every report to the controller,
-which owns the rule (`tools/media.py`).
+"wall". A `media_event` may name which player is reporting (`target`:
+"embed" or "browser"; the face page's frames predate the field and
+carry none, which the controller reads as the embed's), so a `reset`
+from one client cannot un-play what the other is playing. This server
+tells the two apart by nothing: it broadcasts every message to every
+client and hands every report to the controller, which owns the rule
+(`tools/media.py`).
 
 A second path, `/audio` (2026-10-08), is the Android shell as the
 microphone and the speaker while the engine stays here -- see
@@ -47,7 +51,16 @@ complete WAV (one TTS sentence), answered by text `{"type": "played",
 it cut short. While a client is attached, a press starts no `parec`
 capture and TTS goes to the client, not the local sink; with none, the
 device behaves exactly as it did before this path existed. The route is
-only registered when `build_app` is given a `remote_audio`.
+only registered when `build_app` is given a `remote_audio`. Both
+sockets are opened with a heartbeat (`_HEARTBEAT_SECONDS`), so a client
+that dies without a close frame is gone within seconds, not whenever
+TCP gives up: on `/audio` that is what hands the mic and the speaker
+back to the local hardware; on `/ws` it is what lets a press whose
+socket died be released -- a socket that vanishes with its press down
+(no close frame, or a page going away) has that press released on the
+way out (`websocket_handler`'s `finally`), as a touch cancel is a
+release on the shell; a socket that closes in order is trusted to have
+released first, as the shell does.
 
 Cards (same day): `{"type": "card", "card": {...} | null}` (server ->
 browser: show this one card, or clear it; emitted by `screen/cards.py`'s
@@ -119,7 +132,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aiohttp import WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, web
 
 from saathi.audio.capture import Capture
 from saathi.core import Core, Event, State
@@ -135,6 +148,16 @@ from saathi.voice.tts.registry import DEFAULT_PREFERRED_BACKEND_ID, default_back
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _CAPTURE_CHUNK_BYTES = 3200  # 100ms of 16kHz mono 16-bit PCM
+# aiohttp pings every client this often and closes the socket when the
+# pong is half that late. Without it a client that dies without a close
+# frame (the phone off Wi-Fi, the app killed) stays "attached" for as
+# long as the kernel keeps the TCP connection: on /audio every press
+# would use the dead remote mic and every sentence would wait its bound
+# in silence; on /ws a press left down would never be released (see
+# websocket_handler). Five seconds: a phone's audio pipeline and a Wi-Fi
+# hop both answer a ping in milliseconds, so a missed pong is a gone
+# client, and it costs a sleeping tablet nothing it can notice.
+_HEARTBEAT_SECONDS = 5.0
 # Holding-card progress cadence: 20 updates over a 2 s hold is smooth
 # enough to read as "it's doing something" without flooding the socket.
 _HOLD_TICK_SECONDS = 0.1
@@ -438,12 +461,112 @@ def build_app(
     # capture running, or hand core.py a release it never saw a press
     # for. Found in review.
     press_route: dict[str, str | None] = {"value": None}
+    # Which socket's press is down (None between holds): set when a press
+    # takes effect, cleared by the release, real or synthesised -- see
+    # websocket_handler's `finally`.
+    press_owner: dict[str, web.WebSocketResponse | None] = {"ws": None}
+
+    def handle_input(kind: str, ws: web.WebSocketResponse) -> None:
+        """One press or release from `ws` -- or the release the server
+        synthesises for a socket that closed with its press down. Every
+        press and release goes through here, so the two cannot drift."""
+        if kind == "press":
+            press_route["value"] = "hold" if hold is not None and hold.active else "core"
+        routed_to_hold = press_route["value"] == "hold"
+        if kind == "release":
+            press_route["value"] = None
+            press_owner["ws"] = None
+        if routed_to_hold:
+            # The button means "hold to confirm" for now; core.py
+            # never sees this press. See the hold seam above.
+            if kind == "press" and hold_task["task"] is None:
+                hold.begin()
+                press_owner["ws"] = ws
+                hold_task["task"] = asyncio.get_running_loop().create_task(
+                    run_hold(time.monotonic())
+                )
+            elif kind == "release":
+                task = hold_task["task"]
+                if task is not None:
+                    task.cancel()
+                    hold_task["task"] = None
+                hold.abandon()
+            return
+        if kind == "press":
+            # Only act if core.py actually transitioned — e.g. a
+            # press while IDLE/SLEEPING/SPEAKING with no session
+            # configured has no transition and must not start a
+            # capture. See core.py's module docstring for the bug
+            # that taught us this the first time.
+            was_speaking = core.state == State.SPEAKING
+            transitioned = core.handle(Event("press"))
+            if transitioned:
+                press_owner["ws"] = ws
+            # The phone as the microphone: with an /audio client
+            # attached the mic is its frames, not parec's -- and
+            # a device with no usable local mic can still hold a
+            # turn through it.
+            remote_mic = remote_audio is not None and remote_audio.attached
+            if (
+                transitioned
+                and session is not None
+                and (capture_source_id is not None or remote_mic)
+            ):
+                if was_speaking:
+                    # Barge-in: this press just superseded whatever
+                    # turn was still speaking. Bump the generation
+                    # *before* interrupting it, so its tail end
+                    # (still unwinding in another thread) sees it's
+                    # been superseded the moment it checks.
+                    turn_generation["value"] += 1
+                    session.interrupt()
+                session.start()
+                turn_started_at["value"] = time.monotonic()
+                if remote_mic:
+                    remote_audio.start_listening(_make_on_chunk(session))
+                else:
+                    capture = Capture(
+                        capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
+                    )
+                    capture.start()
+                    live_capture["capture"] = capture
+        elif kind == "release":
+            if core.handle(Event("release")):
+                if session is None:
+                    core.handle(Event("no_response"))  # fake: no AI at checkpoint 1
+                else:
+                    capture = live_capture.pop("capture", None)
+                    if capture is not None:
+                        capture.stop()
+                    if remote_audio is not None:
+                        # Idempotent, and asked for whichever way
+                        # the press went: a client that attached
+                        # or left while the key was down must not
+                        # leave the sink open past this release.
+                        remote_audio.stop_listening()
+                    eou_ms = None
+                    started_at = turn_started_at["value"]
+                    if started_at is not None:
+                        eou_ms = round((time.monotonic() - started_at) * 1000)
+                    turn_generation["value"] += 1
+                    generation = turn_generation["value"]
+                    asyncio.get_running_loop().create_task(
+                        _run_turn(
+                            session,
+                            core,
+                            generation,
+                            turn_generation,
+                            store,
+                            eou_ms,
+                            caption=caption,
+                        )
+                    )
 
     async def index(_request: web.Request) -> web.FileResponse:
         return web.FileResponse(_STATIC_DIR / "index.html")
 
     async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=_HEARTBEAT_SECONDS)
         await ws.prepare(request)
         websockets.add(ws)
         await ws.send_str(json.dumps({"type": "state", "state": core.state.value}))
@@ -500,6 +623,10 @@ def build_app(
                     event = payload.get("event")
                     video_id = payload.get("video_id")
                     code = payload.get("code")
+                    # Which player is reporting ("embed" or "browser");
+                    # absent from the face page's frames, which predate
+                    # the field. The controller reads it, not this.
+                    target = payload.get("target")
                     if event == "error":
                         # Never silent: the code is the player's own
                         # (150/101 embedding disabled, 100 not found,
@@ -511,6 +638,7 @@ def build_app(
                             event,
                             video_id if isinstance(video_id, str) else None,
                             code=code if isinstance(code, (str, int)) else None,
+                            target=target if isinstance(target, str) else None,
                         )
                     continue
                 if payload.get("type") == "card_answer":
@@ -536,95 +664,26 @@ def build_app(
                 if payload.get("type") != "input":
                     continue
                 kind = payload.get("event")
-                if kind == "press":
-                    press_route["value"] = "hold" if hold is not None and hold.active else "core"
-                routed_to_hold = press_route["value"] == "hold"
-                if kind == "release":
-                    press_route["value"] = None
-                if routed_to_hold:
-                    # The button means "hold to confirm" for now; core.py
-                    # never sees this press. See the hold seam above.
-                    if kind == "press" and hold_task["task"] is None:
-                        hold.begin()
-                        hold_task["task"] = asyncio.get_running_loop().create_task(
-                            run_hold(time.monotonic())
-                        )
-                    elif kind == "release":
-                        task = hold_task["task"]
-                        if task is not None:
-                            task.cancel()
-                            hold_task["task"] = None
-                        hold.abandon()
-                    continue
-                if kind == "press":
-                    # Only act if core.py actually transitioned — e.g. a
-                    # press while IDLE/SLEEPING/SPEAKING with no session
-                    # configured has no transition and must not start a
-                    # capture. See core.py's module docstring for the bug
-                    # that taught us this the first time.
-                    was_speaking = core.state == State.SPEAKING
-                    transitioned = core.handle(Event("press"))
-                    # The phone as the microphone: with an /audio client
-                    # attached the mic is its frames, not parec's -- and
-                    # a device with no usable local mic can still hold a
-                    # turn through it.
-                    remote_mic = remote_audio is not None and remote_audio.attached
-                    if (
-                        transitioned
-                        and session is not None
-                        and (capture_source_id is not None or remote_mic)
-                    ):
-                        if was_speaking:
-                            # Barge-in: this press just superseded whatever
-                            # turn was still speaking. Bump the generation
-                            # *before* interrupting it, so its tail end
-                            # (still unwinding in another thread) sees it's
-                            # been superseded the moment it checks.
-                            turn_generation["value"] += 1
-                            session.interrupt()
-                        session.start()
-                        turn_started_at["value"] = time.monotonic()
-                        if remote_mic:
-                            remote_audio.start_listening(_make_on_chunk(session))
-                        else:
-                            capture = Capture(
-                                capture_source_id, _make_on_chunk(session), _CAPTURE_CHUNK_BYTES
-                            )
-                            capture.start()
-                            live_capture["capture"] = capture
-                elif kind == "release":
-                    if core.handle(Event("release")):
-                        if session is None:
-                            core.handle(Event("no_response"))  # fake: no AI at checkpoint 1
-                        else:
-                            capture = live_capture.pop("capture", None)
-                            if capture is not None:
-                                capture.stop()
-                            if remote_audio is not None:
-                                # Idempotent, and asked for whichever way
-                                # the press went: a client that attached
-                                # or left while the key was down must not
-                                # leave the sink open past this release.
-                                remote_audio.stop_listening()
-                            eou_ms = None
-                            started_at = turn_started_at["value"]
-                            if started_at is not None:
-                                eou_ms = round((time.monotonic() - started_at) * 1000)
-                            turn_generation["value"] += 1
-                            generation = turn_generation["value"]
-                            asyncio.get_running_loop().create_task(
-                                _run_turn(
-                                    session,
-                                    core,
-                                    generation,
-                                    turn_generation,
-                                    store,
-                                    eou_ms,
-                                    caption=caption,
-                                )
-                            )
+                if kind in ("press", "release"):
+                    handle_input(kind, ws)
         finally:
             websockets.discard(ws)
+            if press_owner["ws"] is ws and ws.close_code != WSCloseCode.OK:
+                # Its press is still down and nothing will ever release
+                # it: the Wi-Fi hiccup that took the socket took the
+                # release with it (the shell drops a frame it cannot
+                # send, and sends it once). A vanished client is
+                # released for, as a touch cancel is a release on the
+                # shell -- or core.py would sit in LISTENING, capture
+                # open, until her next full hold, whose press would be a
+                # no-op and whose words would be lost. Vanished: the
+                # heartbeat's 1006, a transport error, a page going away
+                # (1001). A client that closed in order (1000) had its
+                # chance to release and is taken at its word -- the shell
+                # always releases before it disconnects, and a test that
+                # closes its socket mid-press expects the press to stand.
+                logger.warning("client left with its press down; releasing it")
+                handle_input("release", ws)
         return ws
 
     async def audio_handler(request: web.Request) -> web.WebSocketResponse:
@@ -632,7 +691,7 @@ def build_app(
         socket is handed to `remote_audio` whole: this handler only
         parses frames and routes them; what a frame *means* for the turn
         (forwarded or dropped, the ack of which play) is decided there."""
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=_HEARTBEAT_SECONDS)
         await ws.prepare(request)
         replaced = remote_audio.attach(ws, asyncio.get_running_loop())
         if replaced is not None and not replaced.closed:

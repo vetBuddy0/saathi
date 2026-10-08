@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The setup dialog's test and exit, and the foreground service's
+     notification. The notification is the one Android requires of every
+     foreground microphone service, shown in the shade and nowhere near
+     the face. Its title names what it is, not a state: the first draft
+     said "Saathi is listening", which was a status label and an untrue
+     one (the microphone is open only between press and release, the
+     notification for as long as the activity is started) -- found in
+     review. The dialog's strings speak to whoever sets the device up,
+     not to her. -->
+<resources>
+    <string name="setup_test">Test</string>
+    <string name="setup_test_ok">The engine answered (%1$s).</string>
+    <string name="setup_test_fail">No answer: %1$s</string>
+    <string name="setup_exit_kiosk">Exit kiosk</string>
+    <string name="notification_channel">Microphone</string>
+    <string name="notification_title">Saathi</string>
+</resources>

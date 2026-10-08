@@ -632,3 +632,72 @@ def test_hidden_views_are_really_hidden_with_the_real_stylesheet(sized):
     # results list and the player were both drawn at once.
     assert sized["results_view"] == {"results": "flex", "player": "none"}
     assert sized["player_view"] == {"results": "none", "player": "flex"}
+
+
+# -- controls follow the target (2026-10-08, review) -------------------------
+#
+# After a target switch the embed's player is kept, hidden and stopped.
+# pause/resume/volume are addressed to whichever target is playing, so
+# while that is the browser they must not reach the hidden player: a
+# "carry on" used to restart the previous video's audio under the watch
+# page (display:none hides the picture, not the sound).
+
+_CONTROL_SCENARIO = (
+    _STUB_YT
+    + """
+import { createMediaPanel } from "%(panel)s";
+const sent = [];
+const panel = createMediaPanel((m) => sent.push(m));
+"""
+    + _COMMON
+    + """
+const watch = (id) => `https://www.youtube.com/watch?v=${id}`;
+panel.onMessage({ type: "state", state: "idle" });
+panel.onMessage({ ...playMsg("vidB", "B", 2), target: "embed", watch_url: watch("vidB") });
+await tick(); await tick();
+out.embed_target = panel._debug().activeTarget;
+// The controller switches target: stop, then a browser play.
+panel.onMessage({ type: "media", action: "stop" });
+out.after_stop_target = panel._debug().activeTarget;
+panel.onMessage({ ...playMsg("vidC", "C", 3), target: "browser", watch_url: watch("vidC") });
+out.browser_target = panel._debug().activeTarget;
+window.calls.length = 0;
+panel.onMessage({ type: "media", action: "pause" });
+panel.onMessage({ type: "media", action: "resume" });
+panel.onMessage({ type: "media", action: "volume", level: 30 });
+out.calls_while_browser_plays = window.calls.slice();
+out.base_volume_remembered = panel._debug().baseVolume;
+out.classes_while_browser_plays = bodyClasses();
+// Back to the embed: the controls reach the player again.
+panel.onMessage({ ...playMsg("vidD", "D", 1, 50), target: "embed", watch_url: watch("vidD") });
+await tick(); await tick();
+window.calls.length = 0;
+panel.onMessage({ type: "media", action: "pause" });
+panel.onMessage({ type: "media", action: "resume" });
+panel.onMessage({ type: "media", action: "volume", level: 40 });
+out.calls_with_embed_back = window.calls.slice();
+out.embed_back_target = panel._debug().activeTarget;
+out.sent = sent;
+document.body.dataset.out = JSON.stringify(out);
+"""
+)
+
+
+@pytest.fixture(scope="module")
+def control() -> dict:
+    return run_module_script(_CONTROL_SCENARIO % {"panel": module_url("media-panel.js")})
+
+
+def test_the_panel_remembers_which_target_the_last_play_went_to(control):
+    assert control["embed_target"] == "embed"
+    assert control["after_stop_target"] is None
+    assert control["browser_target"] == "browser"
+    assert control["embed_back_target"] == "embed"
+
+
+def test_pause_resume_and_volume_do_not_reach_the_hidden_player_while_the_browser_plays(control):
+    assert control["calls_while_browser_plays"] == []
+    assert control["base_volume_remembered"] == 30  # the level is kept for the next embed play
+    assert control["classes_while_browser_plays"] == []
+    assert control["calls_with_embed_back"] == [["pauseVideo"], ["playVideo"], ["setVolume", 40]]
+    assert control["sent"] == []

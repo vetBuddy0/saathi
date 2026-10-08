@@ -35,7 +35,12 @@ handle it returns are called from the cascade's `say()` thread, and
 `stop` can never overtake the frames of the play it is stopping. A
 `wait()` is bounded: the WAV's own duration plus a grace period, after
 which the engine moves on without the ack -- a dead phone must not
-leave her face stuck on "speaking".
+leave her face stuck on "speaking". The client leaving, or being
+replaced by a new connection, releases the wait at once rather than
+at the bound. A client that dies without a close frame is the server's
+to notice: `screen/server.py` opens `/audio` with a heartbeat, so the
+socket closes (and `detach` runs) a few seconds after the phone goes
+quiet instead of whenever the kernel gives up on the TCP connection.
 """
 
 from __future__ import annotations
@@ -134,14 +139,27 @@ class RemoteAudio:
 
     def attach(self, ws: Any, loop: asyncio.AbstractEventLoop) -> Any:
         """Make `ws` the one client. Returns the client it replaced (for
-        the server to close), or None."""
+        the server to close), or None. A play waiting on the replaced
+        client is released here, exactly as `detach` releases it: the
+        old handler's own close finds it is no longer the client and
+        returns early, so nothing else would. The sentence is lost, not
+        re-sent -- the new client never saw its header, and a reconnect
+        mid-sentence (the app resumed, a Wi-Fi blip) should cost that
+        sentence, not the WAV's length plus the grace with her face held
+        on "speaking"."""
         with self._lock:
             replaced = self._ws
             self._ws = ws
             self._loop = loop
             self._send_chain = None
+            current = None
+            if replaced is not None and replaced is not ws:
+                current, self._current = self._current, None
         if replaced is not None and replaced is not ws:
             logger.info("audio client replaced by a new connection")
+        if current is not None:
+            logger.warning("audio client replaced mid-sentence; releasing %s", current.id)
+            current._release()
         return replaced if replaced is not ws else None
 
     def detach(self, ws: Any) -> None:

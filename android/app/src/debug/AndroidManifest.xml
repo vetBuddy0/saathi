@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only: android:testOnly is what lets `adb shell dpm
+  remove-active-admin` take the Device Owner off a tablet again (dpm
+  refuses for any other admin, and the only other way is a factory reset).
+  The README's instruction said remove-active-admin "works for a debug
+  build"; it did not, because nothing set this flag -- Android Studio's Run
+  button injects it, a command-line assembleDebug does not (found in
+  review). The cost: a testOnly APK installs only with `adb install -t`,
+  which the README now says. The release build is unchanged.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:testOnly="true" />
+</manifest>

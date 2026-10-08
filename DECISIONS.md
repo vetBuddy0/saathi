@@ -1407,3 +1407,708 @@ and to a mic-less laptop later. And the route is registered only when
 `build_app` is given a `remote_audio` (always, from `cli.py`), so
 every checkpoint-1 test and the fake press/release path see no
 difference at all.
+
+**2026-10-08 — The Android shell is its own Gradle build under
+`android/`, not a module of the Python package, and it is not compiled
+in CI yet.** The repo's CI runs the Python suite; `uv run pytest` must
+never need a JDK, and this container had no Android SDK (dl.google.com
+is unreachable), so nothing under `android/` has been through AGP. What
+was verified instead: the pure-Kotlin files (`Protocol.kt`, the three
+interfaces, `EngineAddress.kt`) and their JUnit tests were compiled with
+Kotlin 2.0.21 and run on a plain JVM in a scratch project, with warnings
+as errors. The Android-dependent files (`MainActivity`, `Settings`,
+`SetupDialog`, the receivers, the service) were written against API
+26-34 by hand and have not met a compiler; the README says so, in
+those words. Lost: skipping the Kotlin check because "it can't build
+anyway" -- the protocol parser is the thing most likely to be wrong,
+and it is the thing that *can* be checked.
+
+**2026-10-08 — Cleartext "only for private LAN ranges" is enforced in
+code, not in the network security config.** Android's config matches
+host names (with an optional subdomain suffix); it has no CIDR, so
+`192.168.0.0/16` cannot be written there, and listing one household's IP
+would make every household a rebuild. The config therefore permits
+cleartext in its base config, and the rule lives at the one gate an
+engine address passes through: `EngineAddress.normalise()` refuses to
+store anything that is not RFC 1918, link-local, loopback, ULA or a
+`.local` name, and the shell loads no cleartext URL it did not get from
+there (the YouTube pane is https). Lost: a false base config with a
+hand-kept domain list. Raised rather than narrowed silently: the brief
+asked for the config to do it, and the config cannot.
+
+**2026-10-08 — `EngineAddress.DEFAULT` is a placeholder address, and
+that is not the device name CLAUDE.md forbids.** A card number in config
+is a detected thing written down and wrong after a hotplug; the default
+URL is the pre-filled text of a dialog whose purpose is to replace it,
+and nothing is detected from it or depends on it. Recorded because the
+rule will look violated to the next reader. mDNS discovery should
+pre-fill that dialog eventually; it lost for now because a discovery
+that fails silently on a Wi-Fi that drops multicast is worse than a
+dialog, and `Settings.kt` says so.
+
+**2026-10-08 — The setup dialog (five-second hold on the face) is in
+step 1, not step 3.** Without it the engine address could not be set on
+a real phone and the README's "run on a phone" would be false. A
+long-click listener lost (fires at ~500 ms, which a resting thumb trips)
+and a hidden tap sequence lost (what a curious grandchild finds first).
+The hold is a touch listener that returns false, so the WebView still
+gets every event; text selection and haptics are turned off on the face
+WebView so the only long press it knows is this one.
+
+**2026-10-08 — The pure half of the shell is split from the Android
+half so it can be tested without a device.** `EngineAddress.kt` (no
+Android imports) beside `Settings.kt` (SharedPreferences), and
+`Protocol.kt` on `org.json` with the real `org.json:json` on the test
+classpath, because the platform's copy is a stub in local unit tests
+and every method throws "not mocked". Lost: kotlinx.serialization or
+Moshi for the protocol -- a code generator or a reflection runtime for
+seven small shapes, and both stricter than an engine that adds fields
+between releases. An unknown `type` parses to `UnknownMessage`, never a
+crash; a frame with no string `type`, or a known type missing the one
+field that gives it meaning, parses to null and is dropped.
+
+**2026-10-08 — The talk button is a child of the root, not of the face
+pane.** A fullscreen video (step 3) takes the face pane down to a
+corner; the button must not go with it. Same reason the layout's root
+is a FrameLayout around the horizontal LinearLayout the brief asked
+for, rather than the LinearLayout itself.
+
+**2026-10-08 — `BootReceiver`, `SaathiAdminReceiver` and `EngineService`
+exist as classes, not only as manifest lines.** A manifest that names a
+class the APK does not contain installs fine and crashes at the first
+broadcast; the three are a few lines each, with their reasons in their
+headers. `EngineService` does nothing yet: on API 34 its `microphone`
+type must be in the manifest at install time, so the declaration is
+step 1's and the behaviour is a later step's.
+
+**2026-10-08 — `OkHttpEngineLink` keeps all of its state on the main
+thread; OkHttp's threads only post to it.** One socket reference, one
+connected flag and one attempt counter, mutated only by `Handler`
+callbacks on the main looper, which also times the backoff. Lost: a
+lock around the three (every OkHttp callback would take it, and the
+listener would still have to hop to the main thread to touch a view),
+and coroutines (channels and a retry loop for what is twenty lines of
+state). The cost accepted: a window of a few milliseconds between the
+socket opening on OkHttp's thread and the main thread hearing of it,
+during which a send is dropped rather than queued. Also lost: a
+WebSocket of our own over `java.net.Socket` -- framing, masking,
+ping/pong and the close handshake are a few hundred lines OkHttp
+already has, and `build.gradle.kts` names OkHttp as the one
+dependency with a job the platform cannot do.
+
+**2026-10-08 — A frame sent while the engine link is down is dropped
+and logged, never queued.** `main.js` sends only on `readyState ===
+OPEN`; the link follows it, although OkHttp would happily enqueue a
+message during a handshake and deliver it on open. A press that lands
+seconds late is a turn she did not start (the engine would open the mic
+on a room with nobody holding the button), and a release that lands
+late ends one she did. The listener hears `onDisconnected` only when a
+connection that was up goes down, and `onConnected` on every open;
+failed attempts in between are logged, not reported -- the link's job
+is to be up, and there is no status to show for it being down.
+
+**2026-10-08 — The reconnect schedule and the delivery rule are pure
+and tested on the JVM; the socket is not.** `ReconnectBackoff` pins
+`min(30000, 500 * 2 ** attempt)`, reset on open, to the face page's
+constants so a restarted engine sees both clients come back in step;
+the shift is capped so a night of retries cannot overflow.
+`OkHttpEngineLink.deliver()` is the whole of what a `/ws` frame may do
+to a listener (`state` and `media` reach it, cards, captions, settings
+and unknown types stop at the link). Testing the socket itself would
+need Robolectric for `Handler` and a fake server for OkHttp, neither of
+which a build without the SDK can run; same split as `EngineAddress`
+from `Settings`.
+
+**2026-10-08 — The link needs OkHttp pings, and `newClient()` is the
+client that has them.** A Wi-Fi hop that dies silently leaves a socket
+"open" with every press going into it unanswered, and nothing in the
+`/ws` protocol would ever notice; a missed pong fails the socket, which
+is what starts the reconnect. Lost: an application-level heartbeat
+frame on `/ws` -- the server has no such frame, and adding one changes
+a protocol the face page also speaks for a problem the transport
+already solves. The interval (15 s) is the time a dead hop can go
+unnoticed; shorter costs a sleeping tablet its battery for nothing.
+
+**2026-10-08 — `PushToTalk` consumes every touch on the talk button
+and sets the pressed state itself.** A `Button` turns down-and-up into
+a click with a click sound on every release, and a click is not a hold;
+the listener returns true, so the button's own touch handling never
+runs, and drives `isPressed` so the drawable still shows the hold.
+`performClick()` is deliberately not called (lint's
+`ClickableViewAccessibility` is suppressed with that reason in the
+file). Lost: `OnLongClickListener` (its ~500 ms clock is the engine's
+hold seam's to keep), and a toggle (a state she would have to remember
+and a label to show it, which the face must not have). `ACTION_CANCEL`
+is a release: a press with no release would leave the engine listening
+to an empty room. No timer of any kind: a hold is a long press, and the
+engine times it from the one press it receives. `cancel()` exists for
+the activity's `onPause`, the one case where the touch stream may not
+deliver the cancel itself. Release sends the `/ws` release before it
+stops the mic: the engine gates frames on press/release on its own side
+(`audio/remote.py`'s `feed`), so a frame captured after the release is
+dropped there either way, and the order on the phone is the order the
+brief gave.
+
+**2026-10-08 — The WAV header reader is its own pure-Kotlin file,
+`WavHeader.kt`, beside the two files the audio brief named.** Same
+split as `EngineAddress.kt` from `Settings.kt`: the parser is the part
+of the speaker most likely to be wrong (a `LIST` chunk, an odd-sized
+chunk, a streaming writer's 0xFFFFFFFF size field, a backend at 24 kHz
+instead of 16) and the part that can be checked on the JVM without an
+SDK, so it has no Android import and eleven JUnit cases. Lost: assuming
+44 bytes and the engine's rate, which every backend here would satisfy
+today and one ffmpeg flag would break. 16-bit PCM in one or two
+channels is all it accepts; that is all the engine writes, and anything
+else is acknowledged unplayed (below) rather than guessed at.
+
+**2026-10-08 — `played` goes back through `OkHttpAudioLink.sendPlayed`,
+not through the `AudioLink` interface.** Step 1's interface has no
+path for the acknowledgement and is not edited here (another agent
+integrates against it). The method is on the concrete class with the
+gap named in its header; the integrator calls it from the `Speaker`'s
+`onDone`. Raised rather than patched into the interface: an interface
+change is a conversation, and this one needs step 3 in the room.
+
+**2026-10-08 — The speaker streams through `AudioTrack` on its own
+thread and watches the playback head; `MODE_STATIC` lost.** Static
+mode wants the whole clip in shared memory and a position marker (with
+a Looper for its listener) to learn that it ended; a thread that writes
+in `MODE_STREAM` and polls the head until it reaches the last frame
+ends exactly where the data does, for a clip of any length, and `stop()`
+is a pause and a flush from any thread. A play is declared done by the
+clock at the WAV's length plus one second if the head never gets there,
+so the ack always beats the engine's "length plus three seconds" wait: a
+device that lies about its head position mis-times one ack, never
+stalls a turn. A WAV the reader refuses is acknowledged at once, so the
+engine moves on now rather than after its grace; the link passes every
+`play` through regardless of its `format` field for the same reason --
+one path for every unplayable sentence, in the speaker.
+
+**2026-10-08 — Playback asks for `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`
+with `USAGE_ASSISTANT`/`CONTENT_TYPE_SPEECH`, keeps it 1.5 s past the
+last sentence, and stops on a `LOSS`.** May-duck over plain transient
+because the engine's own rule (20%, `Ducking`) already decided a video
+is lowered under her voice, not paused, and the system-wide focus
+should say the same thing to the watch page and to every other app.
+The hold-over is so a four-sentence reply is one duck, not four
+(request/abandon per sentence pumps the video's volume). A `LOSS` or
+`LOSS_TRANSIENT` (a call) stops the sentence because she cannot hear
+both; a denied focus request is logged and the sentence plays anyway,
+because a companion that goes quiet when something else holds focus is
+worse than one that talks over it. Lost: no focus at all.
+
+**2026-10-08 — The microphone is `VOICE_COMMUNICATION`, opened per
+hold on one parked thread, with a buffer four times the device
+minimum and the short tail frame sent on release.** The source asks
+the platform for its own echo cancellation and gain control for a
+near-field voice -- what "local AEC is mandatory" means on a phone,
+where PipeWire's reference path does not exist -- with
+`AcousticEchoCanceler`/`NoiseSuppressor` attached where the device has
+them. Capture runs only between `startSending` and `stopSending`
+(the interface allows always-on): the engine would drop the frames,
+the privacy indicator would be lit all day, and a care facility's
+network admin would ask why. One long-lived thread parked between
+holds, so a second hold never races the first's release of the
+AudioRecord. The buffer is `4 x getMinBufferSize` at run time, no
+number written down (a number would be a device name). The partial
+last frame goes up on release because it is the end of her sentence
+and the engine joins frames of any size. Lost: `AudioSource.MIC`,
+a thread per hold, and dropping the tail.
+
+**2026-10-08 — The audio link reconnects after 1 s doubling to 15 s,
+reset on open, timed on the main looper, with no jitter.** One client
+per engine on one Wi-Fi: there is no herd to spread out, and a
+deterministic schedule is the one that can be tested (`backoffMs`).
+OkHttp's WebSocket has no read timeout after the upgrade, so a dead
+Wi-Fi hop is only noticed through the client's `pingInterval`; the
+link's header asks the integrator to set one on the shared client.
+
+**2026-10-08 — The audio component was type-checked against
+hand-written stubs, not the SDK, and that is recorded as what it is.**
+No Android SDK in this container (dl.google.com is blocked), so
+`OkHttpAudioLink.kt`, `AudioTrackSpeaker.kt` and `WavHeader.kt` were
+compiled with Kotlin 2.0.21 (warnings as errors) against Java stubs of
+the API 26 shapes they call -- signatures as published, bodies empty --
+plus the real okhttp 4.12.0/okio 3.6.0 jars and the step-1 pure files,
+and `WavHeaderTest`/`OkHttpAudioLinkTest` ran there (14 passed). That
+catches Kotlin mistakes and interop shape (synthetic properties, SAM
+conversion, overload choice); it cannot catch a wrong constant value
+or a behaviour the real platform has. The first `assembleDebug` is
+still the first real build, as the README says.
+
+**2026-10-08 — The YouTube pane is two files: the rules in `WatchPage.kt`
+(pure Kotlin) and the WebView in `WebViewYouTubePane.kt`.** The same
+split as `EngineAddress`/`Settings` and `ReconnectBackoff`/
+`OkHttpEngineLink`: what is a wall, what is YouTube at all, which user
+agent to wear and what the injected scripts say are pinned by
+`WatchPageTest` on the JVM; the WebView that applies them needs a
+device. The scripts' behaviour on a page (the poll, the grace, the
+deadlines) was driven under node against a fake `<video>` with fake
+timers -- which is what found the poll giving up at 28 s instead of 30
+-- but node is on neither the Python nor the Android test path, so that
+harness is not in the repo and the JUnit test pins the scripts' shape
+only. Lost: a Chromium test in `tests/` like `test_media_policy.py`'s
+-- the scripts are generated by Kotlin, and a copy in a JS file for
+pytest to load would be a second source of truth. The pane was
+type-checked against hand-written stubs of the API-26..34 shapes it
+uses, with the documented nullability on each override, not against
+an SDK (none here); the first `assembleDebug` is still the first real
+compile.
+
+**2026-10-08 — The watch page's user agent is desktop Chrome with the
+platform's own Chrome version.** YouTube serves the full player only to
+a desktop browser and serves it by version; a version frozen in the
+source is an "update your browser" banner a year on, so only the
+`Chrome/x.y.z.w` of `WebSettings.getDefaultUserAgent` is kept and the
+rest of the string is the canonical Windows one (`wv`, `Mobile` and
+`Android` gone). A platform UA with no Chrome version falls back to a
+fixed string.
+
+**2026-10-08 — `ended` and `error` from the `<video>` count only after
+a two-second grace.** YouTube plays its ads in the same element as the
+content, so an ad ending fires `ended` too; the element is checked two
+seconds later and an `ended` counts only if it is still at its end
+(`ended` or `paused`) rather than playing what came next. The same for
+`error`: the player recovers from a format it cannot decode by loading
+another, and the element's `error` clears when it does. Lost: reading
+`#movie_player`'s `ad-showing` class -- certain, and the page's DOM
+rather than the element's, which is the line the pane does not cross.
+Also added: a start deadline. A `<video>` that exists but has not
+played thirty seconds after it appeared is reported (`no_start`, as
+code "browser"): an age gate and "video unavailable" are drawn inside
+the player with no navigation, so the host rule never sees them, and
+`Protocol.CODE_BROWSER` already names "never started". The deadline
+stands down while the pane itself has paused the video.
+
+**2026-10-08 — The pane leaves the watch page on its own `ended` and on
+every failure, and the face comes back with it.** `YouTubePane.kt`
+says the pane decides nothing after reporting, and it still does not
+decide what plays next; but a watch page left up after its video ends
+autoplays a next one nobody chose within seconds, and the face page's
+panel hides itself at the same moments (`view = "none"` in
+`media-panel.js`). So `ended`, a wall, a page that failed to load and
+a player that failed all end in `stop()` -- `about:blank`, the
+container gone, the face restored if the pane had hidden it -- and
+then the listener hears. Fullscreen, per the brief, hides the face
+container outright (`GONE`), which diverges from the face page's
+"small in a corner" and from `activity_main.xml`'s comment; it is one
+method (`applyLayout`) and the integrating step can make it a strip
+instead. The face is hidden only while the pane is showing: a `layout
+fullscreen` with nothing playing leaves the face alone, and the pane
+restores only what it hid.
+
+**2026-10-08 — The pane shows youtube.com and nothing else; walls are
+three hosts and one path; sign-in is the one exception.** Main-frame
+navigations to a non-YouTube host are blocked (a tapped ad, a channel's
+website: the engine stopped nothing, so the pane stays where it was);
+`intent:` and `vnd.youtube:` links go nowhere a kiosk can show and are
+dropped. `accounts.google.com`, `consent.youtube.com` and
+`consent.google.com` (one more than the brief: Google's own consent
+host serves the same wall) and any path containing `/sorry/` are
+reported as "wall", checked at `shouldOverrideUrlLoading`,
+`onPageStarted` and `onPageFinished` so a server redirect is caught
+wherever it surfaces. `open()` refuses a URL that is not https on a
+YouTube host without loading it: the engine builds these, the pane
+checks them, and a kiosk WebView with a desktop UA and persistent
+cookies must not be a general browser. `signIn()` (on the class, not
+the interface) is the one time a wall is the point: it loads Google's
+sign-in and the pane hides itself when Google returns to youtube.com,
+flushing cookies then and only then (`CookieManager.flush()` blocks
+the UI thread, and the store persists on its own; a flush on every
+stop would be jank for a sign-in that is weeks old). Google may refuse
+a sign-in from a WebView; the pane plays signed out.
+
+**2026-10-08 — No hardware layer on the watch WebView; the renderer
+dying does not kill the shell.** Video needs the window's hardware
+acceleration, which targetSdk 34 gives every window; `LAYER_TYPE_
+HARDWARE` on the view would be a second full-size texture with
+reports of black fullscreen video, and a software layer must never be
+set. `onRenderProcessGone` returns true: the WebView is taken off the
+screen, every later `open()` is refused with "browser" until the shell
+restarts, and the current video is reported lost. The face WebView
+shares the renderer, so its client (a plain `WebViewClient` in step 1)
+still decides the shell's fate; step 3's to change. The page's own
+fullscreen (`onShowCustomView`) fills the pane, not the screen, so the
+face and the talk button stay. The bridge's two methods take nullable
+strings: a page passing `undefined` must not throw inside the
+WebView's thread. Every code the page reports (`no_video`,
+`no_start`, a MediaError number) is logged and sent as "browser"; the
+controller treats the two browser codes alike and only the log needs
+the detail.
+
+**2026-10-08 — `Kiosk.exitLockTask` gives back the whitelist, the status
+bar and the keyguard; it leaves the persistent HOME and
+`DISALLOW_SAFE_BOOT` in place.** The activity is `lockTaskMode=
+"if_whitelisted"`, so a `stopLockTask()` on its own lasts until the next
+launch, when the system pins the whitelisted task again: an "exit" that
+ends at the next reboot is not one, so the owner-side exit also clears
+`setLockTaskPackages` and re-enables the bar and the keyguard. The HOME
+and the safe-boot restriction stay because they are what makes the
+tablet Saathi's rather than what pins the screen, and a safe boot is a
+way around the owner that no dialog should hand out. Every
+DevicePolicyManager call is wrapped to log and continue (a
+`RuntimeException`, not only `SecurityException`, because a few throw
+`IllegalArgumentException` for a flag a device refuses): a kiosk that
+cannot be entered is a log line, a crash would take the face with it.
+`enterLockTaskIfOwner` on a non-owner build is one log line and no
+`startLockTask()` -- the screen-pinning prompt is not a kiosk, and it is
+not hers to answer. Lost: a kiosk launcher app, and
+`lockTaskMode="always"` with no code (pins only the task; the bar and
+the keyguard stay).
+
+**2026-10-08 — The lock-task feature set is `LOCK_TASK_FEATURE_NONE`,
+and YouTube's app is in the whitelist.** The brief allowed a feature
+set only if the API required one; none is required, and NONE is the
+one the face wants (no keyguard, no notifications, no home, no
+overview, no global actions, no system info). It is written as the
+value `0` in `Kiosk.kt` with a test comparing it to the SDK's constant
+under the real `android.jar`, so the stub check and the Gradle test
+check the same number. `com.google.android.youtube` is whitelisted
+because the watch page can hand a video to the app (an "open in app"
+banner, a share sheet) and a package outside the whitelist cannot start
+while the task is locked -- the tap would do nothing, silently.
+
+**2026-10-08 — The setup dialog's Save applies the kiosk box through
+`Kiosk` as well as storing it, and "Exit kiosk" is shown only when the
+app is not Device Owner.** Ticking a box and seeing nothing happen until
+a reboot is a support call; Save enters lock task (owner only) or leaves
+it, then calls back so the activity reloads the face. The explicit exit
+button exists for the demo phone, where a pinned screen with the system
+bars hidden has no other way out; on the owner tablet leaving the kiosk
+is the checkbox's job, and a one-tap exit reachable by anyone who finds
+the five-second hold is not something that tablet should have. Lost:
+the same button for both.
+
+**2026-10-08 — "Test" has an OkHttp client of its own, and shares the
+address rule with Save.** The links' client has no read timeout on
+purpose (a WebSocket with one dies on the first quiet minute) and the
+probe wants three seconds, so the probe builds one small client, once.
+`SetupDialog.probeUrl` is `EngineAddress.normalise` plus a trailing
+slash, tested to agree with Save on every address, so the test cannot
+pass for an address Save then refuses. Any 2xx is an answer. The
+callback hops to the main thread; a dialog that has gone by then gets a
+harmless update to detached views.
+
+**2026-10-08 — `SetupDialog.show` gained a five-argument overload that
+takes the two links; the three-argument form from step 1 stays and
+delegates.** The brief asks Save to reconnect both links, and the step-1
+signature (`show(activity, settings, onSaved)`) has no way to reach
+them. `MainActivity` is another agent's file, so its call is not edited;
+the integrator picks the overload. Lost: changing the three-argument
+signature (breaks a call this agent must not touch) and reconnecting
+through a global (a link the dialog can find without being handed one
+is a link the activity no longer owns).
+
+**2026-10-08 — `EngineService` is started and stopped by the activity's
+lifecycle, is `START_NOT_STICKY`, and on API 34 does not start until
+`RECORD_AUDIO` is granted.** On API 34 `startForeground` with the
+`microphone` type throws `SecurityException` without the permission and
+`ForegroundServiceStartNotAllowedException` when the app is not visible,
+so `EngineService.start` checks the permission first (the pure rule is
+`startAllowed`, tested across API 26-36) and the service stops itself if
+the platform still refuses: the face stays up, the mic works while the
+screen is on, logcat says why it is no more than that. Not sticky
+because a service the system restarts with no activity to serve has
+nothing to do and a notification to explain. The partial wake lock has
+no timeout (one clock, the service's own). The notification -- "Saathi
+is listening", low importance, in the shade -- is the one Android
+requires of every foreground microphone service and is not the status
+text under the face that CLAUDE.md forbids; the face shows nothing.
+Lost: a bound service (its life is the binder's, which is the
+activity's, which is the problem) and `START_STICKY`.
+
+**2026-10-08 — `SaathiAdminReceiver` logs its callbacks and applies no
+policy from them.** `onEnabled` and `onProfileProvisioningComplete` do
+not both fire for `dpm set-device-owner` on every release, and a policy
+whose presence depends on which path granted the owner is one that is
+missing on the day it matters; `Kiosk.enterLockTaskIfOwner` applies the
+whole set whenever the activity asks, idempotently. The overrides exist
+so logcat answers the first three questions asked of a tablet found on
+a launcher instead of the face: was the owner granted, did a lock task
+begin and end, did anything ask to remove the admin.
+
+**2026-10-08 — The kiosk strings are in `values/strings_kiosk.xml` and
+the notification icon is a new `drawable/ic_notification.xml`, two files
+the brief did not name.** Other components are being written in
+parallel and `strings.xml` is step 1's file; Android merges every
+`values/` file, so a file of this component's own cannot collide. The
+icon is needed because a notification without a small icon is dropped,
+and the launcher icon's filled ground would render as a white square in
+the status bar.
+
+**2026-10-08 — The kiosk component was type-checked against hand-written
+stubs, as the audio component was.** No Android SDK in this container:
+`Kiosk.kt`, `SaathiAdminReceiver.kt`, `BootReceiver.kt`,
+`SetupDialog.kt` and `EngineService.kt` were compiled with Kotlin 2.0.21
+(warnings as errors) against Java stubs of the API 26-34 shapes they
+call -- `DevicePolicyManager`, `DeviceAdminReceiver` with `@NonNull`
+parameters, `Service`, `Activity`, `ActivityManager`, the widgets,
+`AlertDialog.Builder`, `NotificationCompat.Builder`, `PowerManager` --
+plus the real okhttp 4.12.0/okio 3.6.0 jars and the step-1 pure files,
+and `KioskTest`, `SetupDialogTest`, `EngineServiceTest` ran there (12
+passed). That catches Kotlin mistakes and override shape; it cannot
+catch a wrong constant or a platform behaviour. The first
+`assembleDebug` is still the first real build.
+
+**2026-10-08 — The target rule and ducking live in `MediaTargets`, a
+pure class on the two interfaces, not in `MainActivity`.** The engine
+addresses pause/resume/stop/volume/layout to "whichever target is
+playing" and never names it, so this side remembers which target the
+last `play` went to and hands a frame to the pane only while the pane
+is that target; ducking (20% while listening/thinking/speaking/handoff)
+is applied through the same memory. In the activity none of that is
+testable without a device; as its own class it implements
+`EngineLink.Listener` and `YouTubePane.Listener` and `MediaTargetsTest`
+pins it on the JVM against fakes of both interfaces (14 cases: an embed
+play never reaches the pane, nor does any control frame while the embed
+is the target; `stop` and the pane's own `ended`/`error` clear the
+memory; a late `ended` from the pane after the embed took over does
+not). Lost: stopping the pane on an embed play "to be safe" -- `media.py`'s
+`_play` already emits a `stop` before a play that changes target, and
+a shell that second-guessed that would stop the pane twice on every
+switch. Lost: asking the engine to name the target on every frame, a
+protocol change for a rule one side can keep, as the face page keeps
+it. One thing the engine did not say: a browser play that arrives
+without `watch_url` is opened at the canonical watch URL for its id
+(the string `media.py`'s `watch_url()` builds), so an older engine
+still plays rather than being refused.
+
+**2026-10-08 — The kiosk is entered on every resume only when the setup
+dialog's box is ticked.** The brief said `enterLockTaskIfOwner` in
+`onResume` unconditionally; that would make the dialog's checkbox a
+lie -- unticking it exits lock task and the next resume would pin the
+screen again. `settings.kiosk` gates it, matching what Save does and
+what step 1's marker said ("when settings.kiosk and the app is Device
+Owner"). On the owner tablet with the box ticked every resume re-applies
+the whole policy set, idempotently, so a reboot lands on the face
+locked.
+
+**2026-10-08 — The face WebView reloads on the links' schedule when the
+engine does not answer, refuses to leave the engine's address, and
+recreates the activity when its renderer dies.** A tablet that boots
+before the engine must show the face once the engine is up without
+anyone touching it: a main-frame load error or HTTP error schedules a
+reload after `ReconnectBackoff` (500 ms doubling to 30 s, `main.js`'s
+numbers, so the page and the sockets come back in step), reset by a
+load that finishes without an error; one retry per load. Chromium's own
+"webpage not available" page shows in between -- lost: a native "engine
+not found" screen, which would be status text on the face's screen, and
+Chromium's page already says in words what is wrong. Main-frame
+navigations not under the stored address are refused
+(`EngineAddress.isOn`, pinned in `EngineAddressTest`): the embed
+player's "watch on YouTube" link would otherwise replace the face with
+youtube.com in this WebView, and the watch page has its own pane. On
+`onRenderProcessGone` the activity calls `recreate()` and returns true:
+both WebViews share the renderer, so a fresh activity is a fresh face, a
+fresh pane and fresh links in one step. Lost: returning false (the
+system kills the process -- the owner tablet relaunches its HOME, the
+demo phone drops to the launcher) and rebuilding the two WebViews in
+place (a second recovery path for the same event). Known cost: the
+pane's own `onRenderProcessGone` fires first and reports the open video
+as a browser failure, so a renderer crash mid-video refuses that video
+for the session; the recreate restarts everything else.
+
+**2026-10-08 — The microphone permission is asked for at start through
+the activity-result contract, and the grant starts `EngineService`.**
+Asking on the first hold would put a prompt in the middle of her first
+sentence; `onRequestPermissionsResult` is deprecated in
+`ComponentActivity` for the same contract. On API 34 the microphone
+service cannot start until the permission is granted, so the callback
+starts it if the activity is started by then; `EngineService.start`
+itself stays the one place that checks. One `OkHttpClient` for the
+process (a lazy in `MainActivity`'s companion, built by
+`OkHttpEngineLink.newClient()` for its ping interval) rather than one
+per activity instance, so a recreate does not leave a second pool
+behind. The back button is swallowed by an `OnBackPressedCallback`
+rather than an `onBackPressed` override (deprecated since API 33 and
+bypassed by predictive back).
+
+**2026-10-08 — The whole `android/` tree was type-checked at once
+against a merged stub set; the YouTube sign-in button is still not
+offered.** The three earlier stub sets (kiosk, audio, pane) were merged
+and extended with the AppCompat/activity/core shapes `MainActivity`
+uses; every main file and every test compiled under Kotlin 2.0.21 with
+warnings as errors, and all 87 JUnit tests ran green on the JVM. What
+that cannot catch is recorded in `android/README.md`. `WebViewYouTubePane.
+signIn()` exists for the device's Google account; the setup dialog's
+three buttons are taken (Save, Cancel, Exit kiosk) and a fourth control
+was not added in this step -- the pane plays signed out, and the README
+says so. Lost: adding it now, one more untested widget in the one
+dialog that already carries the kiosk switch.
+
+**2026-10-08 — Review pass over the Android port, engine side: both
+sockets have a heartbeat, a vanished `/ws` client is released, a
+replaced `/audio` client releases the play it was waiting on, and
+reports are routed by target.** Five findings, each verified by reading
+before it was fixed. (1) `web.WebSocketResponse()` had aiohttp's
+default `heartbeat=None` on `/audio` and `/ws`, so a phone that died
+without a close frame stayed "attached" for as long as the kernel kept
+the TCP connection: every press used the dead remote mic, every
+sentence waited its bound into the void, and the local mic and speaker
+never came back. Both sockets now ping every 5 s
+(`_HEARTBEAT_SECONDS`); a missed pong closes the socket and the
+handler's `finally` detaches the client. Lost: detaching on a play's
+timeout (a slow phone is not a dead one; the heartbeat is the right
+instrument). (2) `RemoteAudio.attach()` replacing a client left
+`_current` in place, and the replaced handler's late `detach` found it
+was no longer the client and returned early, so a reconnect
+mid-sentence (the app resumed, a Wi-Fi blip) cost the WAV's length plus
+3 s with her face on "speaking"; `attach` now releases it as `detach`
+does. The sentence is lost, not re-sent: the new client never saw its
+header. (3) A `/ws` socket that *vanished* with its press down (no
+close frame, 1006; or a page going away, 1001) is released for on the
+way out, through the same `handle_input` every real press and release
+goes through -- the shell drops a `release` it cannot send and never
+re-sends it, so core.py sat in LISTENING with the capture open until
+her next full hold, whose press was a no-op. A socket that closed in
+order (1000) is taken at its word: the shell always releases before it
+disconnects, and the existing tests close their socket mid-press and
+expect the press to stand, which is the right rule, not a test
+accommodation -- a client that could say goodbye could have said
+release. (4) `reset` and `ended` were honoured from any client: the
+face page sends `reset` on every socket open it has no player for, so
+a reconnect while the shell's watch page played un-played it, "carry
+on" restarted the video from the top, and the next embed play skipped
+the `stop` the target switch relies on. A `media_event` may now name
+its player (`target`: "embed" or "browser"; absent means the face
+page, whose frames predate the field), a `reset` counts only from the
+player whose target is playing, and an `ended` naming a video other
+than the one playing is a late report. The shell sends `reset` with
+`target: "browser"` on every `/ws` open with nothing playing, as the
+panel does, so a restarted shell is reported too. Lost: gating a bare
+`ended` by source as well -- the panel never sends one while the
+browser target plays (its view is "none" after the `stop`), and two
+existing tests send one while the browser plays and expect it honoured;
+they are right about today's clients. (5) With no client that can show
+the watch page connected -- the Pi kiosk with the face page alone,
+which is the production configuration, not only the laptop demo the
+entry above allowed for -- an embed refusal re-emitted the play on the
+browser target, nobody took it, and the controller answered "it's
+already playing" to a blank panel. `MediaController` takes a
+`browser_available` callable and, when it says no, treats the embed's
+refusal as the browser's verdict would be: refused for the session and
+the rest re-offered on a card, which is what happened before the target
+rule. `cli.py` hands it `remote_audio.attached` -- the Android shell is
+the one client with a watch page and its `/audio` socket is the one
+sign of it the engine already has. Lost: a `hello` on `/ws` (a protocol
+change the face page would also have to make, for a fact one existing
+seam already knows) and treating the panel's own "api"/"no_ready"
+deadlines as transient rather than marking the video: the finding is
+fair -- they are the network's failure -- but the rule that every
+non-browser code is the embed's is pinned by
+`test_every_error_code_but_the_browsers_own_is_the_embeds`, and a test
+is not changed to pass; raised here instead, for a later pass that
+retries those two codes once. The panel, for its part, now remembers
+which target the last play went to (`activeTarget`) and lets
+pause/resume/volume reach its player only while that is the embed: the
+hidden, stopped player kept after a target switch answered her "carry
+on" with the previous video's audio under the watch page.
+
+**2026-10-08 — Review pass, tests the engine side lacked.** Added, not
+changed: the contract's number itself (`DEFAULT_GRACE_SECONDS == 3.0`),
+a client replaced mid-play, a press with no local capture source held
+through the phone and its inverse (no source, no phone: nothing
+starts), a client that never acks still letting the state machine reach
+idle, the four bad `/audio` text frames (a wrong sample rate, non-JSON,
+an unknown type, a non-string `played` id) leaving the client attached,
+a quiet client detached by the heartbeat, a vanished `/ws` client
+released and a bystander not, a hold socket vanishing mid-hold, a
+`reset` named by target through the server, an embed refusal with no
+`/audio` client re-offered rather than sent to the browser, and a
+Chromium scenario for the panel's control gating. Two harness facts
+worth writing down: aiohttp's test client answers pings only while it
+is inside `receive()`, so a socket left idle at a short heartbeat is
+dropped too (the tests keep a live socket reading while they wait), and
+`close()` on a socket the server has already torn down raises, so a
+quiet socket is drained to its close instead. The suite was run on
+x86_64 only (`uname -m`); CLAUDE.md's "Done means" asks for arm64 as
+well, and no arm64 machine was reachable from this container. The
+`/audio` path and the fixes above have no architecture-specific code,
+so this is a verification gap to close on the Pi before the engine side
+is called done, not a suspected failure.
+
+**2026-10-08 — Review pass over the Android shell: what each finding
+changed, and what was left.** The sign-in path is gone
+(`WebViewYouTubePane.signIn()`, its state and the README's promise of a
+button): Google refuses sign-in from an embedded browser, the pane
+wears a desktop user agent, and the only way that page could have
+worked was by getting past the refusal -- the circumvention the
+product's own "legal way" rule forbids and the thing that puts a device
+account at risk. The pane plays signed out; `WatchPage.SIGN_IN_URL`
+stays as the canonical wall for the host rule and its test. The
+three-identity rule is now in the README, where the person signing
+things into a tablet reads. The `/ws` `release` is sent after the mic's
+last frame: `AudioLink.stopSending` takes a callback the mic thread
+runs once the capture has sent its tail, and `PushToTalk.release` sends
+the release from it -- the engine stops forwarding the instant it reads
+the release and the two sockets give no ordering guarantee, so the
+first draft's order (release, then stop the mic) lost the end of every
+sentence; lost: an engine-side grace after a remote-mic release, which
+would put 150 ms on every turn's hot path. A hold while the `/audio`
+socket is down opens no microphone (one log line); the first draft lit
+the privacy indicator for frames `sendFrame` dropped. The `/audio`
+link's `Request.Builder().url()` has the `IllegalArgumentException`
+guard the `/ws` link had, since the reconnect runnable runs on the main
+looper. `HoldListener.cancel()` exists and the activity calls it in
+`onPause`/`onDestroy`, so a renderer crash recreating the activity
+mid-hold cannot open the dialog on a finished window. A drop of `/ws`
+ends a hold on the shell's side too (`MainActivity.LinkEvents`, which
+delegates everything else to `MediaTargets`), matching the engine's
+release of a vanished socket. On a first run nothing connects until an
+address is saved: `Settings.engineUrl` is null until then and the
+dialog opens itself; `EngineAddress.DEFAULT` is the field's hint and
+nothing else (the first draft reconnected forever to a placeholder
+that, on a common home network, is a stranger's device). The
+fullscreen layout keeps the face as a corner cell (22% of the screen
+each way, bottom-left, the face page's `22vw x 22vh`) with the pane
+taking the rest of the row; the first draft set the face container
+`GONE`, which made the engine's own "your face is in the corner" untrue
+and broke SPEC.md's "the face is in every layout" for this target;
+lost: a true overlay, which means re-parenting a WebView. `stop()`
+forgets the layout, since the engine sends `fullscreen` with every
+play. The install script tells the bridge when the `<video>` is found
+(`onVideo`) and the pane answers with the level it holds then: the
+element can appear 30 s after the script was built with the level of
+that moment, and a ducking change in between was lost until her next
+press. Navigation in the pane requires https (`isWatchUrl`, the same
+rule `open()` applies), and `network_security_config.xml` denies the
+YouTube hosts cleartext -- what the config can express, beside the LAN
+rule it cannot. `EngineService` is started with `startService`, not
+`startForegroundService`: the latter promises a `startForeground()`
+within seconds and kills the process when the service stops without
+one, so the first draft's `stopSelf()` fallback was a crash, not the
+degrade its header described; from a visible activity a plain start is
+allowed and the fallback is real. Its header now says what it does
+(keeps capture and the wake lock across a paused-but-visible activity;
+`onStop` ends it), not what the first draft claimed (a dimmed kiosk's
+whole life). The notification is titled "Saathi": the first draft's
+"Saathi is listening" was a status label and a false one most of the
+time. `BootReceiver` does nothing on Android 10+ (the system ignores a
+background activity start by an ordinary app; the owner tablet is HOME
+and needs no receiver) and says so in its header and the README; it
+still serves an Android 8/9 phone, which is why it was kept. The debug
+manifest overlay sets `android:testOnly` so `dpm remove-active-admin`
+works for the build the README tells you to make (it never did: only
+Android Studio's Run button injects the flag), at the cost of `adb
+install -t`. `androidx.webkit` and `kotlinx-coroutines-android` are
+gone from the dependencies: nothing imported them.
+
+**2026-10-08 — What the review pass could and could not verify on the
+Android side.** The earlier merged stub set was not kept, so a smaller
+one was rebuilt in a scratch Gradle project: eleven `android.webkit`
+shadow classes (the API 21-26 shapes the pane uses, with the API-26
+getters that Kotlin's property syntax needs) and
+`androidx.core.content.ContextCompat`, ahead of the Maven `android`
+API-16 jar and the real okhttp/okio jars. Thirteen main files --
+`Protocol`, `EngineLink`, `AudioLink`, `YouTubePane`, `EngineAddress`,
+`OkHttpEngineLink`, `OkHttpAudioLink`, `PushToTalk`, `WatchPage`,
+`MediaTargets`, `WavHeader`, `Settings`, `WebViewYouTubePane` -- and a
+mirror of `MainActivity`'s delegation and call shapes compiled under
+Kotlin 2.0.21 with warnings as errors, and 79 JUnit tests in ten
+classes passed (`MediaTargetsTest` 16, `ProtocolTest` 16,
+`WatchPageTest` 13, `WavHeaderTest` 11, and the rest). Not compiled
+again: `MainActivity`, `SetupDialog`, `EngineService`, `BootReceiver`
+(androidx, `R` and API 26-34 platform shapes the small stub set lacks),
+whose edits were read twice instead; their three test classes (12
+tests) were not re-run. The first `assembleDebug` remains the first
+real build, as the README says.

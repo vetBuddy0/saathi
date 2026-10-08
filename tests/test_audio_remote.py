@@ -224,3 +224,35 @@ async def test_a_new_client_replaces_the_old_and_a_stale_detach_is_ignored(wav_p
 
 def _never_local(sink_id: str, path: Path):
     raise AssertionError("local playback must not be used while a client is attached")
+
+
+def test_the_grace_is_the_contracts_three_seconds():
+    # "a play waits at most (wav duration + 3 s)" -- the number itself,
+    # so a change to the constant fails a test rather than every test
+    # measuring itself against it.
+    assert DEFAULT_GRACE_SECONDS == 3.0
+
+
+async def test_replacing_the_client_mid_play_releases_the_wait(wav_path):
+    # The app restarted (or a Wi-Fi blip reconnected it) mid-sentence: the
+    # new connection replaces the old, and the old one's close is then a
+    # stale detach that changes nothing -- so the replacement itself must
+    # release the play, or the say() thread waits the WAV plus the grace
+    # with her face held on "speaking". The sentence is lost, not re-sent.
+    loop = asyncio.get_running_loop()
+    first, second = FakeWS(), FakeWS()
+    remote = RemoteAudio(fallback=_never_local)
+    remote.attach(first, loop)
+    handle = remote.player("fake-sink", wav_path)
+    waiting = loop.run_in_executor(None, handle.wait)
+    await asyncio.sleep(0.02)
+    assert not waiting.done()
+    assert remote.attach(second, loop) is first
+    remote.detach(first)  # the replaced connection's own close, late
+    await asyncio.wait_for(waiting, 0.5)
+    assert handle.finished and not handle.acknowledged
+    assert second.sent == []
+    # The new client is the client: the next sentence goes to it.
+    later = remote.player("fake-sink", wav_path)
+    await _eventually(lambda: len(second.sent) == 2)
+    assert second.sent[0] == ("text", {"type": "play", "id": later.id, "format": "wav"})
