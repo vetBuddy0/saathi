@@ -1323,3 +1323,54 @@ corpus gained six cross-script pairs. Lost: `unidecode` (a dependency
 for one table) and telling the model to pass names in Latin (a prompt
 can't guarantee it). `call_contact` now logs the name it was asked for
 -- her words, never a number -- so a mis-dial can be debugged.
+
+**2026-10-08 — The yt-dlp direct stream is gone; every `play` names a
+target, the embed first and the real watch page only after the embed
+refuses.** The 2026-09-25 detour breached YouTube's terms and was
+never to ship; it is removed whole (`direct_playback_enabled`,
+`resolve_stream_url`, the muted `<video>`+`<audio>` player, yt-dlp,
+yt-dlp-ejs and deno from the lock). What replaces it: the controller
+sends `target: "embed"` (and `watch_url`) with every play; when the
+embedded player reports an error -- any code of its own: 150/101
+embedding disabled, 100, the panel's "no_ready"/"api" deadlines -- the
+video goes into `unplayable` and from then on is sent with `target:
+"browser"`, which `media-panel.js` ignores and a client that can show
+youtube.com itself (the Android shell's YouTube pane, on its own `/ws`)
+plays. The embed is the default because it is the one route YouTube's
+terms plainly allow; the watch page under automated control is a grey
+area in those terms -- a contract question, not a copyright one -- and
+so is only ever the fallback, never tried first. Three Google
+identities keep that boundary honest and auditable: the Data API
+project that searches, the account signed into the kiosk's WebView
+that watches, and the developer's own account, which does neither.
+Only the browser's own verdict (a `media_event` error with code
+"browser" or "wall") refuses a video for the session (`refused`), drops
+it from searches and puts the rest back on a card; the card's title now
+names the video, since by then the player is gone and "that one" would
+point at nothing. Lost: dropping embed-refused videos from the offer
+(the old rule). The most popular result for a search is usually the
+label upload the embed refuses, and losing it every time was the
+complaint that produced the yt-dlp detour.
+
+**2026-10-08 — An embed refusal of the video she is waiting on falls
+back to the browser target by itself; a play that changes target is
+preceded by `stop`.** The alternative -- mark the video and wait for
+"again" -- shows her a blank panel first and asks her to know why. The
+re-emission happens in `on_browser_event`, from the controller, so
+"again"/"next"/"carry on" take the same decision through the same
+`_play`. A repeated embed refusal for a video already on the browser
+target (a second face page open, or a client reporting under the wrong
+code) is logged and re-emits nothing, so nothing can loop by itself.
+The `stop` before a target switch is the controller's, not the clients':
+without it the embed and the watch page would play over each other,
+and a panel that reacted to the other target's plays would be two
+clients each half-deciding the same thing. On a laptop with only the
+face page a browser-target play has no taker and nothing plays
+(docs/DEMO.md says so); the controller cannot tell who is connected,
+and inventing a hello on `/ws` for it belongs with the shell's step.
+
+**2026-10-08 — Renumbering keeps the thumbnail.** `youtube_search`,
+the search's refused-filter and the re-offer all rebuilt each
+`MediaResult` from id and title, so the picture the card was given on
+2026-09-25 never reached it from a real search. `dataclasses.replace`
+now; one new test pins it.

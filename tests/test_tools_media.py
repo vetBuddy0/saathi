@@ -219,6 +219,16 @@ def test_search_offers_at_most_three_of_the_playable_candidates(monkeypatch, fix
     assert [r.index for r in found] == [1, 2, 3]
 
 
+def test_search_keeps_each_results_thumbnail_through_the_status_check(
+    monkeypatch, fixture_body, videos_body
+):
+    # The card shows the picture beside the number; the renumbering
+    # after the status check used to rebuild each result without it.
+    _fake_api(monkeypatch, fixture_body, videos_body)
+    found = youtube_search("q", api_key="k")
+    assert found and all(r.thumbnail and r.thumbnail.startswith("https://") for r in found)
+
+
 def test_search_falls_back_to_unchecked_results_when_the_status_call_fails(
     monkeypatch, fixture_body, caplog
 ):
@@ -497,21 +507,166 @@ def test_results_message_carries_the_spoken_label(results):
     assert [r["label"] for r in sent[-1]["results"]] == ["One", "Two", "Three"]
 
 
-def test_a_video_the_player_could_not_play_is_not_offered_again(results):
+# -- the target rule: the embed first, the browser page after it refuses ---
+
+
+def _watch(result):
+    return f"https://www.youtube.com/watch?v={result.video_id}"
+
+
+def test_a_play_names_the_embed_target_and_the_watch_page(results):
     controller, sent = _controller(results)
     controller.handle("search", query="q")
     controller.handle("play", choice=2)
-    controller.on_browser_event("error", results[1].video_id)
+    play = sent[-1]
+    assert play["action"] == "play"
+    assert play["target"] == "embed"
+    assert play["watch_url"] == _watch(results[1])
+    assert controller.target == "embed"
+
+
+def test_an_embed_refusal_replays_the_same_video_on_the_browser_target_at_once(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=2)
+    controller.on_browser_event("error", results[1].video_id, code=150)
+    play = sent[-1]
+    assert play["action"] == "play" and play["target"] == "browser"
+    assert play["video_id"] == results[1].video_id and play["index"] == 2
+    assert play["watch_url"] == _watch(results[1])
+    assert play["volume"] == DEFAULT_VOLUME and play["fullscreen"] is False
+    # No stop in between: the panel blanked itself when it reported.
+    assert sent[-2]["action"] == "play" and sent[-2]["target"] == "embed"
+    assert controller.playing is True and controller.target == "browser"
+    assert controller.now_playing == results[1]
+    assert results[1].video_id in controller.unplayable
+    assert results[1].video_id not in controller.refused
+    assert controller.last_results == results  # still on offer
+
+
+def test_again_next_and_resume_take_the_browser_target_once_the_embed_refused(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=2)
+    controller.on_browser_event("error", results[1].video_id, code=101)
+    controller.on_browser_event("ended")
+    for action in ("resume", "again"):
+        reply = controller.handle(action)
+        assert reply["status"] == "ok", action
+        assert sent[-1]["action"] == "play", action
+        assert sent[-1]["target"] == "browser" and sent[-1]["video_id"] == results[1].video_id
+    controller.handle("play", choice=1)
+    assert sent[-1]["target"] == "embed"  # only the refused one goes to the browser
+    controller.handle("next")  # the second, again
+    assert sent[-1]["target"] == "browser" and sent[-1]["index"] == 2
+    controller.handle("next")
+    assert sent[-1]["target"] == "embed" and sent[-1]["index"] == 3
+
+
+def test_a_play_that_changes_target_stops_the_other_target_first(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.on_browser_event("error", results[0].video_id, code=150)  # now on the browser
+    controller.handle("play", choice=2)  # the embed: the watch page must not play on
+    assert [m["action"] for m in sent[-2:]] == ["stop", "play"]
+    assert sent[-1]["target"] == "embed"
+    controller.handle("play", choice=3)  # embed to embed: no stop, as before
+    assert [m["action"] for m in sent[-2:]] == ["play", "play"]
+    controller.handle("play", choice=1)  # back to the browser: the embed stops first
+    assert [m["action"] for m in sent[-2:]] == ["stop", "play"]
+    assert sent[-1]["target"] == "browser"
+    controller.on_browser_event("ended")
+    controller.handle("play", choice=2)  # nothing was playing: nothing to stop
+    assert [m["action"] for m in sent[-2:]] == ["play", "play"]
+
+
+def test_every_error_code_but_the_browsers_own_is_the_embeds(results):
+    for code in (150, 101, 100, "no_ready", "api", None):
+        controller, sent = _controller(results)
+        controller.handle("search", query="q")
+        controller.handle("play", choice=1)
+        controller.on_browser_event("error", results[0].video_id, code=code)
+        assert sent[-1]["action"] == "play" and sent[-1]["target"] == "browser", code
+        assert results[0].video_id in controller.unplayable
+        assert results[0].video_id not in controller.refused
+
+
+def test_a_repeated_embed_refusal_does_not_replay_a_second_time(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.on_browser_event("error", results[0].video_id, code=150)
+    before = len(sent)
+    controller.on_browser_event("error", results[0].video_id, code=150)  # a second face page
+    assert len(sent) == before
+    assert results[0].video_id not in controller.refused
+    # "carry on" sends it to the browser again; nothing loops by itself.
+    controller.handle("resume")
+    assert sent[-1]["action"] == "play" and sent[-1]["target"] == "browser"
+
+
+def test_a_late_embed_refusal_for_a_video_she_moved_past_is_remembered_only(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=1)
+    controller.handle("play", choice=2)  # she moved on before the first one's report landed
+    controller.on_browser_event("error", results[0].video_id, code=150)
+    assert sent[-1]["video_id"] == results[1].video_id  # nothing re-emitted
+    assert controller.playing is True  # the second one is still playing
+    assert results[0].video_id in controller.unplayable
+    controller.handle("play", choice=1)
+    assert sent[-1]["target"] == "browser"
+
+
+def test_a_browser_failure_refuses_the_video_as_the_embed_used_to(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=2)
+    controller.on_browser_event("error", results[1].video_id, code=150)
+    controller.on_browser_event("error", results[1].video_id, code="browser")
     assert controller.playing is False
+    assert results[1].video_id in controller.refused
 
     for action in ("resume", "again", "play"):
         reply = controller.handle(action)
         assert reply["status"] == "unplayable", action
         assert len(reply["results"]) == 2
         assert all(not r.startswith("Two") for r in reply["results"])
-    assert sent[-1]["action"] == "play"  # the original play; nothing re-emitted
-    assert sent[-1]["index"] == 2
+    assert sent[-1]["action"] == "play"  # the browser play; nothing re-emitted
+    assert sent[-1]["target"] == "browser" and sent[-1]["index"] == 2
     assert controller.handle("play", choice=1)["status"] == "ok"
+
+
+def test_a_search_still_offers_a_video_the_embed_refused(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=2)
+    controller.on_browser_event("error", results[1].video_id, code=150)
+    reply = controller.handle("search", query="q")
+    assert controller.last_results == results
+    assert len(reply["results"]) == 3
+    controller.handle("play", choice=2)
+    assert sent[-1]["target"] == "browser"
+
+
+def test_a_search_drops_a_video_the_browser_failed_on_and_keeps_the_pictures(results):
+    controller, sent = _controller(results)
+    controller.handle("search", query="q")
+    controller.handle("play", choice=2)
+    controller.on_browser_event("error", results[1].video_id, code=150)
+    controller.on_browser_event("error", results[1].video_id, code="wall")
+    controller.handle("search", query="q")
+    assert [r.video_id for r in controller.last_results] == [
+        results[0].video_id,
+        results[2].video_id,
+    ]
+    assert [r.index for r in controller.last_results] == [1, 2]
+    assert [r.thumbnail for r in controller.last_results] == [
+        results[0].thumbnail,
+        results[2].thumbnail,
+    ]
+    assert all(r.thumbnail for r in controller.last_results)
 
 
 def test_an_error_without_a_video_id_marks_what_was_playing(results):
@@ -706,13 +861,18 @@ def test_a_single_result_is_offered_as_a_confirm_card_not_a_choice_of_one(result
     assert len([m for m in sent if m.get("action") == "play"]) == 2
 
 
-def test_an_unplayable_video_is_left_off_the_next_offer_and_the_rest_renumbered(results):
+def test_a_browser_refused_video_is_left_off_the_next_offer_and_the_rest_renumbered(results):
     # Found in review: a tap on a result the player had already failed
-    # on cleared the card and said nothing. Now it's never offered.
+    # on cleared the card and said nothing. A video no target will play
+    # is never offered; one only the embed refused stays (it plays on
+    # the browser target).
     controller, cards, sent = _carded(results)
     controller.handle("search", query="q")
     controller.handle("play", choice=2)
-    controller.on_browser_event("error", results[1].video_id)
+    controller.on_browser_event("error", results[1].video_id, code=150)  # to the browser
+    reply = controller.handle("search", query="q")
+    assert [o["n"] for o in sent[-1]["card"]["options"]] == [1, 2, 3]  # still offered
+    controller.on_browser_event("error", results[1].video_id, code="wall")  # refused
     reply = controller.handle("search", query="q")
     assert [r.video_id for r in controller.last_results] == [
         results[0].video_id,
@@ -720,6 +880,10 @@ def test_an_unplayable_video_is_left_off_the_next_offer_and_the_rest_renumbered(
     ]
     assert [r.index for r in controller.last_results] == [1, 2]
     assert [o["n"] for o in sent[-1]["card"]["options"]] == [1, 2]
+    assert [o["image"] for o in sent[-1]["card"]["options"]] == [
+        results[0].thumbnail,
+        results[2].thumbnail,
+    ]
     assert reply["results"][1].startswith("Two: ")
     controller.handle("play", choice=2)
     assert sent[-1]["video_id"] == results[2].video_id
@@ -772,26 +936,45 @@ def test_the_offer_card_is_the_tools_before_the_screen_is_told(results):
     assert controller.card_id == cards.current.id != first
 
 
-def test_a_video_the_player_could_not_play_is_reoffered_not_swallowed(results, caplog):
+def test_an_embed_refusal_with_cards_shows_no_card_and_plays_on_the_browser(results, caplog):
     controller, cards, sent = _carded(results)
     controller.handle("search", query="q")
     cards.answer(controller.card_id, {"choice": 2}, source="tap")
-    assert sent[-1]["action"] == "play"
+    assert sent[-1]["action"] == "play" and sent[-1]["target"] == "embed"
     controller.on_browser_event("error", results[1].video_id, code=150)
     assert results[1].video_id in caplog.text and "150" in caplog.text
+    assert sent[-1]["action"] == "play" and sent[-1]["target"] == "browser"
+    assert not [m for m in sent if m["type"] == "card" and m["card"] is not None][1:]
+    assert cards.current is None and controller.card_id is None
+    assert controller.now_playing == results[1] and controller.playing is True
+    assert controller.last_results == results
+
+
+def test_a_video_the_browser_could_not_play_is_reoffered_by_name_not_swallowed(results, caplog):
+    controller, cards, sent = _carded(results)
+    controller.handle("search", query="q")
+    cards.answer(controller.card_id, {"choice": 2}, source="tap")
+    controller.on_browser_event("error", results[1].video_id, code=150)
+    controller.on_browser_event("error", results[1].video_id, code="browser")
+    assert results[1].video_id in caplog.text and "browser" in caplog.text
     card = sent[-1]["card"]
-    assert card["kind"] == "choice" and card["title"] == RETRY_CARD_TITLE
+    assert card["kind"] == "choice"
+    assert card["title"] == RETRY_CARD_TITLE.format(title=results[1].title)
+    assert card["title"] == f"{results[1].title} won't play here. Which instead?"
     assert [o["label"] for o in card["options"]] == [results[0].title, results[2].title]
     assert controller.card_id == card["id"] == cards.current.id
     assert controller.now_playing is None and controller.playing is False
     # A tap on the retry card plays the renumbered second one.
     cards.answer(card["id"], {"choice": 2}, source="tap")
     assert sent[-1]["action"] == "play" and sent[-1]["video_id"] == results[2].video_id
-    # That fails too: one left, offered as a yes/no; then nothing left, no card.
+    # The embed refuses that too: the browser gets it, no card yet...
     controller.on_browser_event("error", results[2].video_id, code="no_ready")
+    assert sent[-1]["action"] == "play" and sent[-1]["target"] == "browser"
+    # ...and the browser fails: one left, offered as a yes/no; then none, no card.
+    controller.on_browser_event("error", results[2].video_id, code="wall")
     assert sent[-1]["card"]["kind"] == "confirm"
     assert sent[-1]["card"]["title"] == f"Play {results[0].title}?"
-    controller.on_browser_event("error", results[0].video_id)
+    controller.on_browser_event("error", results[0].video_id, code="browser")
     assert cards.current is None and controller.card_id is None
     assert controller.last_results == []
 

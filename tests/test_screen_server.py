@@ -796,6 +796,8 @@ async def test_the_second_one_that_one_and_again_resolve_across_turns(monkeypatc
                     "index": 2,
                     "volume": 70,
                     "fullscreen": False,
+                    "target": "embed",
+                    "watch_url": f"https://www.youtube.com/watch?v={found[1].video_id}",
                 }
             ]
             assert session.results[-1]["playing"].startswith("Two: ")
@@ -1484,6 +1486,56 @@ async def test_a_player_error_is_logged_with_its_code_and_reaches_the_controller
             await asyncio.sleep(0.1)
     assert found[0].video_id in controller.unplayable
     assert found[0].video_id in caplog.text and "code 150" in caplog.text
+
+
+async def test_a_second_client_gets_the_browser_target_play_and_its_browser_error_lands(
+    monkeypatch, caplog
+):
+    # The Android shell is just another /ws client: it sees the play the
+    # face page's panel ignores, and its report goes through the same
+    # door as the panel's. The server tells the two apart by nothing.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    watch = f"https://www.youtube.com/watch?v={found[0].video_id}"
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as face, client.ws_connect("/ws") as shell:
+            await _connect(face)
+            await _connect(shell)
+            await _turn_collecting_media(face, session, action="search", query="q")
+            (play,) = await _turn_collecting_media(face, session, action="play", choice=1)
+            assert play["target"] == "embed" and play["watch_url"] == watch
+            # The face page's embed refuses it: the controller re-sends it
+            # on the browser target, to every client.
+            await face.send_json(
+                {
+                    "type": "media_event",
+                    "event": "error",
+                    "video_id": found[0].video_id,
+                    "code": 150,
+                }
+            )
+            while True:
+                message = await shell.receive_json()
+                if message["type"] == "media" and message.get("target") == "browser":
+                    break
+            assert message["action"] == "play"
+            assert message["video_id"] == found[0].video_id and message["watch_url"] == watch
+            assert message["volume"] == 70 and message["fullscreen"] is False
+            assert await face.receive_json() == message  # the panel ignores it; the socket doesn't
+            # The watch page can't play it either: the shell's report refuses it.
+            await shell.send_json(
+                {
+                    "type": "media_event",
+                    "event": "error",
+                    "video_id": found[0].video_id,
+                    "code": "browser",
+                }
+            )
+            await asyncio.sleep(0.1)
+    assert found[0].video_id in controller.unplayable
+    assert found[0].video_id in controller.refused
+    assert controller.playing is False
+    assert "code browser" in caplog.text
 
 
 # -- captions: what was heard and said, only while switched on -------------

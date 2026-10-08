@@ -99,11 +99,15 @@ Hold nothing — tap space, speak, and it answers.
 
 ## Known gaps (TODO.md has details)
 
-- **YouTube playback is direct (demo only).** `SAATHI_YOUTUBE_PLAYBACK=direct`
-  in `~/.saathi/env` plays via yt-dlp, because label uploads ("Ed Sheeran -
-  Perfect") refuse the official embed (error 150). This breaches YouTube's
-  terms and must not ship; remove the line for the official player. A
-  pick takes ~3 s to start while the stream is looked up.
+- **Label uploads refuse the embed.** "Ed Sheeran - Perfect" and similar
+  report embeddable through the API and still fail in the official
+  player (error 150). The player reports it, and from then on that video
+  is sent with `target: "browser"` — the real youtube.com page, which
+  only the Android shell's YouTube pane can show (DECISIONS.md
+  2026-10-08). On a laptop with just the face page, a browser-target
+  play has no taker: the panel goes blank and nothing plays. Pick the
+  other results in a laptop demo. (The yt-dlp direct stream that covered
+  this is gone: it breached YouTube's terms.)
 - **Name matching** can dial a near-miss ("Deepa" → Deepak) and mixes up
   two people with the same name or relation (S2–S4). Stick to "call my
   son" / the test number in a demo.

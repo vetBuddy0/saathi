@@ -22,6 +22,14 @@ volume, layout — emitted by `tools/media.py`'s controller through the
 reporting `ended`/`error`). Ducking needs no new message: the browser
 lowers the player's volume on the `state` it already receives
 (`listening`/`thinking`/`speaking`) — see `static/js/media-policy.js`.
+Since 2026-10-08 every `play` also carries `target` ("embed" or
+"browser") and `watch_url`: the face page's panel plays "embed" and
+ignores "browser"; a client that can show the real youtube.com page
+(the Android shell, on its own `/ws` connection) plays "browser" and
+reports its failures as `media_event` errors with code "browser" or
+"wall". This server tells the two apart by nothing: it broadcasts every
+message to every client and hands every report to the controller,
+which owns the rule (`tools/media.py`).
 
 Cards (same day): `{"type": "card", "card": {...} | null}` (server ->
 browser: show this one card, or clear it; emitted by `screen/cards.py`'s
@@ -476,7 +484,8 @@ def build_app(
                     if event == "error":
                         # Never silent: the code is the player's own
                         # (150/101 embedding disabled, 100 not found,
-                        # "no_ready"/"api" from the panel's timeouts).
+                        # "no_ready"/"api" from the panel's timeouts,
+                        # "browser"/"wall" from the watch-page client).
                         logger.warning("player error for %s: code %s", video_id, code)
                     if media is not None and isinstance(event, str):
                         media.on_browser_event(

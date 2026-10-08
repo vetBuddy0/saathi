@@ -6,7 +6,6 @@ readme = "SPEC.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.10",
-    "deno>=2.9.7",
     "groq>=1.7.0",
     "numpy>=2.5.3",
     # identity/embed.py's local sentence embeddings (MiniLM, Apache 2.0).
@@ -25,7 +24,6 @@ dependencies = [
     # than WAV for the same audio, from a smaller upload. See
     # docs/completed/latency-investigation.md for the numbers.
     "soundfile>=0.14.0",
-    "yt-dlp[default]>=2026.8.19",
 ]
 
 [project.scripts]
