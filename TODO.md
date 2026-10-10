@@ -7,6 +7,15 @@ in `DECISIONS.md` and strike it here.
 
 ## Known problems
 
+**2026-10-09 — `test_every_google_call_carries_a_deadline` is red.**
+Commit `5fb6c34` lowered the Google TTS per-sentence deadline
+(`_REQUEST_TIMEOUT_S` in `voice/tts/google_backend.py`) from 10 s to
+6 s on purpose, so a stalled sentence falls back mid-reply sooner. The
+test in `tests/test_tts_google.py` still asserts 10.0. Normal latency is
+unchanged; only the stall worst case is ~4 s shorter. Fix: update the
+assertion to 6.0. Also noted: suite at `f11d964` is 894 passed, not the
+886 expected — unexplained.
+
 **2026-09-26 — JEV / two-model routing — next step only if fuzzy tool
 choice turns out to be the remaining failure.** Clear commands now go
 through the rule-based `voice/router.py` (DECISIONS.md); what is left
