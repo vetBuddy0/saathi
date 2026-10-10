@@ -5,7 +5,7 @@
      the face. Its title names what it is, not a state: the first draft
      said "Saathi is listening", which was a status label and an untrue
      one (the microphone is open only between press and release, the
-     notification for as long as the activity is started) -- found in
+     notification for as long as the activity is started) - found in
      review. The dialog's strings speak to whoever sets the device up,
      not to her. -->
 <resources>

@@ -4,8 +4,8 @@
   browser-target play), and the push-to-talk button laid over the whole
   thing at bottom-left. The button is a child of the root, not of the face
   pane, so a fullscreen video that takes the face pane down to a corner
-  does not take the button with it. The button's text is content -- what
-  it is for -- never a status; nothing in this layout may say "Listening".
+  does not take the button with it. The button's text is content - what
+  it is for - never a status; nothing in this layout may say "Listening".
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
