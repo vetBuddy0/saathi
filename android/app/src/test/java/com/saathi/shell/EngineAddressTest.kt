@@ -47,6 +47,20 @@ class EngineAddressTest {
     }
 
     @Test
+    fun cleartextOffTheHomeNetworkIsHttpToAPublicHostAndNothingElse() {
+        // The rule CleartextGuard applies to every sub-resource a page asks for.
+        for ((scheme, host) in listOf("http" to "example.com", "HTTP" to "8.8.8.8", "http" to null, "http" to "")) {
+            assertTrue("$scheme://$host", EngineAddress.isCleartextOffLan(scheme, host))
+        }
+        for ((scheme, host) in listOf(
+            "http" to "127.0.0.1", "http" to "192.168.1.20", "http" to "pi.local", "http" to "[fe80::1]",
+            "https" to "example.com", "https" to "www.youtube.com", "data" to null, "blob" to "x", null to "example.com",
+        )) {
+            assertFalse("$scheme://$host", EngineAddress.isCleartextOffLan(scheme, host))
+        }
+    }
+
+    @Test
     fun theFaceStaysOnTheEngine() {
         val base = "http://192.168.1.20:8765"
         for (url in listOf(base, "$base/", "$base/index.html", "$base/?demo=media", "$base#x",

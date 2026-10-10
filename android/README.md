@@ -161,8 +161,10 @@ YouTube; with an engine on the Wi-Fi it needs to be on that Wi-Fi.
    reads, each row saying whether the phone holds that key ("set" or
    "missing") and never the value. Copy the `.env` file on the laptop,
    get it onto the phone's clipboard (a message to yourself, say) and
-   press "Paste .env from clipboard": the fields fill by name and a
-   toast names which. Or paste one key into its own field. Leave the
+   press "Paste .env from clipboard": the fields fill by name, a toast
+   names which, and the clipboard is emptied (the whole file was on
+   it; delete the message that carried it, too). Or paste one key into
+   its own field. Leave the
    kiosk box unticked, Save (it needs `OPENAI_API_KEY` or `GROQ_API_KEY`
    to be set and says so otherwise; the Brain page's default, "Saathi
    thinks on this phone", is already chosen). The engine starts inside
@@ -275,23 +277,32 @@ pages under one Save, and the kiosk box under both:
   hint: nothing connects to it). Only addresses on the home network are
   accepted -- RFC 1918 ranges, `.local` names, link-local, loopback --
   because the connection is plain http and the shell will not send
-  cleartext anywhere else (`EngineAddress.kt`). "Test" fetches the
-  address's root once, with a three-second timeout, and says whether
-  the engine answered, before anything is saved.
+  cleartext anywhere else (`EngineAddress.kt`; `CleartextGuard.kt`
+  applies the same rule to every image, script or frame either page
+  asks for, with an empty 403 for an `http://` one off the home
+  network). "Test" fetches the address's root once, with a
+  three-second timeout and following no redirect, and says whether the
+  engine answered, before anything is saved.
 - **Keys**: one row per name the engine reads -- `OPENAI_API_KEY`,
   `GROQ_API_KEY`, `YOUTUBE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS_JSON`,
   `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`,
   `TWILIO_FROM_NUMBER`, `TWILIO_TEST_NUMBER` -- each a label that says
-  only "set" or "missing", a masked field (a plain multi-line box for
-  the service-account JSON) and "Clear". Every field is empty when the
-  dialog opens and a stored value is never shown back: a value typed or
-  pasted replaces the stored one on Save, Clear removes it, an empty
-  field changes nothing. "Paste .env from clipboard" reads the
+  only "set" or "missing", a masked field (a masked multi-line box for
+  the service-account JSON, with a line under it saying whether what
+  is in it is one JSON object with its braces balanced and which
+  service account it names, since dots cannot be checked by eye) and
+  "Clear". The dialog's window is flagged secure: no screenshot, screen
+  recording or Recents thumbnail shows it. Every field is empty when
+  the dialog opens and a stored value is never shown back: a value
+  typed or pasted replaces the stored one on Save, Clear removes it, an
+  empty field changes nothing. "Paste .env from clipboard" reads the
   clipboard as the engine's `.env` file (`KEY=VALUE` lines; `export`
-  and quotes are fine, `#` comments are skipped, the JSON may follow
+  and quotes are fine, `#` comments are skipped, also after a quoted
+  value or a JSON one, the JSON may follow
   `GOOGLE_APPLICATION_CREDENTIALS_JSON=` across lines as it is in the
   file) and fills the fields by name -- only the nine names, a blank
-  `YOUTUBE_API_KEY=` clearing that key -- and a toast names which. The
+  `YOUTUBE_API_KEY=` clearing that key -- a toast names which, and the
+  clipboard is emptied, since the whole file sat on it. The
   phone cannot think without `OPENAI_API_KEY` or `GROQ_API_KEY`, and
   Save says so and stays open rather than closing on a page that would
   come straight back; the rest are optional. The keys live in a
@@ -506,17 +517,19 @@ app/src/main/java/com/saathi/shell/
   WebViewYouTubePane.kt  its WebView implementation: youtube.com only, walls reported, <video> driven
   WatchPage.kt           the pane's rules and scripts (pure): URLs, user agent, install/pause/resume/volume
   PushToTalk.kt          the button: down is press + mic on, up is mic off then release (after the last frame)
-  EngineAddress.kt       the private-network rule, URL normalisation, isOn() (pure)
+  EngineAddress.kt       the private-network rule, URL normalisation, isOn(), isCleartextOffLan() (pure)
+  CleartextGuard.kt      the private-network rule on every request a page makes: an empty 403 for http:// off the LAN
   EmbeddedEngine.kt      the engine in the APK: Python started once, saathi.android start/stop on one worker thread
   Settings.kt            SharedPreferences: engine URL, kiosk flag, brain mode; Keys: the API keys, encrypted,
-                         and the .env parser (pure)
+                         the .env parser and the credential's shape for the masked JSON box (pure)
   SetupDialog.kt         the five-second hold and the dialog it opens: the Brain page (this phone, or another
-                         computer: address, Test), the Keys page (a masked field per key, the JSON box, Clear,
-                         paste the .env from the clipboard), kiosk box, Exit kiosk; KeyEdits, what Save does (pure)
+                         computer: address, Test), the Keys page (a masked field per key, the masked JSON box and
+                         its verdict line, Clear, paste the .env from the clipboard, which is then emptied), kiosk
+                         box, Exit kiosk; FLAG_SECURE on the window; KeyEdits, what Save does (pure)
   Kiosk.kt               lock task and the Device Owner policies, each wrapped to log and go on when not owner
   EngineService.kt       foreground microphone service + wake lock, started/stopped with the activity
   BootReceiver.kt, SaathiAdminReceiver.kt   manifest components: reopen after boot (Android 8-9 phones only), the owner receiver
-app/src/test/java/com/saathi/shell/   JUnit (118 tests): Protocol (the /audio frames among them), Ducking,
+app/src/test/java/com/saathi/shell/   JUnit (122 tests): Protocol (the /audio frames among them), Ducking,
                          EngineAddress, Kiosk, SetupDialog (the probe, the pages), KeyEdits (what the Keys page
                          does on Save), EngineService, ReconnectBackoff, OkHttpEngineLink (delivery),
                          OkHttpAudioLink (backoff, the language-to-locale table, the deadline), WavHeader,

@@ -35,34 +35,53 @@ class FakeCascadeSession:
         self.intent = callback
 
 
+def _local_audio_modules():
+    """`saathi.audio.aec` and `.devices`, or None where they do not
+    import: `pywebrtc-audio` and `pyudev` have no Android wheel, and on
+    a machine with only the phone's packages the remote-mode tests
+    below -- the ones that document that configuration -- must still
+    run. cli.py imports both lazily, inside its local-mode branch, so
+    remote mode never needs them; a local-mode test on such a machine
+    fails inside `build_runtime()`, as `saathi run` would there."""
+    try:
+        from saathi.audio import aec, devices
+    except ImportError:
+        return None
+    return aec, devices
+
+
 @pytest.fixture
 def seams(monkeypatch, tmp_path):
     """The outside world, faked where cli.py reaches for it."""
-    from saathi.audio import aec, devices
     from saathi.voice.engine import cascade
 
     monkeypatch.setenv("SAATHI_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.delenv("SAATHI_AUDIO", raising=False)  # local mode, whatever the shell has
     found: dict[str, object] = {"input": True, "output": True}
+    handles: dict[str, object] = {"value": None}
 
-    class FakeManager:
-        def __init__(self, backend) -> None:
-            pass
+    local_audio = _local_audio_modules()
+    if local_audio is not None:
+        aec, devices = local_audio
 
-        def choose(self, direction):
-            if not found[direction]:
-                return None
-            return devices.Device(
-                id=f"{direction}-device", description="fake", direction=direction, bus="usb"
-            )
+        class FakeManager:
+            def __init__(self, backend) -> None:
+                pass
 
-    handles = {
-        "value": aec.EchoCancelHandles(module_index="7", source_id="aec-src", sink_id="aec-sink")
-    }
-    monkeypatch.setattr(devices, "DeviceManager", FakeManager)
-    monkeypatch.setattr(devices, "PulseAudioBackend", lambda: None)
-    monkeypatch.setattr(aec, "ensure_echo_cancellation", lambda mic, speaker: handles["value"])
+            def choose(self, direction):
+                if not found[direction]:
+                    return None
+                return devices.Device(
+                    id=f"{direction}-device", description="fake", direction=direction, bus="usb"
+                )
+
+        handles["value"] = aec.EchoCancelHandles(
+            module_index="7", source_id="aec-src", sink_id="aec-sink"
+        )
+        monkeypatch.setattr(devices, "DeviceManager", FakeManager)
+        monkeypatch.setattr(devices, "PulseAudioBackend", lambda: None)
+        monkeypatch.setattr(aec, "ensure_echo_cancellation", lambda mic, speaker: handles["value"])
     monkeypatch.setattr(cascade, "CascadeSession", FakeCascadeSession)
     FakeCascadeSession.instances.clear()
     return {"found": found, "handles": handles, "data_dir": tmp_path}
@@ -120,6 +139,21 @@ def test_the_session_is_built_on_the_echo_cancelled_sink_and_reads_the_store(wir
 
     assert isinstance(wired.remote_audio, RemoteAudio)
     assert session.kwargs["player"] == wired.remote_audio.player
+
+
+def test_the_media_controller_has_a_browser_target_only_while_a_phone_is_attached(wired):
+    # The kiosk rule (tools/media.py: an embed refusal with nobody to
+    # show the watch page is the browser's verdict too) rests on this
+    # wiring -- the controller's own default assumes a taker -- so the
+    # wiring is pinned here, not left to a lambda nobody tests.
+    from types import SimpleNamespace
+
+    assert wired.media._browser_taker() is False
+    phone = SimpleNamespace(closed=False)
+    wired.remote_audio.attach(phone, None)
+    assert wired.media._browser_taker() is True
+    wired.remote_audio.detach(phone)
+    assert wired.media._browser_taker() is False
 
 
 def test_a_database_with_no_preference_speaks_with_chirp(wired):
@@ -379,15 +413,19 @@ def test_without_an_echo_cancelled_pair_calling_is_unavailable(calling_seams):
 @pytest.fixture
 def remote_seams(seams, monkeypatch):
     """`SAATHI_AUDIO=remote`, with every local probe turned into an
-    assertion: nothing here may be constructed or called."""
-    from saathi.audio import aec, devices
+    assertion: nothing here may be constructed or called. Where the
+    local audio modules do not import at all (the phone's packages,
+    `_local_audio_modules`), a touch fails louder still, at the import."""
 
     def never(*args, **kwargs):
         raise AssertionError("remote mode must not touch local audio devices or echo-cancel")
 
-    monkeypatch.setattr(devices, "DeviceManager", never)
-    monkeypatch.setattr(devices, "PulseAudioBackend", never)
-    monkeypatch.setattr(aec, "ensure_echo_cancellation", never)
+    local_audio = _local_audio_modules()
+    if local_audio is not None:
+        aec, devices = local_audio
+        monkeypatch.setattr(devices, "DeviceManager", never)
+        monkeypatch.setattr(devices, "PulseAudioBackend", never)
+        monkeypatch.setattr(aec, "ensure_echo_cancellation", never)
     monkeypatch.setenv("SAATHI_AUDIO", "remote")
     for name in TWILIO_ENV:
         monkeypatch.delenv(name, raising=False)

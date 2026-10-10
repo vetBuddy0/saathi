@@ -2904,3 +2904,167 @@ collects its `SourceDirectorySet`s into `inputs.files(...)`, which
 would carry the producer, but whether its own `sourceSetNames` lookup
 keeps that is not something to bet the first build on when one explicit
 line is certain either way.
+
+**2026-10-08 — Review findings on the phone engine, applied: the REST
+client carries the SDK client's deadline and retry.** `provider.py`
+now owns one set of numbers -- `CONNECT_TIMEOUT_SECONDS = 5`,
+`REQUEST_TIMEOUT_SECONDS = 20`, `MAX_RETRIES = 1`, the SDK path's since
+2026-09-25 -- and builds `RestChatClient` with them, where it used to
+take the client's own 30 s single attempt, so a stalled request on the
+phone held a turn ten seconds longer than on the laptop. The connect
+deadline is the connection class's: `http.client` has one socket
+timeout for connecting and reading, so `_IPv4HTTPSConnection` puts the
+connect timeout on the socket for the TCP connect and the TLS handshake
+and the read timeout after. The retry is narrower than the SDK's on
+purpose: one more attempt only when the request never reached the
+service (`URLError`: refused, unresolvable, connect timed out), never on
+a read timeout, a 5xx or a 429 -- a request that may be in flight is
+not sent twice, and a retry on a timeout would double the wait the
+latency budget protects. Lost: the SDK's backoff-and-retry on 429/5xx
+(on the phone a 429 is a key or a tier, not a blip, and it costs a
+turn). `tests/test_provider.py` asserts both clients are built with the
+same numbers.
+
+**2026-10-08 — The shared `urllib` opener refuses every redirect.**
+urllib's `HTTPRedirectHandler` builds the redirected request from every
+header of the original, Authorization included, so a 302 from the
+service would have sent the API key (or Google's bearer token:
+`google_rest.py` shares `_build_opener()`) to whatever host the
+Location named -- reproduced in review with two local servers. Neither
+endpoint redirects, so `_RefuseRedirects` returns None and a 3xx is
+reported like any other status, key scrubbed. Lost: dropping the header
+only when the host changes, as `requests` does -- more code for a case
+that does not occur, and a same-host redirect of a POST is not a thing
+either service does.
+
+**2026-10-08 — An error body is read whole, then the message is cut.**
+Both REST modules read `_ERROR_BODY_LIMIT` (500) bytes of an error
+body and then tried to parse them as JSON, which fails for any body
+longer than that (a 400 for a bad tool schema, a Google error with
+`details`), leaving a cut-off JSON fragment where the service's own
+message should be. Now `_ERROR_READ_LIMIT` (64 KiB) is read, the
+message picked out, and only that is cut to 500. Cosmetic, since the
+scrubbing still applied, but the message is what a logcat line is for.
+
+**2026-10-08 — Transcription keyword arguments are encoded as the SDK's
+multipart encoder would, or refused.** `rest_client.py` sent every
+extra as `str(value)`, which turns `timestamp_granularities=["word"]`
+into `"['word']"` and `stream=True` into `"True"` -- forms the service
+rejects. No caller sends either; the cascade sends `model`, `file` and
+`response_format` and sometimes `language`. Now a list is one `name[]`
+part per item, a bool is `true`/`false`, a number is its text, and
+anything else is a `TypeError` by name before any request, so a future
+caller fails on the laptop and not with a 400 on the phone. Lost:
+silently stringifying (the status quo) and a full port of the SDK's
+encoder (nested objects, files in lists: nothing here needs them).
+
+**2026-10-08 — `reflect.py` reads a message with no content as "".**
+`json.loads(None)` is a `TypeError`, which the malformed-response guard
+(`JSONDecodeError`, `AttributeError`) did not name, so a model answering
+with `content: null` -- the SDK's `Optional[str]`, and the REST client's
+-- crashed the background reflection instead of reflecting on nothing.
+`digest.py` and `phrase.py` already did `(content or "")`; now so does
+`reflect.py`, in both calls. Pre-existing on the SDK path.
+
+**2026-10-08 — `tests/test_cli.py` fakes the local audio seams only
+where they import, so the remote-mode tests run with the phone's
+packages.** The shared `seams` fixture imported `saathi.audio.aec` at
+the top, which imports `pywebrtc_audio` at module level, so on a
+machine with only the phone's packages every test in the file errored
+at setup -- the nine `test_remote_mode_*` cases included, the only
+tests that document `SAATHI_AUDIO=remote`. Now `_local_audio_modules()`
+returns the two modules or None, the fixture fakes them when it can,
+and `remote_seams` turns them into assertions when it can (where they
+do not import at all, a touch fails louder still, at the import). A
+local-mode test on such a machine fails inside `build_runtime()`, as
+`saathi run` would there, which is the honest result. In the minimal
+venv the file now gives 8 of the 9 remote-mode tests green; the ninth
+asserts "piper is in the backends on Linux with piper-tts installed",
+which is a full-install contract and stays as written. The three
+"Piper is always available" tests were left alone for the same reason:
+they pin the Linux install, and retargeting them to "available where
+piper-tts imports" is a change to what they pin, not to this step.
+
+**2026-10-08 — `MediaController`'s `browser_available=None` stays
+"assume a browser"; `cli.py`'s wiring is pinned instead.** The review
+asked for "no browser" as the safer default, since a controller built
+without the callback re-emits a browser play nobody can take and the
+kiosk rule was reached only because `cli.py` passes
+`lambda: remote_audio.attached`. Declined, for now: the default is the
+constructor's documented choice, twenty-odd target-rule tests build the
+controller without the callback and assert the hand-off on that
+default, and rewriting their setup to make a changed default pass is
+the kind of test change this job does not make on its own. What the
+evidence actually names -- the kiosk rule resting on a lambda nobody
+tested -- is fixed: `test_cli.py` now asserts the controller has a
+browser taker exactly while a phone is attached on `/audio`. Flipping
+the default remains open for a step that owns those tests.
+
+**2026-10-08 — `gcp.json` is not removed by `stop()`; raised, not
+done.** The review asked for `_tear_down()` to unlink the credential
+file so the service-account key does not stay on disk after the engine
+is stopped or the brain moved to another computer. `tests/test_android_entry.py`
+asserts the opposite (`test_stop_closes_the_port_...`: "the credential
+file is the data dir's, not the environment's: it stays for the next
+start to replace or remove"), which is a stated contract of the file,
+like the identity database beside it; changing that test to make the
+fix pass is what CLAUDE.md forbids, so it stays as written and the
+finding is recorded here for whoever owns that contract. The file is
+0600 in the app's private directory: retention, not exposure.
+
+**2026-10-08 — The `.env` parser follows dotenv's rule for quotes and
+ends a JSON value where its braces balance.** `OPENAI_API_KEY="sk-one" #
+openai` was stored with its quotes -- `unquote()` dropped them only when
+the value's last character was the matching quote -- and every call then
+failed with a 401; a one-line `..._JSON={...} # gcp` kept the comment
+and was "not valid JSON" to the engine. A quoted value now ends at the
+first unescaped matching quote, with a JSON object right after the
+opening quote taken whole first (its own `"` are content), and whatever
+follows the closing quote is dropped; a bare JSON value ends where
+`jsonEnd()` balances it. Lost: keeping the last-character rule for an
+apostrophe inside single quotes (`'it's'`), which dotenv does not allow
+either, and escape processing (still none: the value is kept verbatim).
+
+**2026-10-08 — The private-range rule is applied to every request a
+page makes, and "Test" follows no redirect.** `shouldOverrideUrlLoading`
+in both WebViewClients sees only main-frame navigations, and the
+network security config permits cleartext everywhere, so an `<img>`,
+`<script>` or `<iframe>` at `http://<public host>` inside either page
+loaded over cleartext, and the setup dialog's probe (a default OkHttp
+client) would have followed a LAN address's 302 to a public host.
+`CleartextGuard.intercept()` runs from both clients'
+`shouldInterceptRequest` and answers an `http://` request to a host
+`EngineAddress.isPrivateLan()` refuses with an empty 403; the decision
+is `EngineAddress.isCleartextOffLan`, pure and tested on the JVM. The
+probe client is built with `followRedirects(false)` and
+`followSslRedirects(false)`; a 3xx was already "not an answer". Lost: a
+false base config with a domain list (the original reason stands), and
+intercepting everything (the guard would then fetch for the WebView,
+cookies and all).
+
+**2026-10-08 — The Keys page: the clipboard is emptied after a paste,
+the JSON box is masked with a verdict line under it, and the dialog's
+window is `FLAG_SECURE`.** After "Paste .env from clipboard" filled the
+fields, the whole file -- every key in it, read by the engine or not --
+stayed on the system clipboard for the next focused app; now a fill
+that touched anything calls `clearPrimaryClip()` (API 28; an empty clip
+below it) and the toast says so, and the README says to delete the
+message that carried the file. The service-account JSON was the one
+plain field, because a masked multi-line box cannot be checked for a
+missed brace; it showed the private key in clear, in every screenshot
+and Recents thumbnail. Now it wears `PasswordTransformationMethod` like
+the rest and the check is done for the person: `Keys.credentialShape()`
+(pure, tested) says whether the box holds one JSON object whose braces
+balance with nothing after it, and which `client_email` it names, and a
+`TextView` under the box says that -- more than eyes on a key could
+tell. The dialog window gets `FLAG_SECURE` before `show()`, for the
+whole dialog rather than the Keys page alone (toggling a window flag
+per tab is a second thing to get wrong, and the Brain page has nothing
+a screenshot is for). Lost: a "show" toggle on the JSON box (one more
+widget whose only purpose is to unmask a private key).
+
+**2026-10-08 — `tests/test_workflows.py` reading an untracked
+`android.yml`: not real.** The finding predates the commit;
+`git ls-files` and `git ls-tree origin/android-app` both list
+`.github/workflows/android.yml`, and the four workflow tests pass on a
+clean checkout.

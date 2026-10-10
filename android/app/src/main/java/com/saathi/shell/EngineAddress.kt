@@ -16,6 +16,13 @@
  * setting up sees the shape of what to type, and it is replaced the first
  * time they save. Nothing is detected from it and nothing depends on it
  * being right.
+ *
+ * [isCleartextOffLan] is the same rule asked of a request a page makes
+ * (an image, a script, a frame) rather than an address someone typed:
+ * the main-frame rules see only navigations, and the network security
+ * config permits cleartext everywhere, so a page that loaded an
+ * `http://` resource from a public host would have got it (found in
+ * review). `CleartextGuard.kt` answers such a request with a 403.
  */
 package com.saathi.shell
 
@@ -48,6 +55,14 @@ object EngineAddress {
         val port = if (uri.port == -1) DEFAULT_PORT else uri.port
         return "$scheme://$host:$port"
     }
+
+    /**
+     * Whether a request with this [scheme] and [host] is cleartext to a
+     * host off the home network: `http` (never `https`, nor any other
+     * scheme) to anything [isPrivateLan] refuses, a missing host included.
+     */
+    fun isCleartextOffLan(scheme: String?, host: String?): Boolean =
+        scheme.equals("http", ignoreCase = true) && !isPrivateLan(host ?: "")
 
     /** RFC 1918, link-local, loopback, ULA/link-local IPv6, `localhost` and `.local` names. */
     fun isPrivateLan(host: String): Boolean {

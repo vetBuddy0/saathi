@@ -28,17 +28,30 @@
  * or pasted replaces the stored one on Save, "Clear" takes it out, and
  * an empty field changes nothing -- which is why "empty" cannot mean
  * "remove" here and Clear exists. The fields are masked, so a key pasted
- * in a living room is a row of dots; the JSON box is the one plain
- * field, because a masked multi-line box cannot be checked for a missed
- * brace and the file is pasted whole, once. [KeyEdits] holds what the
- * page will do on Save -- pure Kotlin, tested on the JVM -- and the
- * widgets only show it. Nothing here logs or toasts a value: the toasts
- * name keys.
+ * in a living room is a row of dots -- the JSON box too, since
+ * 2026-10-08: it was the one plain field, because a masked multi-line
+ * box cannot be checked for a missed brace, and a review pointed out
+ * that it showed the service account's private key in clear, in every
+ * screenshot and Recents thumbnail. The check it existed for is done
+ * for the person instead: a line under the box says whether what is in
+ * it is one JSON object whose braces balance, and which service account
+ * it names ([Keys.credentialShape]), which is more than eyes on a
+ * private key could tell. The dialog's window is `FLAG_SECURE` for the
+ * same reason, so the system's screenshot, screen recording and Recents
+ * get a blank where it is. After "Paste .env from clipboard" has filled
+ * the fields, the clipboard is emptied: the whole file, every key in it,
+ * was otherwise left for the next app with focus to read. [KeyEdits]
+ * holds what the page will do on Save -- pure Kotlin, tested on the JVM
+ * -- and the widgets only show it. Nothing here logs or toasts a value:
+ * the toasts name keys.
  *
  * "Test" does one GET of the address's root with a short timeout and
  * says whether the engine answered, before anything is saved, because
  * the alternative is saving a typo and watching a black face with no
- * way to tell a wrong address from a down engine. Save stores what
+ * way to tell a wrong address from a down engine. It follows no
+ * redirect: a LAN address answering 302 to a public host would
+ * otherwise have the probe fetch that host (found in review), and the
+ * engine does not redirect; a 3xx is "not an answer". Save stores what
  * changed (the address, the keys, the mode, the kiosk box), applies the
  * kiosk box through [Kiosk], and -- when the engine is remote and links
  * were given -- points [EngineLink] and [AudioLink] at the stored
@@ -78,18 +91,22 @@
 package com.saathi.shell
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.DialogInterface
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.text.method.PasswordTransformationMethod
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -128,6 +145,10 @@ object SetupDialog {
             .connectTimeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(PROBE_TIMEOUT_SECONDS * 2, TimeUnit.SECONDS)
+            // The engine does not redirect, and a redirect from a LAN
+            // address to a public host must not be fetched (the header).
+            .followRedirects(false)
+            .followSslRedirects(false)
             .build()
     }
 
@@ -223,11 +244,17 @@ object SetupDialog {
         val fields = LinkedHashMap<String, EditText>()
         val labels = LinkedHashMap<String, TextView>()
         val clears = LinkedHashMap<String, Button>()
+        // Under the (masked) JSON box: what is in it looks like, so a
+        // missed brace or the wrong file is caught without showing it.
+        val jsonVerdict = TextView(context)
         fun refresh(name: String) {
             val held = edits.willHave(name)
             labels.getValue(name).text =
                 context.getString(if (held) R.string.setup_key_set else R.string.setup_key_missing, name)
             clears.getValue(name).isEnabled = held
+            if (name == Keys.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+                jsonVerdict.text = credentialVerdict(context, edits.typedValue(name))
+            }
         }
         val pasteButton = Button(context).apply { text = context.getString(R.string.setup_keys_paste) }
         val keysPage = LinearLayout(context).apply {
@@ -243,6 +270,11 @@ object SetupDialog {
                     inputType = InputType.TYPE_CLASS_TEXT or
                         InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                         InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    // Masked after the input type is set: a multi-line
+                    // password *type* is not a thing, a multi-line field
+                    // with the password transformation is. setInputType
+                    // would reset the transformation if it came later.
+                    transformationMethod = PasswordTransformationMethod.getInstance()
                     hint = context.getString(R.string.setup_key_json_hint)
                     minLines = 3
                     gravity = Gravity.TOP or Gravity.START
@@ -283,6 +315,7 @@ object SetupDialog {
                 },
             )
             keysPage.addView(field)
+            if (name == Keys.GOOGLE_APPLICATION_CREDENTIALS_JSON) keysPage.addView(jsonVerdict)
             refresh(name)
         }
         pasteButton.setOnClickListener {
@@ -297,13 +330,14 @@ object SetupDialog {
                 fields.getValue(name).setText(edits.typedValue(name) ?: "")
                 refresh(name)
             }
-            say(
-                if (touched.isEmpty()) {
-                    context.getString(R.string.setup_keys_none_found)
-                } else {
-                    context.getString(R.string.setup_keys_filled, touched.joinToString(", "))
-                },
-            )
+            if (touched.isEmpty()) {
+                say(context.getString(R.string.setup_keys_none_found))
+            } else {
+                // The file has done its job; it does not stay on the
+                // clipboard for the next app with focus (the header).
+                clearClipboard(context)
+                say(context.getString(R.string.setup_keys_filled, touched.joinToString(", ")))
+            }
         }
 
         // The two pages, one shown at a time; the tab of the shown page is the disabled one.
@@ -401,10 +435,28 @@ object SetupDialog {
                 Kiosk.exitLockTask(activity)
             }
         }
-        val dialog = builder.show()
+        val dialog = builder.create()
+        // No screenshot, screen recording or Recents thumbnail of a
+        // window that can hold a private key (the header). Set before
+        // show(), when the window is created but not yet attached.
+        dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.show()
         dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.setOnClickListener {
             if (save()) dialog.dismiss()
         }
+    }
+
+    /**
+     * The line under the JSON box for what [typed] holds: nothing for an
+     * empty box; which service account and that the braces balance; or
+     * that they do not. Names the account, never the key.
+     */
+    private fun credentialVerdict(context: Context, typed: String?): CharSequence {
+        if (typed == null) return ""
+        val shape = Keys.credentialShape(typed)
+        if (!shape.balanced) return context.getString(R.string.setup_key_json_unbalanced)
+        val account = shape.clientEmail ?: context.getString(R.string.setup_key_json_no_email)
+        return context.getString(R.string.setup_key_json_ok, account)
     }
 
     /**
@@ -464,6 +516,21 @@ object SetupDialog {
         val clip = clipboard.primaryClip ?: return ""
         if (clip.itemCount == 0) return ""
         return clip.getItemAt(0).coerceToText(context).toString()
+    }
+
+    /**
+     * Take the pasted file off the clipboard: every key in it, the ones
+     * the engine reads or not, was otherwise readable by the next app
+     * with focus. `clearPrimaryClip` is API 28; before it, an empty clip
+     * replaces the file, which is the same thing to the next reader.
+     */
+    private fun clearClipboard(context: Context) {
+        val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            clipboard.clearPrimaryClip()
+        } else {
+            clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+        }
     }
 }
 

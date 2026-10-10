@@ -537,6 +537,11 @@ class MediaController:
         # one client with a watch page, and its /audio socket is how the
         # engine knows it is there -- without a hello on /ws, which the
         # face page would also have to learn (see the module docstring).
+        # Kept as "assume so" when a review (2026-10-08) asked for "no
+        # browser" as the safer default: the target-rule tests build the
+        # controller without the callback and pin the hand-off, and the
+        # one production wiring is pinned by `tests/test_cli.py` instead
+        # -- the kiosk rule does not rest on a lambda nobody tests.
         self._browser_available = browser_available
         # With a CardController, the offer is a Choice card (screen/
         # cards.py): the same three numbered titles, but tappable and

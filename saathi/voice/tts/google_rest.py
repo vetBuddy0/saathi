@@ -123,8 +123,11 @@ CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 # How much of an error body goes into the cooldown reason: enough for
 # Google's own `{"error": {"message": ..., "status": ...}}`, not a
-# proxy's HTML page.
+# proxy's HTML page. The body is read whole (to `_ERROR_READ_LIMIT`)
+# before that message is picked out of it -- a body cut first is not
+# JSON any more (found in review, 2026-10-08).
 _ERROR_BODY_LIMIT = 500
+_ERROR_READ_LIMIT = 64 * 1024
 
 
 class GoogleRestError(RuntimeError):
@@ -292,7 +295,9 @@ class _RestSynthesizer:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             try:
-                detail = _error_detail(exc.read(_ERROR_BODY_LIMIT))
+                # Read whole (bounded), then cut: a body cut before the
+                # parse is not JSON, and Google's message would be lost.
+                detail = _error_detail(exc.read(_ERROR_READ_LIMIT))
             except OSError:
                 detail = ""
             message = f"HTTP {exc.code} from text:synthesize: {detail}".rstrip(": ")

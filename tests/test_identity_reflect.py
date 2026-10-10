@@ -134,6 +134,30 @@ def test_reflect_survives_a_malformed_insights_response(store):
     assert reflect(store, client=client, now=NOW) == []
 
 
+class FakeClientWithNoContent(FakeReflectionClient):
+    """As `FakeReflectionClient`, but a `None` in the script is a message
+    with no text at all -- `content=None`, the SDK's `Optional[str]` and
+    `rest_client.py`'s alike -- not the JSON `null`."""
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        payload = self._responses.pop(0) if self._responses else {}
+        content = None if payload is None else json.dumps(payload)
+        message = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def test_reflect_survives_a_response_with_no_content_at_all(store):
+    # `json.loads(None)` is a TypeError, which the malformed-response
+    # guard did not name (found in review): the background job crashed
+    # instead of reflecting on nothing.
+    _add_episode(store, "one", hours_ago=1)
+    assert reflect(store, client=FakeClientWithNoContent([None]), now=NOW) == []
+    client = FakeClientWithNoContent([{"questions": ["q"]}, None])
+    assert reflect(store, client=client, now=NOW) == []
+    assert len(client.calls) == 2  # the insights call was made and shrugged off
+
+
 def test_reflect_asks_one_insights_call_per_proposed_question(store):
     _add_episode(store, "one", hours_ago=1)
     client = FakeReflectionClient(

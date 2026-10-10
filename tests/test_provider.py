@@ -7,10 +7,13 @@ from pathlib import Path
 import pytest
 
 from saathi.voice.engine.provider import (
+    CONNECT_TIMEOUT_SECONDS,
     GROQ_LLM_MODEL,
     GROQ_STT_MODEL,
+    MAX_RETRIES,
     OPENAI_LLM_MODEL,
     OPENAI_STT_MODEL,
+    REQUEST_TIMEOUT_SECONDS,
     AIProvider,
     ProviderUnavailable,
     choose_client_kind,
@@ -120,6 +123,36 @@ def test_unknown_client_kind_is_refused_and_reported_at_startup():
     assert "SAATHI_AI_CLIENT" in missing_key({"OPENAI_API_KEY": "x", "SAATHI_AI_CLIENT": "curl"})
     with pytest.raises(ProviderUnavailable):
         provider_from_env({"OPENAI_API_KEY": "x", "SAATHI_AI_CLIENT": "curl"})
+
+
+def test_the_rest_client_is_built_with_the_sdk_clients_deadline_and_retry():
+    # One policy for both clients, so a stalled request on the phone
+    # holds the turn no longer than on the laptop (found in review: the
+    # REST client had a 30 s single attempt of its own).
+    assert (CONNECT_TIMEOUT_SECONDS, REQUEST_TIMEOUT_SECONDS, MAX_RETRIES) == (5.0, 20.0, 1)
+    for env in ({"OPENAI_API_KEY": "x"}, {"GROQ_API_KEY": "y"}):
+        rest = provider_from_env({**env, "SAATHI_AI_CLIENT": "rest"}).client
+        assert isinstance(rest, RestChatClient)
+        assert (rest.timeout, rest.connect_timeout, rest.retries) == (
+            REQUEST_TIMEOUT_SECONDS,
+            CONNECT_TIMEOUT_SECONDS,
+            MAX_RETRIES,
+        )
+
+
+def test_the_sdk_client_is_built_with_the_same_numbers():
+    pytest.importorskip("httpx")
+    pytest.importorskip("openai")
+    pytest.importorskip("groq")
+    for env in ({"OPENAI_API_KEY": "x"}, {"GROQ_API_KEY": "y"}):
+        sdk = provider_from_env({**env, "SAATHI_AI_CLIENT": "sdk"}).client
+        assert sdk.max_retries == MAX_RETRIES
+        deadline = sdk.timeout  # an httpx.Timeout: connect apart, the rest the one number
+        assert (deadline.connect, deadline.read, deadline.write) == (
+            CONNECT_TIMEOUT_SECONDS,
+            REQUEST_TIMEOUT_SECONDS,
+            REQUEST_TIMEOUT_SECONDS,
+        )
 
 
 def test_an_injected_client_is_used_whatever_the_client_kind():

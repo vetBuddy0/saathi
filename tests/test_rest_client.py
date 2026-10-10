@@ -22,6 +22,7 @@ import asyncio
 import json
 import socket
 import ssl
+import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -41,6 +42,7 @@ from saathi.voice.engine.rest_client import (
     _build_opener,
     _ipv4_https_connection,
     _IPv4HTTPSHandler,
+    _RefuseRedirects,
     _ssl_context,
 )
 from saathi.voice.tts import TTSBackend
@@ -131,6 +133,8 @@ class FakeAI:
             {
                 "headers": dict(request.headers),
                 "fields": {name: value for name, value in form.items() if name != "file"},
+                # Every part in order, repeats included (`name[]` parts).
+                "parts": [(name, value) for name, value in form.items() if name != "file"],
                 "filename": upload.filename,
                 "content_type": upload.content_type,
                 "data": upload.file.read(),
@@ -307,6 +311,128 @@ async def test_timeout_is_a_client_error():
             await call(client.chat.completions.create, model="m", messages=[])
 
 
+async def test_a_long_error_body_still_yields_the_services_own_message():
+    # A 400 for a bad tool schema runs well past the message limit; the
+    # message is picked out of the whole body, then cut, not the other
+    # way round (found in review: cut first, it was not JSON any more).
+    fake = FakeAI()
+    body = {
+        "error": {
+            "type": "invalid_request_error",
+            "param": "tools[0].function.parameters",
+            "detail": "x" * 2000,  # before the message, so the first 500 bytes lack it
+            "message": "Invalid schema for function 'play_music'",
+        }
+    }
+    fake.chat_responses = [lambda request: web.json_response(body, status=400)]
+    async with serving(fake) as url:
+        client = RestChatClient(url, KEY)
+        with pytest.raises(RestClientError) as excinfo:
+            await call(client.chat.completions.create, model="m", messages=[])
+    assert str(excinfo.value) == (
+        "HTTP 400 from /chat/completions: Invalid schema for function 'play_music'"
+    )
+
+
+def _counting_opens(client: RestChatClient, monkeypatch) -> list[float | None]:
+    """Record every `opener.open` the client makes (its attempts)."""
+    attempts: list[float | None] = []
+    real_open = client._opener.open
+
+    def counted(request, timeout=None):
+        attempts.append(timeout)
+        return real_open(request, timeout=timeout)
+
+    monkeypatch.setattr(client._opener, "open", counted)
+    return attempts
+
+
+async def test_a_request_that_never_reached_the_service_is_sent_once_more(monkeypatch):
+    fake = FakeAI()
+    async with serving(fake) as url:
+        client = RestChatClient(url, KEY, retries=1)
+        attempts = _counting_opens(client, monkeypatch)
+        real_open = client._opener.open
+
+        def refused_once(request, timeout=None):
+            if len(attempts) == 0:
+                attempts.append(timeout)
+                raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+            return real_open(request, timeout=timeout)
+
+        monkeypatch.setattr(client._opener, "open", refused_once)
+        result = await call(client.chat.completions.create, model="m", messages=[])
+    assert result.choices[0].message.content == "hi there"
+    assert len(attempts) == 2 and len(fake.chat_requests) == 1
+
+
+async def test_a_read_timeout_and_a_status_are_not_sent_again(monkeypatch):
+    # The request may be in flight (a timeout) or was answered (a 401):
+    # sent twice, a turn could run twice. Only the never-sent is retried.
+    fake = FakeAI()
+    fake.delay = 0.5
+    async with serving(fake) as url:
+        slow = RestChatClient(url, KEY, timeout=0.1, retries=1)
+        attempts = _counting_opens(slow, monkeypatch)
+        with pytest.raises(RestClientError, match="timed out"):
+            await call(slow.chat.completions.create, model="m", messages=[])
+        assert len(attempts) == 1
+
+        fake.delay = 0.0
+        wrong = RestChatClient(url, "sk-wrong-key-9876543210", retries=1)
+        attempts = _counting_opens(wrong, monkeypatch)
+        with pytest.raises(RestClientError, match="401"):
+            await call(wrong.chat.completions.create, model="m", messages=[])
+        assert len(attempts) == 1
+
+
+async def test_without_retries_a_refused_connection_is_tried_once(monkeypatch):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    client = RestChatClient(f"http://127.0.0.1:{port}/v1", KEY)
+    assert client.retries == 0
+    attempts = _counting_opens(client, monkeypatch)
+    with pytest.raises(RestClientError):
+        await call(client.chat.completions.create, model="m", messages=[])
+    assert len(attempts) == 1
+    with pytest.raises(ValueError):
+        RestChatClient(OPENAI_BASE_URL, KEY, retries=-1)
+
+
+async def test_a_redirect_is_refused_and_the_key_never_reaches_the_other_host():
+    # urllib's own redirect handler copies the Authorization header onto
+    # the new request; a 302 from the service must not hand the key to
+    # whatever host it names (found in review, two-server setup).
+    elsewhere_saw: list[dict] = []
+    elsewhere = web.Application()
+
+    async def catch_all(request: web.Request) -> web.Response:
+        elsewhere_saw.append(dict(request.headers))
+        return web.json_response(completion("from elsewhere"))
+
+    elsewhere.router.add_route("*", "/{tail:.*}", catch_all)
+    other = TestServer(elsewhere)
+    await other.start_server()
+
+    redirecting = web.Application()
+
+    async def bounce(request: web.Request) -> web.Response:
+        raise web.HTTPFound(location=str(other.make_url("/elsewhere")))
+
+    redirecting.router.add_post("/v1/chat/completions", bounce)
+    first = TestServer(redirecting)
+    await first.start_server()
+    try:
+        client = RestChatClient(str(first.make_url("/v1")), KEY)
+        with pytest.raises(RestClientError, match="HTTP 302 from /chat/completions"):
+            await call(client.chat.completions.create, model="m", messages=[])
+    finally:
+        await first.close()
+        await other.close()
+    assert elsewhere_saw == []
+
+
 def test_repr_never_shows_the_key():
     client = RestChatClient(OPENAI_BASE_URL, KEY)
     assert KEY not in repr(client)
@@ -389,6 +515,47 @@ async def test_extra_transcription_arguments_become_form_fields():
     assert fields["response_format"] == "json"
 
 
+async def test_list_and_bool_transcription_arguments_are_encoded_as_the_sdk_does():
+    # OpenAI reads `timestamp_granularities` as repeated `name[]` parts
+    # and a flag as `true`/`false`; `str(value)` gave it "['word']" and
+    # "True" (found in review; no caller sends either yet).
+    fake = FakeAI()
+    async with serving(fake) as url:
+        client = RestChatClient(url, KEY)
+        await call(
+            client.audio.transcriptions.create,
+            model="w",
+            file=("turn.wav", b"RIFF"),
+            response_format="verbose_json",
+            timestamp_granularities=["word", "segment"],
+            stream=False,
+            temperature=0.2,
+        )
+    parts = fake.stt_requests[0]["parts"]
+    assert parts == [
+        ("model", "w"),
+        ("response_format", "verbose_json"),
+        ("timestamp_granularities[]", "word"),
+        ("timestamp_granularities[]", "segment"),
+        ("stream", "false"),
+        ("temperature", "0.2"),
+    ]
+
+
+async def test_an_unencodable_transcription_argument_is_refused_before_anything_is_sent():
+    fake = FakeAI()
+    async with serving(fake) as url:
+        client = RestChatClient(url, KEY)
+        with pytest.raises(TypeError, match="'include'"):
+            await call(
+                client.audio.transcriptions.create,
+                model="w",
+                file=("turn.wav", b"RIFF"),
+                include={"logprobs": True},
+            )
+    assert fake.stt_requests == []
+
+
 # -- construction -----------------------------------------------------------
 
 
@@ -413,6 +580,55 @@ def test_https_connections_bind_ipv4_and_the_opener_uses_that_handler():
     opener = _build_opener()
     https_handlers = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
     assert https_handlers and all(isinstance(h, _IPv4HTTPSHandler) for h in https_handlers)
+
+
+def test_the_opener_refuses_every_redirect_and_carries_the_connect_deadline():
+    opener = _build_opener(connect_timeout=5.0)
+    redirectors = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+    assert [type(h) for h in redirectors] == [_RefuseRedirects]
+    assert redirectors[0].redirect_request(None, None, 302, "Found", {}, "https://x/") is None
+    https = next(h for h in opener.handlers if isinstance(h, _IPv4HTTPSHandler))
+    connection = https._connection("example.invalid", timeout=20.0, context=_ssl_context())
+    assert connection._connect_timeout == 5.0
+
+
+def test_the_connection_connects_on_its_own_deadline_then_reads_on_the_clients():
+    # `http.client` has one socket timeout for connecting and reading;
+    # the SDK path has 5 s and 20 s. No network: the connect is faked at
+    # the one call the stdlib makes.
+    seen: dict = {}
+
+    class FakeSocket:
+        timeouts: list = []
+
+        def setsockopt(self, *args) -> None:
+            pass
+
+        def settimeout(self, value) -> None:
+            self.timeouts.append(value)
+
+    sock = FakeSocket()
+
+    def create_connection(address, timeout, source_address):
+        seen["connect"] = (address, timeout, source_address)
+        return sock
+
+    context = SimpleNamespace(wrap_socket=lambda s, server_hostname=None: s)
+    connection = _ipv4_https_connection(
+        "example.invalid", timeout=20.0, connect_timeout=5.0, context=context
+    )
+    connection._create_connection = create_connection
+    connection.connect()
+    assert seen["connect"] == (("example.invalid", 443), 5.0, ("0.0.0.0", 0))
+    assert sock.timeouts == [20.0]  # the read deadline, once the connection is up
+    assert connection.timeout == 20.0  # and the connection's own is untouched after
+
+    # Without a connect deadline of its own, the one timeout covers both.
+    FakeSocket.timeouts = []
+    plain = _ipv4_https_connection("example.invalid", timeout=7.0, context=context)
+    plain._create_connection = create_connection
+    plain.connect()
+    assert seen["connect"][1] == 7.0 and FakeSocket.timeouts == []
 
 
 def test_ssl_context_falls_back_to_certifi_when_the_platform_store_is_empty(monkeypatch):

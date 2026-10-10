@@ -75,6 +75,65 @@ class KeysTest {
     }
 
     @Test
+    fun aQuotedValueEndsAtItsClosingQuoteAndACommentAfterItIsDropped() {
+        // Found in review: `KEY="v" # c` kept its quotes, since only a
+        // value whose last character was the quote lost them, and every
+        // call then failed with a 401.
+        val parsed = Keys.parseEnvText(
+            """
+            OPENAI_API_KEY="sk-one" # openai
+            GROQ_API_KEY='gsk-two' # groq
+            YOUTUBE_API_KEY="AIza # not a comment"
+            TWILIO_API_SECRET="with \"escaped\" quotes" # kept verbatim
+            TWILIO_FROM_NUMBER="+1555"trailing
+            TWILIO_TEST_NUMBER="never closed
+            """.trimIndent(),
+        )
+        assertEquals("sk-one", parsed["OPENAI_API_KEY"])
+        assertEquals("gsk-two", parsed["GROQ_API_KEY"])
+        assertEquals("AIza # not a comment", parsed["YOUTUBE_API_KEY"])
+        assertEquals("with \\\"escaped\\\" quotes", parsed["TWILIO_API_SECRET"])
+        assertEquals("+1555", parsed["TWILIO_FROM_NUMBER"])
+        assertEquals("\"never closed", parsed["TWILIO_TEST_NUMBER"])
+    }
+
+    @Test
+    fun aJsonCredentialEndsWhereItsBracesBalanceAndACommentAfterItIsDropped() {
+        val json = "{\"type\": \"service_account\", \"note\": \"a # inside\"}"
+        val oneLine = Keys.parseEnvText("GOOGLE_APPLICATION_CREDENTIALS_JSON=$json # gcp\nGROQ_API_KEY=gsk")
+        assertEquals(json, oneLine["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+        assertEquals("gsk", oneLine["GROQ_API_KEY"])
+
+        val multi = "{\n  \"type\": \"service_account\"\n}"
+        val multiLine = Keys.parseEnvText("GOOGLE_APPLICATION_CREDENTIALS_JSON=$multi # gcp\nGROQ_API_KEY=gsk")
+        assertEquals(multi, multiLine["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+        assertEquals("gsk", multiLine["GROQ_API_KEY"])
+
+        // Quoted JSON, either quote: the object's own quotes are content.
+        val single = Keys.parseEnvText("GOOGLE_APPLICATION_CREDENTIALS_JSON='$json' # gcp")
+        assertEquals(json, single["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+        val double = Keys.parseEnvText("GOOGLE_APPLICATION_CREDENTIALS_JSON=\"$json\" # gcp")
+        assertEquals(json, double["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+    }
+
+    @Test
+    fun aCredentialsShapeIsBalancedBracesAndItsClientEmailNeverTheKey() {
+        val json = """
+            {
+              "type": "service_account",
+              "private_key": "-----BEGIN PRIVATE KEY-----\nMIIE{\n-----END PRIVATE KEY-----\n",
+              "client_email": "x@saathi.iam.gserviceaccount.com"
+            }
+        """.trimIndent()
+        assertEquals(CredentialShape(true, "x@saathi.iam.gserviceaccount.com"), Keys.credentialShape(json))
+        assertEquals(CredentialShape(true, null), Keys.credentialShape("{\"type\": \"service_account\"}"))
+        assertEquals(CredentialShape(false, "x@y"), Keys.credentialShape("{\"client_email\": \"x@y\""))
+        assertEquals(CredentialShape(false, null), Keys.credentialShape("{\"a\": 1} trailing"))
+        assertEquals(CredentialShape(false, null), Keys.credentialShape("sk-not-json"))
+        assertEquals(CredentialShape(false, null), Keys.credentialShape(""))
+    }
+
+    @Test
     fun aCredentialThatNeverClosesTakesTheRestAndIsStillOneValue() {
         val parsed = Keys.parseEnvText("GOOGLE_APPLICATION_CREDENTIALS_JSON={\n  \"type\": \"x\"\nGROQ_API_KEY=lost")
         assertEquals("{\n  \"type\": \"x\"\nGROQ_API_KEY=lost", parsed["GOOGLE_APPLICATION_CREDENTIALS_JSON"])

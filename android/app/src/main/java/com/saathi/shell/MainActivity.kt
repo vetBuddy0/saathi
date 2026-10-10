@@ -425,6 +425,10 @@ class MainActivity : AppCompatActivity() {
             return true
         }
 
+        /** Every request the page makes, sub-resources included: no cleartext off the home network (`CleartextGuard`). */
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+            CleartextGuard.intercept(request)
+
         override fun onPageFinished(view: WebView, url: String) {
             if (!faceFailed) faceBackoff.reset()
         }

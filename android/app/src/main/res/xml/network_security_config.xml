@@ -10,14 +10,20 @@
   base-config with a hand-kept domain list.
 
   So the base config permits cleartext, and the private-range rule is
-  enforced in code instead, at the one gate an engine address passes
-  through: EngineAddress.normalise() refuses to store anything that is not
-  RFC 1918, link-local, loopback or a .local name, and the shell loads no
-  cleartext URL it did not get from there. What the config *can* say is
-  which public hosts never get cleartext: the watch page's own hosts are
-  denied it here (found in review: the base config alone allowed an
-  http:// youtube.com navigation, and the pane's host rule ignored the
-  scheme), and WebViewYouTubePane refuses a non-https main frame on top.
+  enforced in code instead, at three points: EngineAddress.normalise()
+  refuses to store an engine address that is not RFC 1918, link-local,
+  loopback or a .local name, and the shell loads no cleartext URL it did
+  not get from there; CleartextGuard (both WebViewClients'
+  shouldInterceptRequest) answers any http:// sub-resource, frame or
+  script a page asks for from a host off those ranges with an empty 403,
+  since the main-frame rules never see those requests; and the setup
+  dialog's "Test" follows no redirect, so a LAN address answering 302 to
+  a public host is "not an answer", not a fetch. What the config *can*
+  say is which public hosts never get cleartext: the watch page's own
+  hosts are denied it here (found in review: the base config alone
+  allowed an http:// youtube.com navigation, and the pane's host rule
+  ignored the scheme), and WebViewYouTubePane refuses a non-https main
+  frame on top.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">

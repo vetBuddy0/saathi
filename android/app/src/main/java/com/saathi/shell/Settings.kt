@@ -240,17 +240,23 @@ class Keys internal constructor(
 
         /**
          * `KEY=VALUE` lines, as in a `.env` file: a leading `export ` is
-         * dropped, a value in matching single or double quotes loses them
-         * (and is otherwise kept verbatim -- no escape processing), an
-         * unquoted value ends at an inline ` #` comment, blank lines and
-         * `#` lines are skipped, and a line that is not `NAME=...` is
-         * ignored. The Google credential may span lines: when the value
-         * after `GOOGLE_APPLICATION_CREDENTIALS_JSON=` opens a `{` that
-         * the line does not close, the following lines are taken until
-         * the braces balance (outside JSON strings), so a service-account
-         * file pasted as-is after the `=` is one value. Every name found
-         * is returned, known to the engine or not -- [known] and [putAll]
-         * decide what is kept. Later lines win over earlier ones.
+         * dropped, a value that opens with a single or double quote ends
+         * at the first unescaped matching quote (dotenv's rule) and loses
+         * both -- what is between them is kept verbatim, no escape
+         * processing, and what follows the closing quote (an inline
+         * comment) is dropped; an unquoted value ends at an inline ` #`
+         * comment, blank lines and `#` lines are skipped, and a line that
+         * is not `NAME=...` is ignored. The Google credential may span
+         * lines: when the value after `GOOGLE_APPLICATION_CREDENTIALS_JSON=`
+         * opens a `{` that the line does not close, the following lines
+         * are taken until the braces balance (outside JSON strings), so a
+         * service-account file pasted as-is after the `=` is one value; a
+         * JSON value ends where its braces balance, quoted or not, so a
+         * comment after it is not part of it (found in review: a quoted
+         * key followed by a comment kept its quotes, and every call then
+         * failed with a 401). Every name found is returned, known to the
+         * engine or not -- [known] and [putAll] decide what is kept.
+         * Later lines win over earlier ones.
          */
         fun parseEnvText(text: String): Map<String, String> {
             val result = LinkedHashMap<String, String>()
@@ -281,17 +287,28 @@ class Keys internal constructor(
 
         /**
          * False only while [value] (after an opening quote, if any) starts
-         * a JSON object whose braces have not balanced yet. Braces inside
-         * JSON strings do not count; a backslash escapes the next character.
+         * a JSON object whose braces have not balanced yet.
          */
         private fun jsonClosed(value: String): Boolean {
-            var text = value.trim()
-            if (text.startsWith("\"") || text.startsWith("'")) text = text.substring(1)
-            if (!text.startsWith("{")) return true
+            val text = value.trim()
+            val from = if (text.startsWith("\"") || text.startsWith("'")) 1 else 0
+            if (from >= text.length || text[from] != '{') return true
+            return jsonEnd(text, from) > 0
+        }
+
+        /**
+         * The index just past the `}` that balances the `{` at [from] in
+         * [text], or -1 when [from] is not a `{` or the braces never
+         * balance. Braces inside JSON strings do not count; a backslash
+         * escapes the next character.
+         */
+        private fun jsonEnd(text: String, from: Int): Int {
+            if (from >= text.length || text[from] != '{') return -1
             var depth = 0
             var inString = false
             var escaped = false
-            for (ch in text) {
+            for (i in from until text.length) {
+                val ch = text[i]
                 if (inString) {
                     when {
                         escaped -> escaped = false
@@ -305,21 +322,79 @@ class Keys internal constructor(
                     '{' -> depth += 1
                     '}' -> {
                         depth -= 1
-                        if (depth == 0) return true
+                        if (depth == 0) return i + 1
                     }
                 }
             }
-            return false
+            return -1
+        }
+
+        /**
+         * The index of the quote that closes the one at index 0 of
+         * [value], or -1 when none does: the first unescaped matching
+         * quote, except that a JSON object right after the opening quote
+         * is taken whole first (its own `"` are content) and the closing
+         * quote is looked for after it.
+         */
+        private fun closingQuote(value: String): Int {
+            val quote = value[0]
+            if (value.length > 1 && value[1] == '{') {
+                val end = jsonEnd(value, 1)
+                if (end > 0) {
+                    var i = end
+                    while (i < value.length && value[i].isWhitespace()) i += 1
+                    return if (i < value.length && value[i] == quote) i else -1
+                }
+            }
+            var i = 1
+            while (i < value.length) {
+                when (value[i]) {
+                    '\\' -> i += 1
+                    quote -> return i
+                }
+                i += 1
+            }
+            return -1
         }
 
         private fun unquote(raw: String): String {
             val value = raw.trim()
-            if (value.length >= 2 && (value[0] == '"' || value[0] == '\'') && value[value.length - 1] == value[0]) {
-                return value.substring(1, value.length - 1)
+            if (value.isEmpty()) return value
+            if (value[0] == '"' || value[0] == '\'') {
+                // Quoted: up to the closing quote, whatever follows it
+                // dropped; with no closing quote, kept as it is.
+                val close = closingQuote(value)
+                return if (close > 0) value.substring(1, close) else value
             }
-            if (value.startsWith("{")) return value // JSON: a `#` inside it is content
+            if (value[0] == '{') {
+                // JSON: a `#` inside it is content; a comment after its
+                // braces balance is not.
+                val end = jsonEnd(value, 0)
+                return if (end > 0) value.substring(0, end) else value
+            }
             val comment = value.indexOf(" #")
             return if (comment >= 0) value.substring(0, comment).trim() else value
         }
+
+        private val CLIENT_EMAIL = Regex("\"client_email\"\\s*:\\s*\"([^\"]+)\"")
+
+        /**
+         * What a pasted Google credential looks like, for a field that
+         * shows dots (`SetupDialog.kt`): whether it is one JSON object
+         * whose braces balance with nothing after it, and whose service
+         * account it names (`client_email`), so a missed brace or the
+         * wrong file is caught without the private key on screen beside
+         * it. A glance, not a parse: the engine parses it for real
+         * (`saathi/android.py`) and says so in its notes.
+         */
+        fun credentialShape(text: String): CredentialShape {
+            val trimmed = text.trim()
+            val balanced = trimmed.startsWith("{") && jsonEnd(trimmed, 0) == trimmed.length
+            val email = CLIENT_EMAIL.find(trimmed)?.groupValues?.get(1)
+            return CredentialShape(balanced, email)
+        }
     }
 }
+
+/** [Keys.credentialShape]'s answer: one balanced JSON object or not, and the `client_email` in it, if any. */
+data class CredentialShape(val balanced: Boolean, val clientEmail: String?)

@@ -128,7 +128,10 @@ def _propose_questions(client: Any, episodes: list[dict[str, Any]]) -> list[str]
         response_format={"type": "json_object"},
     )
     try:
-        parsed = json.loads(completion.choices[0].message.content)
+        # `content` is None for a message with no text (the SDK's
+        # Optional[str], and rest_client.py's); `json.loads(None)` is a
+        # TypeError the except below does not name, so it is read as "".
+        parsed = json.loads(completion.choices[0].message.content or "")
         questions = parsed.get("questions", [])
     except (json.JSONDecodeError, AttributeError):
         # A malformed response is a reason to reflect on nothing this
@@ -167,7 +170,7 @@ def _propose_insights(
         response_format={"type": "json_object"},
     )
     try:
-        parsed = json.loads(completion.choices[0].message.content)
+        parsed = json.loads(completion.choices[0].message.content or "")
         insights = parsed.get("insights", [])
     except (json.JSONDecodeError, AttributeError):
         return []

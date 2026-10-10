@@ -25,7 +25,10 @@
     <string name="setup_key_clear">Clear</string>
     <string name="setup_key_hint">Type or paste the value</string>
     <string name="setup_key_json_hint">Paste the service-account JSON file</string>
-    <string name="setup_keys_filled">Filled from the clipboard: %1$s</string>
+    <string name="setup_key_json_ok">A JSON object for %1$s; braces balanced.</string>
+    <string name="setup_key_json_no_email">no client_email</string>
+    <string name="setup_key_json_unbalanced">Not one complete JSON object yet: check the braces.</string>
+    <string name="setup_keys_filled">Filled from the clipboard: %1$s. The clipboard has been emptied.</string>
     <string name="setup_keys_clipboard_empty">The clipboard holds no text. Copy the .env file first.</string>
     <string name="setup_keys_none_found">No KEY=VALUE lines the engine reads were found on the clipboard.</string>
     <string name="setup_keys_stored">Stored: %1$s</string>

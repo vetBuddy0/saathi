@@ -416,6 +416,28 @@ async def test_a_stalled_request_hits_the_deadline_and_degrades(credentials_pres
     assert available is False and "timed out" in reason
 
 
+async def test_a_long_error_body_still_yields_googles_own_message(credentials_present):
+    # Google's 400s carry `details` that run past the reason's limit;
+    # the message is picked out of the whole body, then cut (found in
+    # review: cut first, the body was not JSON and the message was lost).
+    fake = FakeTextToSpeech()
+    body = {
+        "error": {
+            "code": 400,
+            "details": [{"@type": "type.googleapis.com/google.rpc.BadRequest", "x": "y" * 2000}],
+            "message": "Voice 'xx-XX-Nope' does not exist",
+            "status": "INVALID_ARGUMENT",
+        }
+    }
+    fake.respond = lambda request: web.json_response(body, status=400)
+    async with serving(fake) as url:
+        backend, _ = rest_backend(GoogleRestChirp3HDBackend, url)
+        wav_bytes = await call(lambda: next(backend.synthesize_stream("english", ["Hi."])))
+    assert frames(wav_bytes) == 2400
+    reason = backend.available()[1]
+    assert "HTTP 400 from text:synthesize: INVALID_ARGUMENT: Voice 'xx-XX-Nope'" in reason
+
+
 async def test_a_response_without_audio_content_degrades(credentials_present):
     fake = FakeTextToSpeech()
     fake.respond = lambda request: web.json_response({"name": "operations/1"})

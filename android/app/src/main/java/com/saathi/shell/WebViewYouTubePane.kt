@@ -55,7 +55,8 @@
  * ad, a channel's website and a cleartext YouTube page are all refused
  * (the first draft checked the host and not the scheme, found in
  * review; `network_security_config.xml` denies the YouTube hosts
- * cleartext as well, for the sub-resources this rule never sees).
+ * cleartext as well, for the sub-resources this rule never sees, and
+ * `CleartextGuard` refuses any other host's cleartext sub-resource).
  *
  * Layout: the engine's `layout: fullscreen` gives the pane the width
  * and puts the face in a corner -- a small cell at the bottom-left, 22%
@@ -335,6 +336,10 @@ class WebViewYouTubePane(
             Log.i(TAG, "not leaving the watch page for $url")
             return true
         }
+
+        /** Every request the page makes, sub-resources included: no cleartext off the home network (`CleartextGuard`). */
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+            CleartextGuard.intercept(request)
 
         override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
             wall(url)

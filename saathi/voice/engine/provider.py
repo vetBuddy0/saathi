@@ -65,6 +65,16 @@ PROVIDERS = ("openai", "groq")
 # when it imports, else REST.
 CLIENT_KINDS = ("sdk", "rest")
 
+# The deadline and retry policy, one set of numbers for both clients:
+# 5 s to connect, 20 s on each read, one more attempt when the request
+# never reached the service. They are the SDK path's since 2026-09-25;
+# the REST client is built with the same ones (2026-10-08, found in
+# review: it had a 30 s single attempt of its own, so a stalled request
+# on the phone held the turn ten seconds longer than on the laptop).
+CONNECT_TIMEOUT_SECONDS = 5.0
+REQUEST_TIMEOUT_SECONDS = 20.0
+MAX_RETRIES = 1
+
 
 class ProviderUnavailable(RuntimeError):
     """No usable provider: the chosen one's API key is missing."""
@@ -185,7 +195,7 @@ def build_client(name: str, key: str, kind: str | None = None) -> Any:
     skips the SDK; "sdk" refuses to fall back."""
     if kind == "rest":
         logger.info("AI client: REST (%s), by SAATHI_AI_CLIENT", _base_url(name))
-        return RestChatClient(_base_url(name), key)
+        return _rest_client(name, key)
     try:
         client = _sdk_client(name, key)
     except ImportError as exc:
@@ -196,9 +206,20 @@ def build_client(name: str, key: str, kind: str | None = None) -> Any:
         logger.info(
             "AI client: REST (%s); the %s SDK does not import: %s", _base_url(name), name, exc
         )
-        return RestChatClient(_base_url(name), key)
+        return _rest_client(name, key)
     logger.info("AI client: %s SDK", name)
     return client
+
+
+def _rest_client(name: str, key: str) -> RestChatClient:
+    """The stdlib client, with the SDK client's deadline and retry."""
+    return RestChatClient(
+        _base_url(name),
+        key,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        retries=MAX_RETRIES,
+    )
 
 
 def _sdk_client(name: str, key: str) -> Any:
@@ -213,13 +234,13 @@ def _sdk_client(name: str, key: str) -> Any:
     import httpx
 
     http_client = httpx.Client(
-        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=1),
-        timeout=httpx.Timeout(20.0, connect=5.0),
+        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=MAX_RETRIES),
+        timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
     )
     if name == "openai":
         from openai import OpenAI
 
-        return OpenAI(api_key=key, http_client=http_client, max_retries=1)
+        return OpenAI(api_key=key, http_client=http_client, max_retries=MAX_RETRIES)
     from groq import Groq
 
-    return Groq(api_key=key, http_client=http_client, max_retries=1)
+    return Groq(api_key=key, http_client=http_client, max_retries=MAX_RETRIES)
