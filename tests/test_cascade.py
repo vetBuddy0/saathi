@@ -13,10 +13,12 @@ matters and isn't debt. `FakeTTSBackend` below stands in for whatever
 real backend is selected.
 """
 
+import io
 import json
 import tempfile
 import threading
 import time
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
@@ -198,6 +200,50 @@ def test_end_turn_uploads_flac_not_wav(no_real_playback):
     filename, audio_bytes = client.audio.transcriptions.calls[0]["file"]
     assert filename.endswith(".flac")
     assert audio_bytes[:4] == b"fLaC"
+
+
+def test_encode_for_stt_is_flac_with_soundfile_and_wav_without(monkeypatch):
+    # Both legs of the chooser, on the same samples: the filename and
+    # the container must agree, since the endpoint reads the container
+    # off the extension.
+    import numpy as np
+
+    from saathi.voice.engine.cascade import _encode_for_stt
+
+    pcm = (np.sin(np.linspace(0, 40 * np.pi, 16000)) * 10000).astype("<i2").tobytes()
+
+    filename, data = _encode_for_stt(pcm, sample_rate=16000)
+    assert (filename, data[:4]) == ("turn.flac", b"fLaC")
+
+    monkeypatch.setattr(cascade_module, "sf", None)
+    filename, data = _encode_for_stt(pcm, sample_rate=16000)
+    assert filename == "turn.wav"
+    with wave.open(io.BytesIO(data), "rb") as wav_file:
+        assert wav_file.getnchannels() == 1
+        assert wav_file.getsampwidth() == 2
+        assert wav_file.getframerate() == 16000
+        assert wav_file.readframes(wav_file.getnframes()) == pcm
+
+
+def test_end_turn_uploads_wav_when_soundfile_is_absent(no_real_playback, monkeypatch):
+    # Android (Chaquopy) has no libsndfile wheel: cascade.py's guarded
+    # import leaves `sf` as None there, which is the state set here.
+    # The upload is then a stdlib-`wave` WAV under the name that tells
+    # the endpoint its container -- same samples, different box.
+    monkeypatch.setattr(cascade_module, "sf", None)
+    client = FakeClient()
+    session, _backend = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    session.end_turn()
+
+    filename, audio_bytes = client.audio.transcriptions.calls[0]["file"]
+    assert filename == "turn.wav"
+    assert audio_bytes[:4] == b"RIFF"
+    assert audio_bytes[8:12] == b"WAVE"
+    with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
+        assert wav_file.getframerate() == 16000
+        assert wav_file.readframes(wav_file.getnframes()) == b"\x00\x00" * 100
 
 
 def test_end_turn_transcribes_and_replies(no_real_playback):
@@ -1390,3 +1436,100 @@ def test_interrupt_stops_the_seams_handle_too():
     session.interrupt()
     say_thread.join(timeout=1.0)
     assert not say_thread.is_alive() and stopped.is_set()
+
+
+# -- the backend fallback without Piper (2026-10-08) -------------------------
+#
+# The engine runs on a phone too, where piper-tts has no wheel and
+# cli.py leaves "piper" out of the dict. The fallback must then be the
+# first backend that can speak, never a KeyError on a key that isn't
+# there -- and at boot, before the phone attaches, when nothing can
+# speak, it must still hand back a backend rather than raise.
+
+
+def _fake(backend_id: str, available: bool = True) -> TTSBackend:
+    backend: TTSBackend = FakeTTSBackend() if available else UnavailableFakeBackend()
+    backend.id = backend_id
+    return backend
+
+
+def test_current_backend_falls_back_to_the_first_available_backend_when_piper_is_absent(
+    no_real_playback,
+):
+    phone = _fake("android-tts")
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=FakeClient(),
+        backends={
+            "kokoro": _fake("kokoro", available=False),
+            "android-tts": phone,
+            "google-chirp3-hd": _fake("google-chirp3-hd", available=False),
+        },
+        backend_preference=lambda: "google-chirp3-hd",
+    )
+    assert session._current_backend() is phone
+    session.say("Good morning. Did you sleep well?")
+    assert phone.synthesized == ["Good morning.", "Did you sleep well?"]
+
+
+def test_current_backend_still_prefers_piper_when_it_is_there_and_usable(no_real_playback):
+    # Linux in remote mode: the phone's voice is first in the dict, but
+    # Piper, installed and usable, is still the last resort before it.
+    phone, piper = _fake("android-tts"), _fake("piper")
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=FakeClient(),
+        backends={"android-tts": phone, "piper": piper},
+        backend_preference=lambda: "some-backend-that-was-removed",
+    )
+    assert session._current_backend() is piper
+
+
+def test_current_backend_skips_an_unusable_piper(no_real_playback):
+    phone = _fake("android-tts")
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=FakeClient(),
+        backends={"piper": _fake("piper", available=False), "android-tts": phone},
+        backend_preference=lambda: "piper",
+    )
+    assert session._current_backend() is phone
+
+
+def test_current_backend_hands_back_the_first_entry_when_nothing_can_speak(no_real_playback):
+    # Boot on a phone: no client attached yet, no credentials, no Piper.
+    # Construction preloads the current backend, so this must not raise;
+    # the first entry (cli.py puts the phone's voice there) is returned.
+    not_yet = _fake("android-tts", available=False)
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=FakeClient(),
+        backends={"android-tts": not_yet, "google-chirp3-hd": _fake("google-chirp3-hd", False)},
+        backend_preference=lambda: "google-chirp3-hd",
+    )
+    assert session._current_backend() is not_yet
+    # With Piper in the dict, unusable, it is still the one handed back.
+    piper = _fake("piper", available=False)
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=FakeClient(),
+        backends={"android-tts": not_yet, "piper": piper},
+        backend_preference=lambda: "android-tts",
+    )
+    assert session._current_backend() is piper
+
+
+def test_no_backends_at_all_is_a_configuration_error_not_a_key_error(no_real_playback):
+    with pytest.raises(RuntimeError, match="no TTS backends configured"):
+        CascadeSession(
+            "fake-sink",
+            speech_gate=_hears_speech,
+            client=FakeClient(),
+            backends={},
+            backend_preference=lambda: "piper",
+        )

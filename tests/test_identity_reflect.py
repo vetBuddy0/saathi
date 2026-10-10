@@ -175,3 +175,39 @@ def test_active_rules_are_not_listed_as_wrong(store):
     insights_prompt = client.calls[1]["messages"][0]["content"]
     assert "WRONG" not in insights_prompt
     assert "tablets" not in insights_prompt
+
+
+# -- the client reflect() builds for itself (2026-10-08) -------------------
+
+
+def test_default_client_is_groq_sdk_on_a_machine_that_has_it(monkeypatch):
+    from saathi.identity.reflect import _default_client
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.delenv("SAATHI_AI_CLIENT", raising=False)
+    assert type(_default_client()).__name__ == "Groq"
+
+
+def test_default_client_is_rest_without_the_sdk_or_when_asked(monkeypatch):
+    import sys
+
+    from saathi.identity.reflect import _default_client
+    from saathi.voice.engine.rest_client import GROQ_BASE_URL, RestChatClient
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("SAATHI_AI_CLIENT", "rest")
+    client = _default_client()
+    assert isinstance(client, RestChatClient) and client.base_url == GROQ_BASE_URL
+
+    monkeypatch.delenv("SAATHI_AI_CLIENT")
+    monkeypatch.setitem(sys.modules, "groq", None)  # the phone
+    client = _default_client()
+    assert isinstance(client, RestChatClient) and client.base_url == GROQ_BASE_URL
+
+
+def test_default_client_needs_the_groq_key(monkeypatch):
+    from saathi.identity.reflect import _default_client
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        _default_client()

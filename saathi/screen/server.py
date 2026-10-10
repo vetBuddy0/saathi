@@ -48,10 +48,21 @@ sends in between; server -> client text `{"type": "play", "id": ...,
 complete WAV (one TTS sentence), answered by text `{"type": "played",
 "id": ...}` once it has played out; and server -> client text
 `{"type": "stop"}`, which the client answers with `played` for whatever
-it cut short. While a client is attached, a press starts no `parec`
-capture and TTS goes to the client, not the local sink; with none, the
-device behaves exactly as it did before this path existed. The route is
-only registered when `build_app` is given a `remote_audio`. Both
+it cut short. Since the engine also runs inside the phone (the same
+day, `SAATHI_AUDIO=remote` in cli.py): server -> client text `{"type":
+"synthesize", "id": ..., "text": ..., "language": ...}` asks the client
+to render one sentence with the phone's own text-to-speech, answered
+by text `{"type": "synthesized", "id": ...}` followed at once by one
+binary frame holding the WAV (nothing may come between the two: the
+text frame is what tells the server the next binary frame is not
+microphone audio), or by `{"type": "synthesized", "id": ..., "error":
+...}` with no binary frame when it could not. This handler routes it
+to `RemoteAudio.on_synthesized`; what it means for the turn is
+`voice/tts/remote_backend.py`'s. While a client is attached, a press
+starts no `parec` capture and TTS goes to the client, not the local
+sink; with none, the device behaves exactly as it did before this path
+existed. The route is only registered when `build_app` is given a
+`remote_audio`. Both
 sockets are opened with a heartbeat (`_HEARTBEAT_SECONDS`), so a client
 that dies without a close frame is gone within seconds, not whenever
 TCP gives up: on `/audio` that is what hands the mic and the speaker
@@ -722,6 +733,13 @@ def build_app(
                     play_id = payload.get("id")
                     if isinstance(play_id, str):
                         remote_audio.on_played(play_id)
+                elif kind == "synthesized":
+                    request_id = payload.get("id")
+                    error = payload.get("error")
+                    if isinstance(request_id, str):
+                        remote_audio.on_synthesized(
+                            request_id, None if error is None else str(error)
+                        )
                 else:
                     logger.warning("dropped unknown audio message: %r", payload)
         finally:

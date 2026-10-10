@@ -213,7 +213,7 @@ class _GoogleBackend(TTSBackend):
         self._failure_reason = ""
 
     def available(self) -> tuple[bool, str]:
-        importable, reason = _client_importable()
+        importable, reason = self._importable()
         if not importable:
             return False, reason
         has_credentials, reason = _credentials_path()
@@ -227,6 +227,14 @@ class _GoogleBackend(TTSBackend):
                     f"retrying in {remaining:.0f}s"
                 )
         return True, ""
+
+    def _importable(self) -> tuple[bool, str]:
+        """The library probe `available()` gates on first. A method, not
+        the module function inline, so `google_rest.py` -- the same two
+        backends over plain HTTPS, for the phone, where this client
+        library has no wheel -- can swap in its own probe and inherit
+        the credentials and cooldown rules below unchanged."""
+        return _client_importable()
 
     def _guarded(self, sentence: str, render: Callable[[], bytes]) -> bytes:
         """Run one sentence's synthesis; on any failure, log it, start the

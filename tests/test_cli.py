@@ -13,6 +13,8 @@ outside are faked at the seams cli.py imports them from.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from saathi import cli
@@ -41,6 +43,7 @@ def seams(monkeypatch, tmp_path):
 
     monkeypatch.setenv("SAATHI_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.delenv("SAATHI_AUDIO", raising=False)  # local mode, whatever the shell has
     found: dict[str, object] = {"input": True, "output": True}
 
     class FakeManager:
@@ -368,3 +371,125 @@ def test_without_an_echo_cancelled_pair_calling_is_unavailable(calling_seams):
     assert runtime.calling is None and runtime.session is None
     reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
     assert reply["status"] == "unavailable" and "echo-cancel" in reply["note"]
+
+
+# -- remote audio: the engine inside the phone (2026-10-08) -------------------
+
+
+@pytest.fixture
+def remote_seams(seams, monkeypatch):
+    """`SAATHI_AUDIO=remote`, with every local probe turned into an
+    assertion: nothing here may be constructed or called."""
+    from saathi.audio import aec, devices
+
+    def never(*args, **kwargs):
+        raise AssertionError("remote mode must not touch local audio devices or echo-cancel")
+
+    monkeypatch.setattr(devices, "DeviceManager", never)
+    monkeypatch.setattr(devices, "PulseAudioBackend", never)
+    monkeypatch.setattr(aec, "ensure_echo_cancellation", never)
+    monkeypatch.setenv("SAATHI_AUDIO", "remote")
+    for name in TWILIO_ENV:
+        monkeypatch.delenv(name, raising=False)
+    return seams
+
+
+def test_remote_mode_builds_no_device_manager_and_listens_only_through_remote_audio(
+    remote_seams,
+):
+    runtime = cli.build_runtime()
+    session = runtime.session
+    assert session is FakeCascadeSession.instances[0]
+    assert session.sink_id == cli.REMOTE_SINK_ID == "remote"
+    assert session.kwargs["player"] == runtime.remote_audio.player
+    assert runtime.capture_source_id is None  # the /audio client is the microphone
+    assert any("SAATHI_AUDIO=remote" in note for note in runtime.notes)
+    # Everything that is not audio is wired exactly as in local mode.
+    assert session.kwargs["identity_store"] is runtime.store
+    assert session.kwargs["tool_schemas"] is runtime.tool_schemas
+    assert session.kwargs["backend_preference"]() == "google-chirp3-hd"
+    assert session.kwargs["language_preference"]() is None
+    assert session.intent is runtime.handle_intent
+    names = {tool.name for tool in runtime.registry}
+    assert {"set_language", "correct_memory", "play_music", "call_contact"} == names
+
+
+def test_remote_mode_adds_the_phones_voice_to_the_sessions_backends(remote_seams):
+    from saathi.voice.tts.remote_backend import RemoteTTSBackend
+
+    runtime = cli.build_runtime()
+    backends = runtime.session.kwargs["backends"]
+    phone = backends["android-tts"]
+    assert isinstance(phone, RemoteTTSBackend)
+    assert phone._remote is runtime.remote_audio
+    assert phone.available() == (False, "no phone is attached on /audio")
+    # First in the dict: what cascade.py hands back when nothing is
+    # available yet (boot, before the phone connects) -- see cli.py.
+    assert next(iter(backends)) == "android-tts"
+    # Linux with piper-tts installed: nothing is left out.
+    assert "piper" in backends and "google-chirp3-hd" in backends
+
+
+def test_remote_mode_leaves_piper_out_when_piper_tts_is_not_importable(
+    remote_seams, monkeypatch
+):
+    monkeypatch.setitem(sys.modules, "piper", None)  # `import piper` now raises ImportError
+    runtime = cli.build_runtime()
+    backends = runtime.session.kwargs["backends"]
+    assert "piper" not in backends
+    assert "android-tts" in backends and "google-chirp3-hd" in backends
+
+
+def test_remote_mode_reports_calling_unavailable_without_dialling(remote_seams):
+    runtime = cli.build_runtime()
+    assert runtime.calling is None
+    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
+    assert reply["status"] == "unavailable"
+    assert any(note.startswith("Calling off") for note in runtime.notes)
+
+
+def test_remote_mode_keeps_calling_unavailable_even_with_twilio_and_cloudflared(
+    remote_seams, calling_seams, monkeypatch
+):
+    monkeypatch.setenv("SAATHI_AUDIO", "remote")  # calling_seams re-faked the rest
+    calling_seams["release"].set()
+    runtime = cli.build_runtime()
+    assert runtime.calling is None
+    assert FakeTunnel.instances == []  # no relay was even started
+    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
+    assert reply["status"] == "unavailable" and "echo-cancel" in reply["note"]
+    assert "save_contact" not in {tool.name for tool in runtime.registry}
+
+
+def test_remote_mode_drops_a_sentence_with_no_client_rather_than_paplay(
+    remote_seams, tmp_path, caplog
+):
+    runtime = cli.build_runtime()
+    wav_path = tmp_path / "sentence.wav"
+    wav_path.write_bytes(b"RIFF")
+    handle = runtime.remote_audio.player(cli.REMOTE_SINK_ID, wav_path)
+    assert isinstance(handle, cli._DroppedPlayback) and handle.finished
+    handle.wait()
+    handle.stop()
+    assert "dropping a sentence" in caplog.text
+
+
+def test_remote_mode_hands_the_screen_server_no_capture_source(remote_seams, monkeypatch):
+    captured = {}
+
+    def fake_run(core, host, port, **kwargs):
+        captured.update(core=core, host=host, port=port, **kwargs)
+
+    monkeypatch.setattr("saathi.screen.server.run", fake_run)
+    runtime = cli.build_runtime()
+    monkeypatch.setattr(cli, "build_runtime", lambda: runtime)
+    assert cli.main(["run"]) == 0
+    assert captured["session"] is runtime.session
+    assert captured["capture_source_id"] is None
+    assert captured["remote_audio"] is runtime.remote_audio
+
+
+def test_an_unknown_audio_mode_is_refused_not_guessed(seams, monkeypatch):
+    monkeypatch.setenv("SAATHI_AUDIO", "phone")
+    with pytest.raises(ValueError, match="SAATHI_AUDIO='phone'; expected one of local, remote"):
+        cli.build_runtime()

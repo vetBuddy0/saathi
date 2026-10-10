@@ -1,19 +1,47 @@
-"""The `/audio` seam: a phone or tablet as the microphone and the speaker
-while the engine stays on the Pi or the laptop.
+"""The `/audio` seam: a phone or tablet as the microphone and the speaker,
+whether the engine is on the Pi, on the laptop, or inside the phone.
 
-Exists because the engine is not moving into the APK yet. Speech-to-text,
-the model, TTS, memory and the state machine all stay where they are
-today; the Android shell is a face WebView, a mic and a speaker on the
-same Wi-Fi, speaking the protocol in `screen/server.py`'s docstring.
-That split is the point, not a stopgap: everything the shell knows how
-to do -- hold to talk and stream PCM, play one WAV and say "played",
-stop on "stop" -- is exactly what it would still do if the engine ran
-on the phone itself, so the engine can move later without the shell
-changing. This class is the engine's side of that line. `Capture` and
+Exists so the engine never knows where its microphone and speaker are.
+It began (2026-10-08, morning) as the way to use a phone as a mic and a
+speaker while speech-to-text, the model, TTS, memory and the state
+machine stayed on the Pi or the laptop; the Android shell is a face
+WebView, a mic and a speaker speaking the protocol in
+`screen/server.py`'s docstring. The split was the point, not a stopgap:
+everything the shell knows how to do -- hold to talk and stream PCM,
+play one WAV and say "played", stop on "stop" -- is exactly what it
+still does now that the engine also runs inside the APK (Chaquopy, at
+`127.0.0.1:8765`, `SAATHI_AUDIO=remote` in `cli.py`): the shell connects
+to localhost instead of a Wi-Fi address and nothing else about it
+changes. This class is the engine's side of that line. `Capture` and
 `playback.play` are what it replaces while a client is attached, and
 what it hands back to the moment one isn't: `player()` falls back to
-local `play` when nothing is connected, so `cascade.py` never knows
-which it got.
+`fallback` (local `play` by default) when nothing is connected, so
+`cascade.py` never knows which it got.
+
+The seam also runs backwards since the engine moved onto the phone:
+`synthesize()` asks the attached client to render one sentence with
+the phone's own text-to-speech engine and hands the WAV back
+(`voice/tts/remote_backend.py` is the `TTSBackend` over it). Why ask
+the shell rather than synthesize on the phone from Python: `piper-tts`
+sits on `onnxruntime`, which has no Chaquopy wheel, and the Google
+voices need credentials and a network, so without this the phone had no
+voice of last resort at all. Why over the socket and not through
+Chaquopy's Java bridge from inside the TTS backend: the engine must not
+know it is on a phone -- a backend reaching into Android's
+`TextToSpeech` would have been the voice engine touching the shell,
+the thing the five interfaces exist to stop; through the socket the
+same engine runs unchanged on a laptop with the phone attached over
+Wi-Fi, and the test suite can play the phone. The frames: engine ->
+client text `{"type": "synthesize", "id": ..., "text": ..., "language":
+...}` (`language` is `voice/language.py`'s key, the shell maps it to a
+locale), client -> engine text `{"type": "synthesized", "id": ...}`
+followed at once by one binary frame holding the WAV -- or `{"type":
+"synthesized", "id": ..., "error": "..."}` with nothing after it when
+the phone could not render it. The text frame tags the binary one that
+follows: between a `synthesized` and its WAV the client sends nothing
+else, so a mic frame can never be taken for a sentence. The wait is
+bounded by a timeout, and the client leaving releases it at once,
+exactly as for a play.
 
 What lost: streaming TTS to the client as PCM chunks, the way the mic
 comes in. Rejected for now because one WAV per sentence is what the
@@ -65,6 +93,15 @@ logger = logging.getLogger(__name__)
 # frame; short enough that a dropped client costs one sentence, not a
 # stuck state machine.
 DEFAULT_GRACE_SECONDS = 3.0
+
+# How long `synthesize()` waits for the phone to render one sentence
+# before giving up on it. A phone's text-to-speech engine takes a second
+# or two to start the first time and well under a second per sentence
+# after that; a client that is gone is detached by the server's
+# heartbeat within seconds and releases the wait early, so this bound
+# only ever decides how long a *live but stuck* phone can hold one
+# sentence.
+DEFAULT_SYNTHESIS_TIMEOUT_SECONDS = 10.0
 
 # If a WAV can't be parsed (it always can -- every backend in voice/tts
 # writes through `wave` -- but a seam must not crash on its input),
@@ -118,6 +155,36 @@ class RemotePlayback:
         self._done.set()
 
 
+class RemoteSynthesisError(RuntimeError):
+    """`synthesize()` got no WAV: no client attached, the client left or
+    was replaced mid-request, it answered with an error, or the timeout
+    passed. One class: the backend over this seam treats them all the
+    same way (a short silence, a warning), and `str(exc)` says which."""
+
+
+class _SynthesisRequest:
+    """One sentence asked of the client: its id, and the WAV or the
+    error that answers it. `wait()` is the asking thread's; `complete()`
+    and `fail()` are called by the loop thread."""
+
+    def __init__(self, request_id: str) -> None:
+        self.id = request_id
+        self.wav: bytes | None = None
+        self.error: str | None = None
+        self._done = threading.Event()
+
+    def complete(self, wav: bytes) -> None:
+        self.wav = wav
+        self._done.set()
+
+    def fail(self, error: str) -> None:
+        self.error = error
+        self._done.set()
+
+    def wait(self, timeout: float) -> bool:
+        return self._done.wait(timeout)
+
+
 class RemoteAudio:
     def __init__(
         self,
@@ -134,6 +201,12 @@ class RemoteAudio:
         self._ids = itertools.count(1)
         # The per-client ordered send chain; loop thread only.
         self._send_chain: asyncio.Future | None = None
+        # Sentences asked of the client and not yet answered, by id;
+        # and the one whose WAV is the next binary frame (its
+        # `synthesized` has arrived, the WAV has not).
+        self._synth_requests: dict[str, _SynthesisRequest] = {}
+        self._synth_pending: _SynthesisRequest | None = None
+        self._synth_ids = itertools.count(1)
 
     # -- the client (server side, loop thread) ------------------------------
 
@@ -153,13 +226,17 @@ class RemoteAudio:
             self._loop = loop
             self._send_chain = None
             current = None
+            asked: list[_SynthesisRequest] = []
             if replaced is not None and replaced is not ws:
                 current, self._current = self._current, None
+                asked = self._take_synthesis_requests()
         if replaced is not None and replaced is not ws:
             logger.info("audio client replaced by a new connection")
         if current is not None:
             logger.warning("audio client replaced mid-sentence; releasing %s", current.id)
             current._release()
+        for request in asked:
+            request.fail("audio client replaced before it answered")
         return replaced if replaced is not ws else None
 
     def detach(self, ws: Any) -> None:
@@ -174,9 +251,22 @@ class RemoteAudio:
             self._loop = None
             self._send_chain = None
             current, self._current = self._current, None
+            asked = self._take_synthesis_requests()
         if current is not None:
             logger.warning("audio client left mid-sentence; releasing %s", current.id)
             current._release()
+        for request in asked:
+            request.fail("audio client left before it answered")
+
+    def _take_synthesis_requests(self) -> list[_SynthesisRequest]:
+        """Every unanswered `synthesize()`, cleared; lock held by the
+        caller. Failed outside the lock, by the caller."""
+        asked = list(self._synth_requests.values())
+        self._synth_requests = {}
+        if self._synth_pending is not None:
+            asked.append(self._synth_pending)
+            self._synth_pending = None
+        return asked
 
     @property
     def attached(self) -> bool:
@@ -193,14 +283,84 @@ class RemoteAudio:
         with self._lock:
             self._sink = None
 
-    def feed(self, pcm: bytes) -> None:
-        """One binary frame from the client. Forwarded only between
-        `start_listening()` and `stop_listening()`: the client may send
-        whenever it likes; the server decides what counts as her turn."""
+    def feed(self, data: bytes) -> None:
+        """One binary frame from the client. The frame right after a
+        `synthesized` is that sentence's WAV and goes to whoever asked
+        for it; every other frame is microphone audio, forwarded only
+        between `start_listening()` and `stop_listening()`: the client
+        may send whenever it likes; the server decides what counts as
+        her turn."""
         with self._lock:
+            request, self._synth_pending = self._synth_pending, None
             sink = self._sink
+        if request is not None:
+            request.complete(data)
+            return
         if sink is not None:
-            sink(pcm)
+            sink(data)
+
+    # -- the phone's own voice ------------------------------------------
+
+    def synthesize(
+        self,
+        text: str,
+        language: str,
+        timeout: float = DEFAULT_SYNTHESIS_TIMEOUT_SECONDS,
+    ) -> bytes:
+        """Ask the attached client to render `text` in `language` with
+        the phone's text-to-speech and return the WAV. From the
+        cascade's synthesis thread, like a backend's own synthesis; the
+        reply arrives on the loop thread (`on_synthesized`, then
+        `feed`). Raises `RemoteSynthesisError` -- never returns silence
+        or None -- when there is no client, the client leaves or is
+        replaced first, it answers with an error, or `timeout` passes;
+        the backend over this decides what a lost sentence sounds like."""
+        with self._lock:
+            ws, loop = self._ws, self._loop
+            if ws is None or loop is None or ws.closed:
+                raise RemoteSynthesisError("no audio client is attached")
+            request = _SynthesisRequest(f"tts-{next(self._synth_ids)}")
+            self._synth_requests[request.id] = request
+        frame = json.dumps(
+            {"type": "synthesize", "id": request.id, "text": text, "language": language}
+        )
+        self._enqueue(ws, loop, [frame])
+        if not request.wait(timeout):
+            # Forgotten here; its answer, if it still comes, is eaten
+            # by `on_synthesized`/`feed` rather than heard as mic audio.
+            with self._lock:
+                self._synth_requests.pop(request.id, None)
+            raise RemoteSynthesisError(f"no WAV for {request.id} within {timeout:.1f}s")
+        if request.error is not None:
+            raise RemoteSynthesisError(request.error)
+        assert request.wav is not None
+        return request.wav
+
+    def on_synthesized(self, request_id: str, error: str | None = None) -> None:
+        """The client's answer to `synthesize()`: with `error`, the
+        sentence could not be rendered and no WAV follows; without it,
+        the next binary frame is the WAV. That holds for a stale id too
+        -- a request already given up on (`synthesize()` timed out) --
+        because the WAV still follows and must be eaten here, not heard
+        as microphone audio; nobody waits for it, so it is dropped. A
+        second `synthesized` arriving while the previous one's WAV is
+        still owed fails the previous: the client broke the one rule of
+        this exchange, and a mic frame must not be handed out as a
+        sentence."""
+        with self._lock:
+            request = self._synth_requests.pop(request_id, None)
+            previous = None
+            if error is None:
+                if request is None:
+                    request = _SynthesisRequest(request_id)  # an orphan: eats its WAV
+                previous, self._synth_pending = self._synth_pending, request
+        if error is not None:
+            if request is not None:
+                request.fail(f"the client could not synthesize {request_id}: {error}")
+            return
+        if previous is not None:
+            logger.warning("no WAV followed 'synthesized' for %s; failing it", previous.id)
+            previous.fail("the client sent no WAV after its 'synthesized'")
 
     # -- the speaker -----------------------------------------------------
 

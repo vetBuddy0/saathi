@@ -17,15 +17,29 @@ The option that lost: a full `VoiceSession` per provider. The pipeline
 duplicating it to swap two HTTP endpoints would be two places for
 every future fix to land.
 
+Since 2026-10-08 the client under the provider is a second, separate
+choice: the vendor SDK (`openai`/`groq`) where it imports, else
+`rest_client.py`'s stdlib client -- the phone (Chaquopy) has no wheel
+for the SDKs' `pydantic-core`, and the engine runs there unchanged
+otherwise. `SAATHI_AI_CLIENT=rest` forces the REST client on a machine
+that has the SDK, so the phone's path can be exercised and compared on
+a laptop; `sdk` forces the SDK and fails loudly if it is missing. Unset
+is "SDK if you can", which is what every Linux install had before.
+
 Revisiting this for cost is in TODO.md. Nothing here decides price.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from saathi.voice.engine.rest_client import GROQ_BASE_URL, OPENAI_BASE_URL, RestChatClient
+
+logger = logging.getLogger(__name__)
 
 # Groq: the models item D's bake-off chose (see cascade.py's comments).
 GROQ_LLM_MODEL = "qwen/qwen3.8-27b"
@@ -47,6 +61,9 @@ OPENAI_STT_MODEL = "gpt-transcribe"
 _REASONING_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
 
 PROVIDERS = ("openai", "groq")
+# SAATHI_AI_CLIENT: how the provider is reached. Unset means the SDK
+# when it imports, else REST.
+CLIENT_KINDS = ("sdk", "rest")
 
 
 class ProviderUnavailable(RuntimeError):
@@ -98,8 +115,26 @@ def choose_provider_name(environ: Mapping[str, str]) -> str | None:
     return None
 
 
+def choose_client_kind(environ: Mapping[str, str]) -> str | None:
+    """`SAATHI_AI_CLIENT`: "rest" or "sdk" when set, None when unset
+    (the SDK if importable, else REST). Anything else is refused, not
+    guessed, same as an unknown provider name."""
+    explicit = environ.get("SAATHI_AI_CLIENT", "").strip().lower()
+    if not explicit:
+        return None
+    if explicit not in CLIENT_KINDS:
+        raise ProviderUnavailable(
+            f"SAATHI_AI_CLIENT={explicit!r}; expected one of {', '.join(CLIENT_KINDS)}"
+        )
+    return explicit
+
+
 def _key_name(name: str) -> str:
     return "OPENAI_API_KEY" if name == "openai" else "GROQ_API_KEY"
+
+
+def _base_url(name: str) -> str:
+    return OPENAI_BASE_URL if name == "openai" else GROQ_BASE_URL
 
 
 def missing_key(environ: Mapping[str, str] | None = None) -> str | None:
@@ -112,6 +147,10 @@ def missing_key(environ: Mapping[str, str] | None = None) -> str | None:
         return str(exc)
     if name is None:
         return "OPENAI_API_KEY or GROQ_API_KEY"
+    try:
+        choose_client_kind(environ)
+    except ProviderUnavailable as exc:
+        return str(exc)
     key = _key_name(name)
     return None if environ.get(key) else key
 
@@ -135,24 +174,52 @@ def provider_from_env(
         key = environ.get(_key_name(name))
         if not key:
             raise ProviderUnavailable(f"{_key_name(name)} is not set in the environment")
-        # IPv4 only. Found live 2026-09-25: this network advertises IPv6
-        # addresses for api.openai.com but can't route IPv6, so every new
-        # connection burned seconds on dead addresses before falling back
-        # (STT 2-5 s, replies up to 5 s, retries). Binding the local side
-        # to 0.0.0.0 makes httpx skip AAAA records entirely. Cheap to
-        # remove when the network is fixed; nothing else here depends on it.
-        import httpx
-
-        http_client = httpx.Client(
-            transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=1),
-            timeout=httpx.Timeout(20.0, connect=5.0),
-        )
-        if name == "openai":
-            from openai import OpenAI
-
-            client = OpenAI(api_key=key, http_client=http_client, max_retries=1)
-        else:
-            from groq import Groq
-
-            client = Groq(api_key=key, http_client=http_client, max_retries=1)
+        client = build_client(name, key, choose_client_kind(environ))
     return AIProvider(name=name, client=client, llm_model=llm, stt_model=stt)
+
+
+def build_client(name: str, key: str, kind: str | None = None) -> Any:
+    """The client for provider `name`: the SDK's, or `RestChatClient`.
+    `kind` is `choose_client_kind()`'s answer: None tries the SDK and
+    falls back to REST when it does not import (the phone); "rest"
+    skips the SDK; "sdk" refuses to fall back."""
+    if kind == "rest":
+        logger.info("AI client: REST (%s), by SAATHI_AI_CLIENT", _base_url(name))
+        return RestChatClient(_base_url(name), key)
+    try:
+        client = _sdk_client(name, key)
+    except ImportError as exc:
+        if kind == "sdk":
+            raise ProviderUnavailable(
+                f"SAATHI_AI_CLIENT=sdk but the {name} SDK is not importable: {exc}"
+            ) from exc
+        logger.info(
+            "AI client: REST (%s); the %s SDK does not import: %s", _base_url(name), name, exc
+        )
+        return RestChatClient(_base_url(name), key)
+    logger.info("AI client: %s SDK", name)
+    return client
+
+
+def _sdk_client(name: str, key: str) -> Any:
+    """The vendor SDK's client, exactly as built before the REST client
+    existed. Raises ImportError where the SDK (or its httpx) is absent."""
+    # IPv4 only. Found live 2026-09-25: this network advertises IPv6
+    # addresses for api.openai.com but can't route IPv6, so every new
+    # connection burned seconds on dead addresses before falling back
+    # (STT 2-5 s, replies up to 5 s, retries). Binding the local side
+    # to 0.0.0.0 makes httpx skip AAAA records entirely. Cheap to
+    # remove when the network is fixed; nothing else here depends on it.
+    import httpx
+
+    http_client = httpx.Client(
+        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=1),
+        timeout=httpx.Timeout(20.0, connect=5.0),
+    )
+    if name == "openai":
+        from openai import OpenAI
+
+        return OpenAI(api_key=key, http_client=http_client, max_retries=1)
+    from groq import Groq
+
+    return Groq(api_key=key, http_client=http_client, max_retries=1)

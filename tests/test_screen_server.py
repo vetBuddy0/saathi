@@ -2253,3 +2253,126 @@ async def test_without_an_audio_client_an_embed_refusal_is_reoffered_not_sent_to
                 assert message["video_id"] == found[1].video_id
     assert found[1].video_id in controller.unplayable
     assert found[1].video_id not in controller.refused
+
+
+# -- /audio: the phone's own voice (2026-10-08, the engine inside the phone) --
+
+
+class PhoneVoiceSession(HearingSession):
+    """Speaks the way voice/tts/remote_backend.py does under cascade.py:
+    asks the phone to render the sentence, then plays the WAV it got
+    back through the same client. A failed request is recorded, not
+    raised, as the backend turns it into silence."""
+
+    def __init__(self, remote) -> None:
+        super().__init__()
+        self._remote = remote
+        self.rendered: list[bytes] = []
+        self.failures: list[str] = []
+
+    def say(self, text: str) -> None:
+        from saathi.audio.remote import RemoteSynthesisError
+
+        super().say(text)
+        try:
+            wav = self._remote.synthesize(text, "english", 2.0)
+        except RemoteSynthesisError as exc:
+            self.failures.append(str(exc))
+            return
+        self.rendered.append(wav)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            path = Path(tmp_file.name)
+        path.write_bytes(wav)
+        try:
+            self._remote.player("remote", path).wait()
+        finally:
+            path.unlink(missing_ok=True)
+
+
+def _phone_app(remote):
+    """Remote mode as cli.py builds it: no capture source at all."""
+    core = Core()
+    session = PhoneVoiceSession(remote)
+    app = build_app(core, session=session, capture_source_id=None, remote_audio=remote)
+    return app, session, core
+
+
+async def test_the_synthesized_route_hands_the_next_binary_frame_to_the_waiting_synthesis(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    remote = RemoteAudio()
+    app, session, core = _phone_app(remote)
+    wav = _silence_wav(0.05)
+    frame = b"\x05\x00" * 1600
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await audio.send_bytes(frame)
+            await _eventually(lambda: session.heard == [frame])
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+
+            # The engine asks the phone for the sentence...
+            request = await audio.receive_json()
+            assert request == {
+                "type": "synthesize",
+                "id": request["id"],
+                "text": "reply",
+                "language": "english",
+            }
+            # ...the phone answers with the text frame, then the WAV...
+            await audio.send_json({"type": "synthesized", "id": request["id"]})
+            await audio.send_bytes(wav)
+            # ...and is then asked to play exactly that WAV.
+            header = await audio.receive_json()
+            assert header["type"] == "play"
+            body = await audio.receive()
+            assert body.type == server_module.WSMsgType.BINARY and body.data == wav
+            await audio.send_json({"type": "played", "id": header["id"]})
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.rendered == [wav]
+    assert session.heard == [frame]  # the WAV never reached the microphone path
+    assert session.failures == []
+    assert FakeCapture.instances == []
+
+
+async def test_a_synthesized_error_is_routed_and_a_bad_one_is_dropped(monkeypatch, caplog):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    remote = RemoteAudio()
+    app, session, core = _phone_app(remote)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            request = await audio.receive_json()
+            assert request["type"] == "synthesize"
+            # A malformed answer is dropped with a log line, the socket lives on...
+            await audio.send_json({"type": "synthesized", "id": 7})
+            # ...and the real answer, an error, reaches the waiting synthesis.
+            await audio.send_json(
+                {"type": "synthesized", "id": request["id"], "error": "no voice for english"}
+            )
+            assert await asyncio.wait_for(ws.receive_json(), 1.0) == {
+                "type": "state",
+                "state": "idle",
+            }
+            assert remote.attached
+    assert session.rendered == []
+    assert session.failures == [
+        f"the client could not synthesize {request['id']}: no voice for english"
+    ]
+    assert "dropped unknown audio message" not in caplog.text  # it was a known type

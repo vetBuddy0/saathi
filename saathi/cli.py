@@ -15,13 +15,35 @@ session -- and returns it; `_run()` only hands that to the screen server.
 Before the split nothing covered this file, and it is the file where a
 tool registered but not granted, or a controller built twice, would be
 invisible until someone spoke to the device.
+
+Two audio modes since 2026-10-08 (`SAATHI_AUDIO`, config.py). "local"
+is everything above: PulseAudio devices enumerated, echo-cancel loaded,
+the session on the echo-cancelled sink, `parec` on its source, calling
+on the same pair. "remote" is the engine inside the Android app
+(Chaquopy, `127.0.0.1:8765`) or a laptop standing in for one: no device
+is probed and nothing from `audio/devices.py` or `audio/aec.py` is even
+imported (`pywebrtc-audio` and `pyudev` have no wheels there); the
+session is built on `audio/remote.py` alone, with the phone's own
+text-to-speech (`voice/tts/remote_backend.py`) among its backends as
+the voice of last resort, and calling reports itself unavailable --
+there is no cloudflared on a phone. The option that lost: probing
+anyway and letting the probes fail. `DeviceManager` shells out to
+`pactl`, which a phone hasn't got, and the failure would have read as
+"no microphone found; running without the voice engine" -- the
+checkpoint-1 path with no session at all -- when the phone has a
+perfectly good microphone on `/audio`. A mode the person sets is
+honest; a probe that guesses wrong is a support call.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Sequence
+
+logger = logging.getLogger(__name__)
 
 # Aliases a person would type; the ids are what the settings panel shows.
 _VOICE_ALIASES = {"chirp": "google-chirp3-hd", "piper": "piper"}
@@ -95,13 +117,22 @@ GRANTED_PERMISSIONS = frozenset({"preferences", "memory", "music", "calls", "con
 # as unavailable.
 RELAY_STARTUP_SECONDS = 150.0
 
+# The sink id the session is handed in remote mode. Not a device name:
+# there is no local speaker in that mode. `audio/remote.py`'s player
+# never looks at the id while a client is attached, and with none hands
+# it to its fallback, which in remote mode is `_no_local_playback`.
+REMOTE_SINK_ID = "remote"
+
 
 @dataclass
 class Runtime:
     """Everything `saathi run` wires together, in one place a test can
     look at. `session` and `capture_source_id` are None when there is no
     `GROQ_API_KEY` or no usable microphone/speaker/echo-cancel -- the
-    device then runs the checkpoint-1 fake press/release path."""
+    device then runs the checkpoint-1 fake press/release path. In
+    remote mode (`SAATHI_AUDIO=remote`) `session` is built and
+    `capture_source_id` is None: the `/audio` client is the microphone,
+    and a press with none attached is a silent turn, never a `parec`."""
 
     config: Any
     core: Any
@@ -147,7 +178,10 @@ def build_runtime() -> Runtime:
 
     config = Config.load()
     core = Core()
-    remote_audio = RemoteAudio()
+    remote_only = config.audio_mode == "remote"
+    # Remote mode: a sentence with no client attached is dropped with a
+    # warning, not handed to `paplay` (which a phone hasn't got).
+    remote_audio = RemoteAudio(fallback=_no_local_playback) if remote_only else RemoteAudio()
 
     store = IdentityStore(config.identity_db_path)
     store.create()
@@ -189,8 +223,6 @@ def build_runtime() -> Runtime:
     # One-hour spike wiring (2026-09-17): only actually talks to Groq
     # if a key is present, so checkpoint-1-only setups still get the
     # fake press/release path in screen/server.py unchanged.
-    from saathi.audio.aec import EchoCancelHandles, ensure_echo_cancellation
-    from saathi.audio.devices import DeviceManager, PulseAudioBackend
     from saathi.identity.correction import (
         CORRECT_MEMORY_DESCRIPTION,
         make_correct_memory_tool,
@@ -235,6 +267,39 @@ def build_runtime() -> Runtime:
     runtime.tool_schemas = tool_schemas
     runtime.handle_intent = handle_intent
 
+    if remote_only:
+        # The engine inside the phone: the /audio client is the only
+        # microphone and speaker. No DeviceManager, no echo-cancel, no
+        # capture source -- screen/server.py then listens only through
+        # RemoteAudio, and a press with no client attached starts
+        # nothing and ends as a silent turn. Calling is off: no
+        # cloudflared on a phone, no echo-cancelled pair for its audio.
+        runtime.notes.append(
+            "Audio is remote (SAATHI_AUDIO=remote): the /audio client is the microphone "
+            "and the speaker; no local device is probed."
+        )
+        _build_calling(runtime, None)
+        session = CascadeSession(
+            REMOTE_SINK_ID,
+            backends=_remote_backends(remote_audio),
+            backend_preference=threadsafe_reader(
+                store, TTS_BACKEND_KEY, DEFAULT_PREFERRED_BACKEND_ID
+            ),
+            language_preference=threadsafe_reader(store, LANGUAGE_KEY),
+            identity_store=store,
+            tool_schemas=tool_schemas,
+            player=remote_audio.player,
+        )
+        session.on_intent(handle_intent)
+        runtime.session = session
+        runtime.capture_source_id = None
+        return runtime
+
+    # Local mode: the device's own hardware. Imported here, not above:
+    # aec.py pulls in pywebrtc-audio at import, which the phone hasn't.
+    from saathi.audio.aec import EchoCancelHandles, ensure_echo_cancellation
+    from saathi.audio.devices import DeviceManager, PulseAudioBackend
+
     manager = DeviceManager(PulseAudioBackend())
     mic, speaker = manager.choose("input"), manager.choose("output")
     if mic is None or speaker is None:
@@ -271,6 +336,52 @@ def build_runtime() -> Runtime:
     runtime.session = session
     runtime.capture_source_id = handles.source_id
     return runtime
+
+
+def _remote_backends(remote_audio: Any) -> dict[str, Any]:
+    """The session's backends in remote mode: the phone's own voice
+    (`voice/tts/remote_backend.py`) first, then the registry's, minus
+    Piper where `piper-tts` has no wheel (the phone). First, not last,
+    on purpose: `cascade._current_backend()` hands back the dict's
+    first entry when nothing is available at all -- at boot, before a
+    client has attached -- and this is the one backend whose synthesis
+    never raises in the prefetch thread, and the one that becomes
+    available the moment the phone connects. The stored preference
+    (Chirp, by default) still wins whenever it can; Piper, where it is
+    installed, is still tried before this one."""
+    from saathi.voice.tts.registry import DEFAULT_BACKEND_ID, default_backends
+    from saathi.voice.tts.remote_backend import RemoteTTSBackend
+
+    phone = RemoteTTSBackend(remote_audio)
+    backends: dict[str, Any] = {phone.id: phone}
+    for backend_id, backend in default_backends().items():
+        if backend_id == DEFAULT_BACKEND_ID and not backend.available()[0]:
+            continue
+        backends[backend_id] = backend
+    return backends
+
+
+class _DroppedPlayback:
+    """What `_no_local_playback` returns: a `PlaybackHandle` that is
+    already over."""
+
+    finished = True
+
+    def wait(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
+def _no_local_playback(sink_id: str, wav_path: Path) -> _DroppedPlayback:
+    """`audio/remote.py`'s fallback in remote mode: with no client
+    attached there is nowhere to play, so the sentence is dropped with
+    a warning -- not handed to `paplay`, which a phone hasn't got. Only
+    reachable in the moment between a client leaving and the turn it
+    left noticing."""
+    logger.warning("no audio client attached; dropping a sentence (%s)", wav_path.name)
+    return _DroppedPlayback()
 
 
 def _unavailable_call_tool(reason: Callable[[], str]):

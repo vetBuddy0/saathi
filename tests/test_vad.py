@@ -2,8 +2,14 @@
 just the vendored `known_sentence.wav` fixture already used by the AEC
 hardware check) against true digital silence, plus `SpeechStartDetector`'s
 debounce behaviour on a synthetic silence-then-speech sequence.
+
+The last tests are the Android path: `pysilero_vad` made unimportable
+the way it is there (no wheel), and the RMS energy gate answering the
+same two questions on the same two fixtures.
 """
 
+import logging
+import sys
 import wave
 from pathlib import Path
 
@@ -106,3 +112,95 @@ def test_contains_speech_fires_on_the_same_debounce_barge_in_trusts(monkeypatch)
     assert vad_module.contains_speech(b"\x00" * (vad_module.CHUNK_BYTES * 5 + 7)) is True
     # Stopped at the chunk that fired; the trailing 7 bytes were never a chunk.
     assert pushed == [vad_module.CHUNK_BYTES] * 3
+
+
+# --- the energy gate: pysilero-vad absent, as on Android --------------------
+
+
+def _gate_lines(caplog) -> list[str]:
+    messages = [record.getMessage() for record in caplog.records]
+    return [message for message in messages if message.startswith("voice activity gate")]
+
+
+def test_silero_is_the_gate_when_pysilero_vad_imports_and_is_logged_once(monkeypatch, caplog):
+    import saathi.audio.vad as vad_module
+
+    monkeypatch.setattr(vad_module, "_announced_gate", None)
+    with caplog.at_level(logging.INFO, logger="saathi.audio.vad"):
+        vad = vad_module.VoiceActivityDetector()
+        vad_module.VoiceActivityDetector()  # contains_speech() builds one per turn
+
+    assert vad.gate == "silero"
+    assert _gate_lines(caplog) == ["voice activity gate: Silero (pysilero-vad)"]
+
+
+def test_energy_gate_takes_over_when_pysilero_vad_is_missing(monkeypatch, caplog):
+    # A None entry in sys.modules makes `from pysilero_vad import ...`
+    # raise ImportError -- the import has to be lazy for this to bite,
+    # which is the point: the module itself imported fine above.
+    import saathi.audio.vad as vad_module
+
+    monkeypatch.setitem(sys.modules, "pysilero_vad", None)
+    monkeypatch.setattr(vad_module, "_announced_gate", None)
+
+    with caplog.at_level(logging.INFO, logger="saathi.audio.vad"):
+        vad = vad_module.VoiceActivityDetector()
+        vad_module.VoiceActivityDetector()
+
+    assert vad.gate == "energy"
+    lines = _gate_lines(caplog)
+    assert len(lines) == 1
+    assert "RMS energy" in lines[0] and "pysilero-vad not importable" in lines[0]
+
+    # The same two answers the real model gives, on the same fixtures.
+    silent_chunk = bytes(vad_module.CHUNK_BYTES)
+    assert vad.probability(silent_chunk) == 0.0
+    assert max(vad.probability(chunk) for chunk in _speech_chunks()) == 1.0
+
+    assert vad_module.contains_speech(b"\x00" * (vad_module.CHUNK_BYTES * 40)) is False
+    assert vad_module.contains_speech(b"") is False
+    assert vad_module.contains_speech(b"\x00" * (vad_module.CHUNK_BYTES - 2)) is False
+    assert vad_module.contains_speech(_resampled_pcm16(_KNOWN_SENTENCE_WAV, SAMPLE_RATE)) is True
+
+
+def test_energy_gate_opens_exactly_at_the_documented_rms(monkeypatch):
+    # A square wave of amplitude A has RMS A, so the threshold can be
+    # hit exactly: ENERGY_GATE_RMS maps to probability 0.5, the default
+    # threshold, and one count under it does not.
+    import saathi.audio.vad as vad_module
+
+    monkeypatch.setitem(sys.modules, "pysilero_vad", None)
+    vad = vad_module.VoiceActivityDetector()
+    assert vad.gate == "energy"
+
+    def square(amplitude: int) -> bytes:
+        samples = np.empty(vad_module.CHUNK_SAMPLES, dtype="<i2")
+        samples[0::2] = amplitude
+        samples[1::2] = -amplitude
+        return samples.tobytes()
+
+    assert vad.probability(square(vad_module.ENERGY_GATE_RMS)) == 0.5
+    assert vad.is_speech(square(vad_module.ENERGY_GATE_RMS)) is True
+    assert vad.is_speech(square(vad_module.ENERGY_GATE_RMS - 1)) is False
+    assert vad.probability(square(2 * vad_module.ENERGY_GATE_RMS)) == 1.0
+
+    # A DC offset alone is a biased mic, not a voice.
+    biased = np.full(vad_module.CHUNK_SAMPLES, 5000, dtype="<i2").tobytes()
+    assert vad.probability(biased) == 0.0
+    assert vad.is_speech(biased) is False
+
+
+def test_energy_gate_still_requires_the_debounce(monkeypatch):
+    # One loud chunk is a door, not her: SpeechStartDetector's run of
+    # three applies to the fallback exactly as it does to Silero.
+    import saathi.audio.vad as vad_module
+
+    monkeypatch.setitem(sys.modules, "pysilero_vad", None)
+    loud = np.full(vad_module.CHUNK_SAMPLES, 8000, dtype="<i2")
+    loud[1::2] *= -1
+    loud_chunk = loud.tobytes()
+    silent_chunk = bytes(vad_module.CHUNK_BYTES)
+
+    assert vad_module.contains_speech(silent_chunk * 5 + loud_chunk + silent_chunk * 5) is False
+    assert vad_module.contains_speech(silent_chunk * 5 + loud_chunk * 2 + silent_chunk * 5) is False
+    assert vad_module.contains_speech(silent_chunk * 5 + loud_chunk * 3 + silent_chunk * 5) is True

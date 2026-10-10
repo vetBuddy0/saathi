@@ -102,13 +102,20 @@ import queue
 import tempfile
 import threading
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
-import soundfile as sf
-from groq import Groq
+
+try:
+    import soundfile as sf
+except ImportError:
+    # Android (Chaquopy): no libsndfile wheel. `_encode_for_stt()` reads
+    # this and uploads a stdlib WAV instead of FLAC; nothing else here
+    # touches soundfile.
+    sf = None
 
 from saathi.audio.playback import PlaybackHandle, play
 from saathi.audio.vad import contains_speech
@@ -231,11 +238,11 @@ def _no_language_preference() -> str | None:
 
 
 def _pcm_to_flac_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
-    """What `end_turn()` uploads to Whisper. Used to be a raw WAV built
-    with the stdlib `wave` module; real, live measurement against the
-    Whisper endpoint (2026-09-18, a ~3.9s clip) found FLAC's smaller
-    upload measurably faster: median 282ms for WAV vs. 251ms for FLAC
-    (~46% smaller, same lossless audio) — see
+    """The preferred upload, wherever `soundfile` imports. Used to be a
+    raw WAV built with the stdlib `wave` module; real, live measurement
+    against the Whisper endpoint (2026-09-18, a ~3.9s clip) found FLAC's
+    smaller upload measurably faster: median 282ms for WAV vs. 251ms for
+    FLAC (~46% smaller, same lossless audio) — see
     docs/completed/latency-investigation.md. Opus was faster still
     (234ms) but needs PyAV/ffmpeg, a much heavier dependency than
     `soundfile`/libsndfile for a further ~17ms; not worth it as the
@@ -244,6 +251,33 @@ def _pcm_to_flac_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
     buffer = io.BytesIO()
     sf.write(buffer, samples, sample_rate, format="FLAC", subtype="PCM_16")
     return buffer.getvalue()
+
+
+def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
+    """The upload where `soundfile` doesn't import (Android): the same
+    16-bit mono PCM in a stdlib WAV container, ~31ms slower per turn by
+    the measurement above and nothing else different — Whisper hears
+    the same samples."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm)
+    return buffer.getvalue()
+
+
+def _encode_for_stt(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> tuple[str, bytes]:
+    """What `end_turn()` uploads to Whisper: `(filename, bytes)`. The
+    filename's extension is how the endpoint learns the container, so
+    the two travel together rather than one being assumed from the
+    other at the call site. FLAC when `soundfile` is importable, the
+    WAV fallback when it isn't — decided per call from the module-level
+    guarded import, so Linux keeps the measured FLAC win and the phone
+    gets the container it can build."""
+    if sf is not None:
+        return "turn.flac", _pcm_to_flac_bytes(pcm, sample_rate)
+    return "turn.wav", _pcm_to_wav_bytes(pcm, sample_rate)
 
 
 _STREAM_DONE = object()
@@ -330,7 +364,7 @@ class CascadeSession:
         self,
         sink_id: str,
         *,
-        client: Groq | None = None,
+        client: Any | None = None,
         backends: dict[str, TTSBackend] | None = None,
         backend_preference: BackendPreference = _default_backend_preference,
         language_preference: LanguagePreference = _no_language_preference,
@@ -457,13 +491,34 @@ class CascadeSession:
         # A Google voice that just failed (Chirp's streaming path drops
         # out for seconds at a time on this network -- live, 2026-09-25)
         # falls back to Google's Neural2 first: still a warm voice, on the
-        # non-streaming API, so one blip doesn't turn her flat. Piper is
-        # the last resort, always available (see PiperBackend.available()).
+        # non-streaming API, so one blip doesn't turn her flat.
         if preferred_id.startswith("google-"):
             neural2 = self._backends.get("google-neural2")
             if neural2 is not None and neural2 is not backend and neural2.available()[0]:
                 return neural2
-        return self._backends[DEFAULT_BACKEND_ID]
+        # Then the offline last resort (Piper) -- if it is in the dict
+        # and can be used: since 2026-10-08 the engine also runs on a
+        # phone, where piper-tts has no wheel and cli.py leaves it out.
+        # Then whichever backend in the dict is first to say yes (the
+        # phone's own voice, voice/tts/remote_backend.py, is what that
+        # finds there). Never a KeyError on a key that isn't present.
+        last_resort = self._backends.get(DEFAULT_BACKEND_ID)
+        if last_resort is not None and last_resort.available()[0]:
+            return last_resort
+        for candidate in self._backends.values():
+            if candidate is not backend and candidate.available()[0]:
+                return candidate
+        # Nothing can speak right now (a phone with no client attached
+        # yet, no credentials, no Piper). Hand back a backend anyway --
+        # this runs at construction, before any client exists, and the
+        # backend's own synthesis says what a lost sentence sounds like
+        # -- rather than raise: the last resort if it is here, else the
+        # dict's first entry, which cli.py orders on purpose.
+        if last_resort is not None:
+            return last_resort
+        if not self._backends:
+            raise RuntimeError("no TTS backends configured")
+        return next(iter(self._backends.values()))
 
     def _preload_voice_in_background(self, language: str) -> None:
         # A real fix, not a speed hack: loading a local backend's voice
@@ -503,7 +558,7 @@ class CascadeSession:
         # that" -- she would say it every time a door closed.
         if not self._speech_gate(pcm):
             return ""
-        flac_bytes = _pcm_to_flac_bytes(pcm)
+        upload_name, upload_bytes = _encode_for_stt(pcm)
 
         # A stored preference (Ctrl+L panel, or the spoken "speak to me
         # in Mandarin" tool path — item G) is read here, at the start of
@@ -545,7 +600,7 @@ class CascadeSession:
         stt_started_at = time.monotonic()
         transcription = self._client.audio.transcriptions.create(
             model=self._provider.stt_model,
-            file=("turn.flac", flac_bytes),
+            file=(upload_name, upload_bytes),
             response_format=self._provider.stt_response_format,
         )
         self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
