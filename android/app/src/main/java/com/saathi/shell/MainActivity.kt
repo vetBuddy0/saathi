@@ -15,7 +15,7 @@
  *
  * This is where the parts meet, and all it does is wire them: one
  * OkHttp client for both sockets; `OkHttpEngineLink` and
- * `OkHttpAudioLink` pointed at the stored address; `MediaTargets` as the
+ * `OkHttpAudioLink` pointed at the engine; `MediaTargets` as the
  * listener of the engine link and of the watch-page pane, because the
  * rule it holds (which target a frame is for, and ducking) is the only
  * logic here that is not a platform call and it is tested on the JVM;
@@ -24,6 +24,30 @@
  * long as the activity is started; the kiosk on every resume if the
  * setup dialog asked for it. The activity decides nothing about what
  * she hears or sees; the engine does, and these classes carry it.
+ *
+ * Where the engine is, is the one thing this file decides, and it reads
+ * it from `Settings.brainMode`. "phone" (the default): the engine runs
+ * inside this app (`EmbeddedEngine`, Chaquopy) and the face and both
+ * links connect to `EmbeddedEngine.URL` once it answers; before that,
+ * nothing is connected and the face is black -- the links would only be
+ * hammering a port with nothing behind it. If the phone has no AI key
+ * yet the setup dialog opens on its Keys page first, since the engine
+ * cannot think without one (`Keys.canThink`); YouTube and the rest are
+ * optional. "remote": an engine on the Wi-Fi at the stored address, as
+ * before this step; with no address stored the dialog opens on the
+ * Brain page. Both run through `applyBrain()`, which is also what the
+ * dialog's Save calls back into, so a switch in either direction is one
+ * path: the embedded engine is stopped when the brain moves out, and
+ * started (or restarted with new keys) when it moves in. The engine is
+ * not stopped when the activity is recreated (a renderer crash): it is
+ * a process-level thing, and the new activity finds it up with the same
+ * keys and reconnects in a moment. It is stopped when the activity
+ * finishes. What lost: storing `127.0.0.1:8765` into `engineUrl` for the
+ * phone mode (the typed address would be lost on every switch, and a
+ * stored address that nothing typed is the placeholder mistake again),
+ * and starting the engine before the dialog has keys (`start()` would
+ * come up with no AI provider and a face that listens to nobody, which
+ * reads as broken rather than as unset).
  *
  * The face WebView reloads on its own when the engine does not answer,
  * on the links' schedule (500 ms doubling to 30 s, `ReconnectBackoff`),
@@ -50,16 +74,14 @@
  * middle of her first sentence) and `onRequestPermissionsResult` (the
  * same thing, deprecated).
  *
- * On a first run nothing connects until the setup dialog has an address:
- * the first draft pointed both links and the face at the placeholder
+ * On a first run nothing connects until the setup dialog is saved: the
+ * first draft pointed both links and the face at the placeholder
  * `192.168.1.10:8765` and reconnected to it forever, which on a common
- * home network is a stranger's device (found in review). The dialog
- * opens itself when no address is stored; Save connects the links and
- * loads the face. A drop of the `/ws` link ends a hold in progress on
- * this side (`LinkEvents`), as the engine ends it on its own side for a
- * socket that vanished; and the setup hold is cancelled with the
- * activity, so a renderer crash mid-hold cannot open the dialog on a
- * finished window.
+ * home network is a stranger's device (found in review). A drop of the
+ * `/ws` link ends a hold in progress on this side (`LinkEvents`), as the
+ * engine ends it on its own side for a socket that vanished; and the
+ * setup hold is cancelled with the activity, so a renderer crash
+ * mid-hold cannot open the dialog on a finished window.
  */
 package com.saathi.shell
 
@@ -83,6 +105,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -109,6 +132,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var setupHold: HoldListener
 
     private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * The engine the face and both links talk to right now: `EmbeddedEngine.URL`
+     * once the engine in the app answers, the stored address in remote mode,
+     * null while neither is the case (nothing is loaded or connected then).
+     */
+    private var engineUrl: String? = null
 
     /** The face page's retry clock: the links' schedule, reset by a load that finished. */
     private val faceBackoff = ReconnectBackoff()
@@ -161,7 +191,7 @@ class MainActivity : AppCompatActivity() {
 
         configureFace(faceWeb)
         setupHold = HoldListener(SetupDialog.HOLD_MS) {
-            SetupDialog.show(this, settings, engineLink, audioLink) { reloadFace() }
+            SetupDialog.show(this, settings, SetupDialog.Page.BRAIN) { applyBrain() }
         }
         faceWeb.setOnTouchListener(setupHold)
 
@@ -175,18 +205,70 @@ class MainActivity : AppCompatActivity() {
             },
         )
 
-        val engine = settings.engineUrl
-        if (engine == null) {
-            // First run: nothing is connected to anything until someone
-            // types the address (Settings.kt says why not the placeholder).
-            // Save connects both links and reloads the face.
-            SetupDialog.show(this, settings, engineLink, audioLink) { reloadFace() }
-        } else {
-            engineLink.connect(engine)
-            audioLink.connect(engine)
-            reloadFace()
-        }
+        applyBrain()
         askForMicrophone()
+    }
+
+    /**
+     * Put the face and the links on the engine `Settings.brainMode` names,
+     * or open the setup dialog on the page that is missing something.
+     * Called at start and after every Save of the dialog.
+     */
+    private fun applyBrain() {
+        if (settings.brainMode == Settings.BRAIN_REMOTE) {
+            EmbeddedEngine.stop()
+            val address = settings.engineUrl
+            if (address == null) {
+                // First run in remote mode: nothing is connected to
+                // anything until someone types the address (Settings.kt
+                // says why not the placeholder).
+                SetupDialog.show(this, settings, SetupDialog.Page.BRAIN) { applyBrain() }
+                return
+            }
+            useEngine(address)
+            return
+        }
+        val keys = settings.keys.all()
+        if (!Keys.canThink(keys)) {
+            SetupDialog.show(this, settings, SetupDialog.Page.KEYS) { applyBrain() }
+            return
+        }
+        // Nothing to talk to until the engine answers; a switch from a
+        // remote address must stop talking to it now, not after.
+        leaveEngine()
+        EmbeddedEngine.start(
+            this,
+            keys,
+            onReady = {
+                if (isDestroyed) return@start
+                if (settings.brainMode == Settings.BRAIN_REMOTE) return@start // switched meanwhile
+                useEngine(EmbeddedEngine.URL)
+            },
+            onError = { reason ->
+                if (isDestroyed) return@start
+                Log.e(TAG, "the engine could not start on this phone: $reason")
+                // The person setting up is told why, and given the dialog:
+                // the keys again, or the engine elsewhere.
+                Toast.makeText(this, getString(R.string.setup_engine_failed, reason), Toast.LENGTH_LONG).show()
+                SetupDialog.show(this, settings, SetupDialog.Page.KEYS) { applyBrain() }
+            },
+        )
+    }
+
+    /** Connect both links to [base] and load the face from it. */
+    private fun useEngine(base: String) {
+        engineUrl = base
+        engineLink.connect(base)
+        audioLink.connect(base)
+        reloadFace()
+    }
+
+    /** Disconnect from whatever engine was in use; the face stays as it is until the next load. */
+    private fun leaveEngine() {
+        engineUrl = null
+        main.removeCallbacks(faceReload)
+        engineLink.disconnect()
+        audioLink.disconnect()
     }
 
     private fun askForMicrophone() {
@@ -214,7 +296,7 @@ class MainActivity : AppCompatActivity() {
         web.webChromeClient = WebChromeClient()
     }
 
-    /** The face from the stored address with a fresh retry clock: at start, and after the setup dialog saves. */
+    /** The face from the engine in use with a fresh retry clock: when an engine is chosen, and after the setup dialog saves. */
     private fun reloadFace() {
         faceBackoff.reset()
         loadFace()
@@ -223,7 +305,7 @@ class MainActivity : AppCompatActivity() {
     private fun loadFace() {
         main.removeCallbacks(faceReload)
         faceFailed = false
-        val engine = settings.engineUrl ?: return // nothing to load until setup
+        val engine = engineUrl ?: return // nothing to load until an engine answers
         faceWeb.loadUrl("$engine/")
     }
 
@@ -292,6 +374,9 @@ class MainActivity : AppCompatActivity() {
             (youtubeWeb.parent as? ViewGroup)?.removeView(youtubeWeb)
             youtubeWeb.destroy()
         }
+        // The engine in the app outlives a recreated activity (a renderer
+        // crash), not a finished one.
+        if (isFinishing) EmbeddedEngine.stop()
         super.onDestroy()
     }
 
@@ -334,7 +419,7 @@ class MainActivity : AppCompatActivity() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             if (!request.isForMainFrame) return false
             val url = request.url.toString()
-            val engine = settings.engineUrl ?: return true
+            val engine = engineUrl ?: return true
             if (EngineAddress.isOn(url, engine)) return false
             Log.i(TAG, "the face stays on the engine; not loading $url")
             return true

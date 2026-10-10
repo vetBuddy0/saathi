@@ -1,13 +1,62 @@
 /**
- * `/audio` over OkHttp: the microphone up, each sentence down.
+ * `/audio` over OkHttp: the microphone up, each sentence down -- and,
+ * since the engine moved into the APK, the phone's own voice up as well.
  *
  * Why this file exists: [AudioLink] is the contract and this is its one
  * implementation, on the same OkHttpClient as the `/ws` link so the two
  * share a connection pool, a ping interval and a lifetime. Everything it
- * sends is bytes she said; everything it receives is a sentence the
- * engine already decided to say. It decides nothing.
+ * sends is bytes she said, or a sentence rendered in the exact words the
+ * engine asked for; everything it receives is a sentence the engine
+ * already decided to say. It decides nothing.
  *
- * What lost:
+ * The phone's voice (2026-10-08, the TTS bridge): the engine's
+ * `{"type":"synthesize","id","text","language"}` asks this link to render
+ * one sentence with `android.speech.tts.TextToSpeech` and send the WAV
+ * back -- `{"type":"synthesized","id"}` then exactly one binary frame, or
+ * `{"type":"synthesized","id","error"}` and nothing after it. It is the
+ * voice of last resort: `saathi/voice/tts/remote_backend.py` is the
+ * backend over it, and the engine reaches it only when Chirp (the Google
+ * voices, which need a key file and a network) is unavailable, since
+ * Piper cannot run on the phone -- so that a phone with no credentials
+ * or no signal still answers in words rather than in silence. Android's
+ * engine is on every phone, offline and free; it is not a warm voice,
+ * which is why the engine puts it last. [PhoneVoice] is the whole of it:
+ * one `TextToSpeech` made when the link connects (its first start takes
+ * a second or two, which belongs at connect time and not on her first
+ * sentence) and shut down when it disconnects; the engine's language key
+ * mapped to a locale ([localeFor]); `synthesizeToFile` into a file of its
+ * own under the cache directory, with an `UtteranceProgressListener` to
+ * say when it is written; the file read back, sent and deleted.
+ *
+ * What lost there:
+ *  - Bundling a TTS model in the APK. Piper's `onnxruntime` has no
+ *    Chaquopy wheel, and a Kotlin inference runtime with a voice per
+ *    language would be tens of megabytes and a second speech stack to
+ *    keep current, for a voice used only when the better ones are not;
+ *    the platform's engine is already on the phone, with its own voices
+ *    for all four languages installable from the system settings.
+ *  - The engine calling `TextToSpeech` from Python through Chaquopy's
+ *    Java bridge. That would be the voice engine reaching into the shell
+ *    -- the thing the five interfaces exist to stop -- and it would exist
+ *    only on the phone; through the socket the same engine runs unchanged
+ *    on a laptop with the phone attached over Wi-Fi, and the Python suite
+ *    plays the phone (`saathi/audio/remote.py` says the same from its
+ *    side).
+ *  - `speak()` straight to the speaker. The WAV goes up so the engine
+ *    plays it back through the one `play`/`played`/`stop` path every
+ *    other backend's sentence takes: barge-in, the face's "speaking" and
+ *    the turn's timing stay the engine's, and the phone stays a dumb
+ *    speaker that also happens to be able to read.
+ *  - Guessing a locale for a language key this build does not know. An
+ *    unknown key is answered with an error, which the engine turns into
+ *    a short silence and a warning naming the key; a sentence in the
+ *    wrong voice would have been a decision made here. The same for a
+ *    language whose voice is not installed on the phone (`setLanguage`
+ *    says so) and for a WAV the shell could not itself play back (not
+ *    16-bit PCM): an error that names the cause, not a frame that fails
+ *    later and quietly.
+ *
+ * What lost (the link itself):
  *  - `HttpURLConnection` and `java.net.http`: neither speaks WebSocket on
  *    API 26, and OkHttp is already in the APK for `/ws`.
  *  - `MediaRecorder.AudioSource.MIC`: `VOICE_COMMUNICATION` asks the
@@ -44,13 +93,29 @@
  * main thread if it touches a view. The reconnect timer runs on the main
  * looper. The microphone has one long-lived thread of its own, parked
  * between holds, so a second hold never races the first's release of
- * the AudioRecord.
+ * the AudioRecord. The phone's voice: `TextToSpeech` is made and shut
+ * down on whichever thread calls [connect] and [disconnect] (the main
+ * thread, in the activity and the setup dialog); its `onInit` arrives on
+ * the main thread, or on the constructing thread at once when the phone
+ * has no engine at all; `synthesizeToFile` is called from OkHttp's
+ * reader thread, or from `onInit` for sentences asked before the engine
+ * was up; the progress callbacks arrive on the text-to-speech client's
+ * own thread, which reads the file back and sends. Every send on the
+ * socket -- a mic frame, a `played`, a `synthesized` and its WAV -- goes
+ * through one [sendLock], because the `synthesized` text frame tags the
+ * *next* binary frame as the sentence: a mic frame slipping between the
+ * two would be played as her reply and the WAV transcribed as her
+ * speech. OkHttp queues frames in the order `send` is called, so the
+ * lock is all the ordering needs.
  *
  * Reconnect: on any close or failure, while [connect] is in force, the
  * link reopens after 1 s, doubling to a 15 s ceiling, reset on a
  * successful open. OkHttp's WebSocket has no read timeout after the
  * upgrade, so a dead Wi-Fi hop is only noticed through the client's
- * `pingInterval`; the client passed in should set one.
+ * `pingInterval`; the client passed in should set one. The voice is
+ * kept across reconnects; a sentence asked on a socket that has since
+ * been replaced is rendered and then dropped, because the engine failed
+ * that socket's requests the moment the new one attached.
  *
  * Permission: RECORD_AUDIO is a runtime permission. [startSending]
  * checks it and does nothing (one log line) when it is missing, so this
@@ -72,10 +137,16 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import androidx.core.content.ContextCompat
+import java.io.File
+import java.io.IOException
+import java.util.Locale
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import okhttp3.OkHttpClient
@@ -91,6 +162,14 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
     private val mainHandler = Handler(Looper.getMainLooper())
     private val lock = Any()
 
+    /**
+     * Serialises every send on the socket, from whichever thread: the mic
+     * thread's frames, the speaker thread's `played`, the voice's
+     * `synthesized` and the WAV behind it. Taken before [lock], never
+     * after it.
+     */
+    private val sendLock = Any()
+
     // All guarded by [lock].
     private var baseUrl: String? = null
     private var wantConnected = false
@@ -98,6 +177,9 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
     private var attempt = 0
     private var pendingPlay: AudioMessage.Play? = null
     private var mic: MicThread? = null
+
+    /** The phone's voice, alive from [connect] to [disconnect]. Guarded by [lock]. */
+    private var voice: PhoneVoice? = null
 
     /** True between [startSending] and [stopSending]; read by the mic thread. */
     @Volatile
@@ -118,6 +200,7 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
         }
         mainHandler.removeCallbacks(reconnect)
         old?.socket?.close(CLOSE_NORMAL, "reconnecting")
+        ensureVoice()
         open()
     }
 
@@ -125,6 +208,7 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
         stopSending()
         val old: SocketListener?
         val thread: MicThread?
+        val spoken: PhoneVoice?
         synchronized(lock) {
             wantConnected = false
             pendingPlay = null
@@ -132,10 +216,13 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
             current = null
             thread = mic
             mic = null
+            spoken = voice
+            voice = null
         }
         mainHandler.removeCallbacks(reconnect)
         old?.socket?.close(CLOSE_NORMAL, "disconnect")
         thread?.quit()
+        spoken?.shutdown()
     }
 
     override fun startSending() {
@@ -179,8 +266,30 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
      * Lost silently when the link is down; the engine's wait is bounded.
      */
     fun sendPlayed(id: String) {
-        val socket = synchronized(lock) { current?.socket } ?: return
-        socket.send(Protocol.Audio.played(id))
+        synchronized(sendLock) {
+            val socket = synchronized(lock) { current?.socket } ?: return
+            socket.send(Protocol.Audio.played(id))
+        }
+    }
+
+    /**
+     * One `TextToSpeech` per connected span: made on the first [connect],
+     * kept across reconnects, gone at [disconnect]. Made outside [lock]
+     * (it binds a service) and handed in under it; a second one made by a
+     * racing connect is shut down again.
+     */
+    private fun ensureVoice() {
+        if (synchronized(lock) { voice != null }) return
+        val fresh = PhoneVoice()
+        val surplus = synchronized(lock) {
+            if (voice == null) {
+                voice = fresh
+                null
+            } else {
+                fresh
+            }
+        }
+        surplus?.shutdown()
     }
 
     private fun open() {
@@ -206,10 +315,44 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
     }
 
     private fun sendFrame(bytes: ByteString) {
-        val socket = synchronized(lock) { current?.socket } ?: return
-        // False means closed or a 16 MiB backlog; either way the frame is
-        // gone and the next one may not be. Nothing to retry.
-        socket.send(bytes)
+        synchronized(sendLock) {
+            val socket = synchronized(lock) { current?.socket } ?: return
+            // False means closed or a 16 MiB backlog; either way the frame
+            // is gone and the next one may not be. Nothing to retry.
+            socket.send(bytes)
+        }
+    }
+
+    /**
+     * The socket [origin] is -- if it still is the socket. A reply to a
+     * request from a socket since replaced goes nowhere: the engine failed
+     * that socket's requests when the new one attached, and an answer with
+     * a stale id would only be eaten there.
+     */
+    private fun socketOf(origin: SocketListener): WebSocket? =
+        synchronized(lock) { if (current === origin) origin.socket else null }
+
+    /**
+     * `{"type":"synthesized","id":...}` and the WAV right behind it, under
+     * [sendLock] so no mic frame or `played` can land between the two.
+     */
+    private fun sendSynthesized(origin: SocketListener, id: String, wav: ByteArray) {
+        synchronized(sendLock) {
+            val socket = socketOf(origin) ?: return
+            socket.send(Protocol.Audio.synthesized(id))
+            socket.send(wav.toByteString())
+        }
+    }
+
+    /**
+     * `{"type":"synthesized","id":...,"error":...}` and no WAV: the engine
+     * fails that one sentence at once (a short silence, a warning with
+     * [error] in it) rather than at its own timeout.
+     */
+    private fun sendSynthesisError(origin: SocketListener, id: String, error: String) {
+        synchronized(sendLock) {
+            socketOf(origin)?.send(Protocol.Audio.synthesized(id, error))
+        }
     }
 
     /** One socket's lifetime. A listener that is no longer [current] does nothing but close. */
@@ -247,6 +390,16 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
                 AudioMessage.Stop -> {
                     synchronized(lock) { pendingPlay = null }
                     listener?.onStop()
+                }
+                is AudioMessage.Synthesize -> {
+                    val phoneVoice = synchronized(lock) { voice }
+                    if (phoneVoice == null) {
+                        // Only between disconnect() and the socket's close
+                        // landing: answered so the engine does not wait.
+                        sendSynthesisError(this, message.id, "the audio link is shut down")
+                    } else {
+                        phoneVoice.synthesize(this, message)
+                    }
                 }
                 null -> Log.w(TAG, "dropped unknown audio frame: $text")
             }
@@ -286,6 +439,238 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
             }
             Log.i(TAG, "audio link $why; reconnecting in $delayMs ms")
             mainHandler.postDelayed(reconnect, delayMs)
+        }
+    }
+
+    /**
+     * One sentence asked of the phone's voice: who asked, what, in which
+     * language, and the file it is rendered into. (Not `Request`: that
+     * name is okhttp3's in this file.)
+     */
+    private class Sentence(
+        val origin: SocketListener,
+        val id: String,
+        val text: String,
+        val language: String,
+    ) {
+        /** Set once the engine is asked; null before that, and again once deleted. */
+        @Volatile
+        var file: File? = null
+    }
+
+    /**
+     * The phone's text-to-speech as the engine's voice of last resort (see
+     * the header). One `TextToSpeech`; one `synthesizeToFile` per
+     * `synthesize` frame, into a file of its own; the WAV read back, sent
+     * behind its `synthesized`, and deleted. Sentences asked before
+     * `onInit` wait for it, in order. Answered with an error instead: an
+     * engine that never comes up, a language key this build does not
+     * know, a language with no voice installed, a WAV the shell could not
+     * itself play (not 16-bit PCM), and an utterance the engine neither
+     * finished nor failed within [SYNTHESIS_DEADLINE_MS].
+     */
+    private inner class PhoneVoice : TextToSpeech.OnInitListener {
+        private val gate = Any()
+
+        /** Null while the engine initialises, then whether it came up. Guarded by [gate]. */
+        private var ready: Boolean? = null
+
+        /** Sentences asked before [onInit], in order. Guarded by [gate]. */
+        private val waiting = ArrayList<Sentence>()
+
+        /** Sentences handed to the engine and not yet answered, by utterance id. Guarded by [gate]. */
+        private val inFlight = HashMap<String, Sentence>()
+
+        /**
+         * Utterance ids are this instance's own, never the engine's
+         * sentence id alone: that one starts again at `tts-1` with every
+         * engine restart. Guarded by [gate].
+         */
+        private var serial = 0
+
+        /** True after [shutdown]; every later sentence and callback is dropped. Guarded by [gate]. */
+        private var closed = false
+
+        /** The sentences' files: a directory of this link's own under the cache, swept at start. */
+        private val dir = File(appContext.cacheDir, VOICE_CACHE_DIR)
+
+        private val progress = object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) = Unit
+
+            override fun onDone(utteranceId: String?) {
+                finish(utteranceId, null)
+            }
+
+            @Deprecated("The platform calls onError(String, Int) on API 21+; this abstract form has to exist.")
+            override fun onError(utteranceId: String?) {
+                finish(utteranceId, "the text-to-speech engine failed")
+            }
+
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                finish(utteranceId, "the text-to-speech engine failed ($errorCode)")
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                finish(utteranceId, "the text-to-speech engine stopped before the sentence was done")
+            }
+        }
+
+        // Last, after everything the callbacks touch: `onInit(ERROR)` runs
+        // inside this constructor, on this thread, when the phone has no
+        // text-to-speech engine at all; SUCCESS only ever arrives later, on
+        // the main thread, once the engine's service has connected.
+        private val engine: TextToSpeech = TextToSpeech(appContext, this)
+
+        init {
+            // A plain field on the client, no service needed, so it is set
+            // here rather than in onInit, before the first sentence can be
+            // asked.
+            engine.setOnUtteranceProgressListener(progress)
+            sweep()
+        }
+
+        override fun onInit(status: Int) {
+            val up = status == TextToSpeech.SUCCESS
+            val queued = synchronized(gate) {
+                if (closed) return
+                ready = up
+                ArrayList(waiting).also { waiting.clear() }
+            }
+            if (up) {
+                Log.i(TAG, "phone voice ready (${engine.defaultEngine})")
+            } else {
+                Log.w(TAG, "the phone has no text-to-speech engine ($status); its sentences will be refused")
+            }
+            for (sentence in queued) {
+                if (up) submit(sentence) else refuse(sentence, NO_ENGINE)
+            }
+        }
+
+        /** From the socket's reader thread: render [message] and answer on [origin]. */
+        fun synthesize(origin: SocketListener, message: AudioMessage.Synthesize) {
+            val sentence = Sentence(origin, message.id, message.text, message.language)
+            val state: Boolean? = synchronized(gate) {
+                if (closed) {
+                    false
+                } else {
+                    if (ready == null) waiting += sentence
+                    ready
+                }
+            }
+            when (state) {
+                null -> Unit // asked before onInit: submitted from there, in order
+                true -> submit(sentence)
+                false -> refuse(sentence, NO_ENGINE)
+            }
+        }
+
+        private fun submit(sentence: Sentence) {
+            if (sentence.text.isBlank()) {
+                refuse(sentence, "nothing to say")
+                return
+            }
+            val locale = localeFor(sentence.language)
+            if (locale == null) {
+                refuse(sentence, "unknown language '${sentence.language}'")
+                return
+            }
+            val file = try {
+                dir.mkdirs()
+                File.createTempFile(VOICE_FILE_PREFIX, VOICE_FILE_SUFFIX, dir)
+            } catch (e: IOException) {
+                refuse(sentence, "no room in the cache for the WAV (${e.message})")
+                return
+            }
+            sentence.file = file
+            val key = synchronized(gate) { "${serial++}:${sentence.id}" }
+            val error: String? = synchronized(gate) {
+                if (closed) return@synchronized "the phone's voice is shut down"
+                // The language is the instance's, read when the sentence
+                // is queued: set and queue under one lock, so two sentences
+                // in two languages cannot swap voices.
+                val availability = engine.setLanguage(locale)
+                if (availability < 0) {
+                    return@synchronized "no voice installed for ${sentence.language} ($locale: $availability)"
+                }
+                inFlight[key] = sentence
+                if (engine.synthesizeToFile(sentence.text, Bundle(), file, key) != TextToSpeech.SUCCESS) {
+                    inFlight.remove(key)
+                    return@synchronized "the text-to-speech engine refused the sentence"
+                }
+                null
+            }
+            if (error != null) {
+                refuse(sentence, error)
+                return
+            }
+            mainHandler.postDelayed({ expire(key) }, SYNTHESIS_DEADLINE_MS)
+        }
+
+        /**
+         * The engine finished with utterance [key], well or badly. A key it
+         * no longer holds -- expired, or shut down -- is ignored. On the
+         * text-to-speech client's thread.
+         */
+        private fun finish(key: String?, error: String?) {
+            if (key == null) return
+            val sentence = synchronized(gate) { inFlight.remove(key) } ?: return
+            if (error != null) {
+                refuse(sentence, error)
+                return
+            }
+            val file = sentence.file
+            val wav = try {
+                file?.readBytes()
+            } catch (e: IOException) {
+                null
+            }
+            when {
+                wav == null -> refuse(sentence, "the WAV could not be read back")
+                WavHeader.parse(wav) == null -> {
+                    refuse(sentence, "the engine wrote ${wav.size} bytes that are not a 16-bit PCM WAV")
+                }
+                else -> {
+                    sendSynthesized(sentence.origin, sentence.id, wav)
+                    discard(sentence)
+                }
+            }
+        }
+
+        private fun expire(key: String) {
+            val sentence = synchronized(gate) { inFlight.remove(key) } ?: return
+            refuse(sentence, "no answer from the text-to-speech engine within ${SYNTHESIS_DEADLINE_MS / 1000} s")
+        }
+
+        /** The sentence is lost: say why to the engine (it plays a short silence) and clean up. */
+        private fun refuse(sentence: Sentence, error: String) {
+            discard(sentence)
+            Log.w(TAG, "could not synthesize ${sentence.id} (${sentence.language}): $error")
+            sendSynthesisError(sentence.origin, sentence.id, error)
+        }
+
+        private fun discard(sentence: Sentence) {
+            sentence.file?.delete()
+            sentence.file = null
+        }
+
+        /** Files left by a shell that died mid-sentence; the directory is this link's alone. */
+        private fun sweep() {
+            val stale = dir.listFiles() ?: return
+            for (file in stale) file.delete()
+        }
+
+        /** Stop and release the engine; sentences still owed are dropped with their files (the socket is going too). */
+        fun shutdown() {
+            val dropped = synchronized(gate) {
+                closed = true
+                val all = waiting + inFlight.values
+                waiting.clear()
+                inFlight.clear()
+                all
+            }
+            for (sentence in dropped) discard(sentence)
+            engine.stop()
+            engine.shutdown()
         }
     }
 
@@ -448,10 +833,45 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
         const val BACKOFF_MAX_MS = 15000L
         private const val EMPTY_READ_SLEEP_MS = 5L
 
+        /** A directory of this link's own under the app's cache: one file per sentence while the phone's voice renders it. */
+        const val VOICE_CACHE_DIR = "tts"
+        private const val VOICE_FILE_PREFIX = "sentence-"
+        private const val VOICE_FILE_SUFFIX = ".wav"
+
+        /**
+         * Past this, a sentence the text-to-speech engine neither finished
+         * nor failed is given up on and its file deleted. Longer than the
+         * engine's own ten-second wait (`audio/remote.py`), so the shell
+         * never gives up on a sentence the engine is still waiting for; the
+         * late error it then sends is eaten there as stale.
+         */
+        const val SYNTHESIS_DEADLINE_MS = 15_000L
+
+        private const val NO_ENGINE = "the phone's text-to-speech engine is not available"
+
         /** How long to wait before reconnect number [attempt] (0-based): 1 s doubling to 15 s. */
         fun backoffMs(attempt: Int): Long {
             val shift = attempt.coerceIn(0, 10)
             return (BACKOFF_FIRST_MS shl shift).coerceAtMost(BACKOFF_MAX_MS)
+        }
+
+        /**
+         * The locale the phone's voice speaks the engine's [language] key
+         * (`saathi/voice/language.py`) in: `english` as en-US, `chinese`
+         * as zh-CN, `hindi` as hi-IN, `bengali` as bn-IN -- the values of
+         * `Locale.US`, `Locale.SIMPLIFIED_CHINESE`, `Locale("hi", "IN")`
+         * and `Locale("bn", "IN")`, built through `forLanguageTag` because
+         * the two-argument constructor is deprecated from JDK 19 (not on
+         * Android) and the value is the same. Null for a key this build
+         * does not know, which the voice answers with an error rather than
+         * a guess. Pure, so the table is pinned on the JVM.
+         */
+        fun localeFor(language: String): Locale? = when (language) {
+            Protocol.Audio.LANGUAGE_ENGLISH -> Locale.US
+            Protocol.Audio.LANGUAGE_CHINESE -> Locale.SIMPLIFIED_CHINESE
+            Protocol.Audio.LANGUAGE_HINDI -> Locale.forLanguageTag("hi-IN")
+            Protocol.Audio.LANGUAGE_BENGALI -> Locale.forLanguageTag("bn-IN")
+            else -> null
         }
     }
 }

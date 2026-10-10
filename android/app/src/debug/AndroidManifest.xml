@@ -8,7 +8,14 @@
   button injects it, a command-line assembleDebug does not (found in
   review). The cost: a testOnly APK installs only with `adb install -t`,
   which the README now says. The release build is unchanged.
+
+  The value is a manifest placeholder filled from the Gradle property
+  `saathi.testOnly` (app/build.gradle.kts), "true" unless a build says
+  otherwise: the phone's own installer refuses a testOnly APK, and the
+  APK GitHub Actions builds on a push is installed from the phone, so
+  that build passes false. A manual run of the workflow can ask for the
+  testOnly one again, for a tablet.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application android:testOnly="true" />
+    <application android:testOnly="${saathiTestOnly}" />
 </manifest>

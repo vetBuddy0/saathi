@@ -2855,3 +2855,52 @@ runner's keystore with `actions/cache` (evicted after a week unused,
 and then the same uninstall), and a signing key in a repository secret
 (a real secret for a debug build, and a fork or a local build then
 signs differently again).
+
+**2026-10-08 — The whole `android/` tree was compiled against the real
+API-34 framework classes and the real Chaquopy runtime, as well as
+against the stubs; the Chaquopy plugin was read from its published jar.**
+Google's hosts are unreachable from here (no SDK, no androidx), but
+Maven Central is, and two real things live there: Robolectric's
+`android-all:14-robolectric-10818077`, the API 34 framework built from
+AOSP, and Chaquopy's `chaquopy_java:15.0.1`, which carries `Python`,
+`PyObject`, `PyException` and `AndroidPlatform`. Every main file and
+every test compiled under Kotlin 2.0.21 with warnings as errors against
+those two plus okhttp/okio/org.json, with stubs left only for androidx
+(appcompat, activity, core, security-crypto), and the 118 JUnit tests
+ran green -- so every `android.*` and `com.chaquo.*` signature the shell
+calls is now checked against the real class, not a transcription of its
+documentation. The stub pass stays beside it: android-all is compiled
+with source-retention nullability annotations, so a wrong override
+nullability passes there and fails only against the stubs, which carry
+the documented one. Lost: dropping the stubs (above), and running AGP
+(`com.android.tools.build` is on Google's Maven). The plugin itself
+(`com.chaquo.python:gradle:15.0.1`, also on Maven Central) was read with
+`javap` instead of from GitHub source: its AGP check is a minimum of
+7.0.0 and no maximum, its Python table carries 3.12.1, its DSL is
+`ChaquopyExtension.defaultConfig`/`sourceSets`,
+`PythonExtension.version`/`pip`/`extractPackages`,
+`PipExtension.install`, and its tasks are `<verb><Variant>Python<Noun>`
+(the entry below). What no JVM check reaches is unchanged and recorded
+in `android/README.md`: constants, resources, platform behaviour, and
+whether Chaquopy's index has cp312 wheels of the five packages.
+
+**2026-10-08 — `syncSaathiPython` is a dependency of every task with
+`Python` in its name, not only the `generate*` ones.** The first pattern
+(`startsWith("generate") && contains("Python")`) was written from the
+guess that Chaquopy's tasks are all `generate<Variant>Python...`. Read
+off the plugin jar's `TaskBuilder`: the one that reads the Python source
+set is `merge<Variant>PythonSources`, and it declares the source
+directories as `inputs.files(...)` -- so with `build/saathi-python`
+among them Gradle 8 would have refused the build outright ("uses this
+output of task ':app:syncSaathiPython' without declaring an explicit or
+implicit dependency"), on the first run, before any APK. The others are
+`generate<Variant>Python{Requirements,Proxies,JniLibs,<Source|
+Requirements|Misc|Build>Assets}` and `extract<Variant>PythonBuildPackages`;
+every one has `Python` in its name and nothing else in an AGP/Kotlin
+build does, so that word alone is the match and `syncSaathiPython`
+itself is the one exclusion. Lost: handing the source set a `Provider`
+mapped from the Sync task so that Gradle infers the edge -- Chaquopy
+collects its `SourceDirectorySet`s into `inputs.files(...)`, which
+would carry the producer, but whether its own `sourceSetNames` lookup
+keeps that is not something to bet the first build on when one explicit
+line is certain either way.

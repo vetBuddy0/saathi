@@ -5,11 +5,20 @@
  * Why this file exists: the engine stays on the Pi or the laptop and the
  * phone is what she holds, so the mic frames go up and the TTS sentences
  * come down over one socket, a second path beside `/ws` (see
- * `saathi/audio/remote.py` for the engine's side and why the engine is
- * not in the APK). A client is a dumb speaker: play this WAV to the end,
- * then say `played`; on `stop`, stop at once and say `played` for what
- * was cut short. [AudioLink] owns the socket and the mic frames;
- * [Speaker] owns the playback and is what the link hands each WAV to.
+ * `saathi/audio/remote.py` for the engine's side, and for why the same
+ * split holds now that the engine also runs inside the APK). A client is
+ * a dumb speaker: play this WAV to the end, then say `played`; on `stop`,
+ * stop at once and say `played` for what was cut short. [AudioLink] owns
+ * the socket and the mic frames; [Speaker] owns the playback and is what
+ * the link hands each WAV to.
+ *
+ * Since the engine moved into the APK (2026-10-08) the link also answers
+ * the engine's `synthesize` frame with the phone's own text-to-speech --
+ * `synthesized` and one WAV frame going up, the way a sentence comes
+ * down. That is the implementation's to do and not the listener's:
+ * nothing on the screen takes part, and the engine plays the WAV back
+ * through [Listener.onPlay] like any other sentence, so this interface
+ * did not change for it (`OkHttpAudioLink` says what lost).
  *
  * What lost: streaming the reply down as PCM chunks the way the mic goes
  * up. The engine already synthesises one whole sentence at a time, so a

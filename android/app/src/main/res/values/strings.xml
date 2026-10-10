@@ -4,10 +4,32 @@
 <resources>
     <string name="app_name">Saathi</string>
     <string name="talk_button">Hold to talk</string>
-    <string name="setup_title">Where is Saathi\'s engine?</string>
+    <string name="setup_title">Setting Saathi up</string>
     <string name="setup_message">The address the engine prints when it starts, on this home\'s own network.</string>
     <string name="setup_kiosk">Keep Saathi on the screen (kiosk)</string>
     <string name="setup_save">Save</string>
     <string name="setup_cancel">Cancel</string>
     <string name="setup_rejected">That address is not on the home network, so it was not saved.</string>
+
+    <!-- Where Saathi thinks, and the keys the engine in this app needs.
+         A stored key is never shown back: each one's row says only that
+         it is set or missing, and every toast names keys, never values. -->
+    <string name="setup_brain_phone">Saathi thinks on this phone</string>
+    <string name="setup_brain_remote">Saathi thinks on another computer, at this address</string>
+    <string name="setup_page_brain">Brain</string>
+    <string name="setup_page_keys">Keys</string>
+    <string name="setup_keys_message">The keys the engine on this phone uses. OPENAI_API_KEY or GROQ_API_KEY is needed for Saathi to think here; YOUTUBE_API_KEY and the rest are optional. A value typed or pasted replaces the stored one on Save, Clear removes it, an empty field changes nothing. Nothing stored is ever shown back.</string>
+    <string name="setup_keys_paste">Paste .env from clipboard</string>
+    <string name="setup_key_set">%1$s: set</string>
+    <string name="setup_key_missing">%1$s: missing</string>
+    <string name="setup_key_clear">Clear</string>
+    <string name="setup_key_hint">Type or paste the value</string>
+    <string name="setup_key_json_hint">Paste the service-account JSON file</string>
+    <string name="setup_keys_filled">Filled from the clipboard: %1$s</string>
+    <string name="setup_keys_clipboard_empty">The clipboard holds no text. Copy the .env file first.</string>
+    <string name="setup_keys_none_found">No KEY=VALUE lines the engine reads were found on the clipboard.</string>
+    <string name="setup_keys_stored">Stored: %1$s</string>
+    <string name="setup_keys_removed">Removed: %1$s</string>
+    <string name="setup_keys_need_ai">Saathi cannot think on this phone without OPENAI_API_KEY or GROQ_API_KEY. Add one, or choose another computer.</string>
+    <string name="setup_engine_failed">The engine could not start on this phone: %1$s</string>
 </resources>

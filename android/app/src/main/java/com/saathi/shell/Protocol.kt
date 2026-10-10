@@ -14,7 +14,7 @@
  *
  * What lost: a kotlinx.serialization or Moshi model. Both would pull a
  * code generator or a reflection runtime into an app whose whole message
- * set is seven small shapes, and both are stricter than the engine, which
+ * set is a dozen small shapes, and both are stricter than the engine, which
  * adds fields between releases (`target` and `watch_url` arrived on
  * 2026-10-08 with older clients still connected). `org.json` ships in the
  * platform, tolerates unknown keys, and parses a frame in microseconds.
@@ -76,6 +76,14 @@ sealed interface AudioMessage {
 
     /** Stop the current playback at once and answer `played` for it. */
     data object Stop : AudioMessage
+
+    /**
+     * Render [text] with the phone's own text-to-speech, in [language]
+     * (the engine's key: `english`, `chinese`, `hindi`, `bengali`), and
+     * answer `synthesized` for [id] followed by exactly one binary frame
+     * holding the WAV -- or `synthesized` with an error and no frame.
+     */
+    data class Synthesize(val id: String, val text: String, val language: String) : AudioMessage
 }
 
 object Protocol {
@@ -221,7 +229,16 @@ object Protocol {
         const val TYPE_PLAY = "play"
         const val TYPE_STOP = "stop"
         const val TYPE_PLAYED = "played"
+        const val TYPE_SYNTHESIZE = "synthesize"
+        const val TYPE_SYNTHESIZED = "synthesized"
         const val FORMAT_WAV = "wav"
+
+        // The engine's language keys (`saathi/voice/language.py`), as a
+        // `synthesize` frame carries them: Whisper's own names, lowercased.
+        const val LANGUAGE_ENGLISH = "english"
+        const val LANGUAGE_CHINESE = "chinese"
+        const val LANGUAGE_HINDI = "hindi"
+        const val LANGUAGE_BENGALI = "bengali"
 
         /** Sent once, as the first text frame after connecting. */
         fun hello(): String =
@@ -235,6 +252,19 @@ object Protocol {
         fun played(id: String): String =
             JSONObject().put("type", TYPE_PLAYED).put("id", id).toString()
 
+        /**
+         * The answer to a `synthesize`: without [error], sent right before
+         * the one binary frame holding the WAV (nothing may come between
+         * the two -- this frame is what tells the engine the next binary
+         * frame is a sentence, not microphone audio); with [error], sent
+         * alone, and the engine fails that sentence at once.
+         */
+        fun synthesized(id: String, error: String? = null): String {
+            val obj = JSONObject().put("type", TYPE_SYNTHESIZED).put("id", id)
+            if (error != null) obj.put("error", error)
+            return obj.toString()
+        }
+
         /** Sort one `/audio` text frame; null when it is not one this shell can name. */
         fun parse(text: String): AudioMessage? {
             val obj = try {
@@ -245,6 +275,12 @@ object Protocol {
             return when (obj.str("type")) {
                 TYPE_PLAY -> obj.str("id")?.let { AudioMessage.Play(it, obj.str("format") ?: FORMAT_WAV) }
                 TYPE_STOP -> AudioMessage.Stop
+                TYPE_SYNTHESIZE -> {
+                    val id = obj.str("id")
+                    val text = obj.str("text")
+                    val language = obj.str("language")
+                    if (id == null || text == null || language == null) null else AudioMessage.Synthesize(id, text, language)
+                }
                 else -> null
             }
         }

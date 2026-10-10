@@ -163,6 +163,33 @@ class ProtocolTest {
         assertNull(Protocol.Audio.parse("garbage"))
     }
 
+    @Test
+    fun synthesizeFrameParsesAndNeedsAllThreeFields() {
+        val text = """{"type":"synthesize","id":"tts-3","text":"Good morning.","language":"hindi"}"""
+        assertEquals(AudioMessage.Synthesize("tts-3", "Good morning.", "hindi"), Protocol.Audio.parse(text))
+        assertNull(Protocol.Audio.parse("""{"type":"synthesize","text":"x","language":"hindi"}"""))
+        assertNull(Protocol.Audio.parse("""{"type":"synthesize","id":"tts-3","language":"hindi"}"""))
+        assertNull(Protocol.Audio.parse("""{"type":"synthesize","id":"tts-3","text":"x"}"""))
+        assertNull(Protocol.Audio.parse("""{"type":"synthesize","id":"tts-3","text":"x","language":null}"""))
+    }
+
+    @Test
+    fun synthesizedBuilderMatchesTheServerWithAndWithoutAnError() {
+        assertEquals(mapOf("type" to "synthesized", "id" to "tts-3"), fields(Protocol.Audio.synthesized("tts-3")))
+        assertEquals(
+            mapOf("type" to "synthesized", "id" to "tts-3", "error" to "no voice installed for bengali"),
+            fields(Protocol.Audio.synthesized("tts-3", "no voice installed for bengali")),
+        )
+    }
+
+    @Test
+    fun theLanguageKeysAreTheEngines() {
+        assertEquals("english", Protocol.Audio.LANGUAGE_ENGLISH)
+        assertEquals("chinese", Protocol.Audio.LANGUAGE_CHINESE)
+        assertEquals("hindi", Protocol.Audio.LANGUAGE_HINDI)
+        assertEquals("bengali", Protocol.Audio.LANGUAGE_BENGALI)
+    }
+
     private fun fields(text: String): Map<String, Any> {
         val obj = JSONObject(text)
         return obj.keys().asSequence().associateWith { obj.get(it) }
