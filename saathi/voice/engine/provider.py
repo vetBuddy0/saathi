@@ -17,15 +17,29 @@ The option that lost: a full `VoiceSession` per provider. The pipeline
 duplicating it to swap two HTTP endpoints would be two places for
 every future fix to land.
 
+Since 2026-10-08 the client under the provider is a second, separate
+choice: the vendor SDK (`openai`/`groq`) where it imports, else
+`rest_client.py`'s stdlib client -- the phone (Chaquopy) has no wheel
+for the SDKs' `pydantic-core`, and the engine runs there unchanged
+otherwise. `SAATHI_AI_CLIENT=rest` forces the REST client on a machine
+that has the SDK, so the phone's path can be exercised and compared on
+a laptop; `sdk` forces the SDK and fails loudly if it is missing. Unset
+is "SDK if you can", which is what every Linux install had before.
+
 Revisiting this for cost is in TODO.md. Nothing here decides price.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from saathi.voice.engine.rest_client import GROQ_BASE_URL, OPENAI_BASE_URL, RestChatClient
+
+logger = logging.getLogger(__name__)
 
 # Groq: the models item D's bake-off chose (see cascade.py's comments).
 GROQ_LLM_MODEL = "qwen/qwen3.8-27b"
@@ -47,6 +61,19 @@ OPENAI_STT_MODEL = "gpt-transcribe"
 _REASONING_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
 
 PROVIDERS = ("openai", "groq")
+# SAATHI_AI_CLIENT: how the provider is reached. Unset means the SDK
+# when it imports, else REST.
+CLIENT_KINDS = ("sdk", "rest")
+
+# The deadline and retry policy, one set of numbers for both clients:
+# 5 s to connect, 20 s on each read, one more attempt when the request
+# never reached the service. They are the SDK path's since 2026-09-25;
+# the REST client is built with the same ones (2026-10-08, found in
+# review: it had a 30 s single attempt of its own, so a stalled request
+# on the phone held the turn ten seconds longer than on the laptop).
+CONNECT_TIMEOUT_SECONDS = 5.0
+REQUEST_TIMEOUT_SECONDS = 20.0
+MAX_RETRIES = 1
 
 
 class ProviderUnavailable(RuntimeError):
@@ -115,8 +142,26 @@ def choose_provider_name(environ: Mapping[str, str]) -> str | None:
     return None
 
 
+def choose_client_kind(environ: Mapping[str, str]) -> str | None:
+    """`SAATHI_AI_CLIENT`: "rest" or "sdk" when set, None when unset
+    (the SDK if importable, else REST). Anything else is refused, not
+    guessed, same as an unknown provider name."""
+    explicit = environ.get("SAATHI_AI_CLIENT", "").strip().lower()
+    if not explicit:
+        return None
+    if explicit not in CLIENT_KINDS:
+        raise ProviderUnavailable(
+            f"SAATHI_AI_CLIENT={explicit!r}; expected one of {', '.join(CLIENT_KINDS)}"
+        )
+    return explicit
+
+
 def _key_name(name: str) -> str:
     return "OPENAI_API_KEY" if name == "openai" else "GROQ_API_KEY"
+
+
+def _base_url(name: str) -> str:
+    return OPENAI_BASE_URL if name == "openai" else GROQ_BASE_URL
 
 
 def missing_key(environ: Mapping[str, str] | None = None) -> str | None:
@@ -129,6 +174,10 @@ def missing_key(environ: Mapping[str, str] | None = None) -> str | None:
         return str(exc)
     if name is None:
         return "OPENAI_API_KEY or GROQ_API_KEY"
+    try:
+        choose_client_kind(environ)
+    except ProviderUnavailable as exc:
+        return str(exc)
     key = _key_name(name)
     return None if environ.get(key) else key
 
@@ -152,7 +201,8 @@ def provider_from_env(
         key = environ.get(_key_name(name))
         if not key:
             raise ProviderUnavailable(f"{_key_name(name)} is not set in the environment")
-        client = _sdk_client(name, key)
+        kind = choose_client_kind(environ)
+        client = build_client(name, key, kind)
         # Hearing her on Groq while OpenAI replies (2026-10-07): measured
         # from the demo laptop, Groq's whisper-large-v3-turbo transcribed
         # the test sentence in 270 ms median against gpt-transcribe's
@@ -174,13 +224,63 @@ def provider_from_env(
                 stt_model=GROQ_STT_MODEL,
                 # No retry and a short deadline: a 429 or a slow call
                 # should reach the fallback now, not after a backoff.
-                stt_client=_sdk_client("groq", environ["GROQ_API_KEY"], retries=0, timeout=4.0),
+                stt_client=build_client(
+                    "groq", environ["GROQ_API_KEY"], kind, retries=0, timeout=4.0
+                ),
                 stt_fallback=(client, stt),
             )
     return AIProvider(name=name, client=client, llm_model=llm, stt_model=stt)
 
 
-def _sdk_client(name: str, key: str, *, retries: int = 1, timeout: float = 20.0) -> Any:
+def build_client(
+    name: str,
+    key: str,
+    kind: str | None = None,
+    *,
+    retries: int = MAX_RETRIES,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> Any:
+    """The client for provider `name`: the SDK's, or `RestChatClient`.
+    `kind` is `choose_client_kind()`'s answer: None tries the SDK and
+    falls back to REST when it does not import (the phone); "rest"
+    skips the SDK; "sdk" refuses to fall back. `retries` and `timeout`
+    are for the Groq STT client, which must fail fast to its fallback."""
+    if kind == "rest":
+        logger.info("AI client: REST (%s), by SAATHI_AI_CLIENT", _base_url(name))
+        return _rest_client(name, key, retries=retries, timeout=timeout)
+    try:
+        client = _sdk_client(name, key, retries=retries, timeout=timeout)
+    except ImportError as exc:
+        if kind == "sdk":
+            raise ProviderUnavailable(
+                f"SAATHI_AI_CLIENT=sdk but the {name} SDK is not importable: {exc}"
+            ) from exc
+        logger.info(
+            "AI client: REST (%s); the %s SDK does not import: %s", _base_url(name), name, exc
+        )
+        return _rest_client(name, key, retries=retries, timeout=timeout)
+    logger.info("AI client: %s SDK", name)
+    return client
+
+
+def _rest_client(
+    name: str, key: str, *, retries: int = MAX_RETRIES, timeout: float = REQUEST_TIMEOUT_SECONDS
+) -> RestChatClient:
+    """The stdlib client, with the SDK client's deadline and retry."""
+    return RestChatClient(
+        _base_url(name),
+        key,
+        timeout=timeout,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        retries=retries,
+    )
+
+
+def _sdk_client(
+    name: str, key: str, *, retries: int = MAX_RETRIES, timeout: float = REQUEST_TIMEOUT_SECONDS
+) -> Any:
+    """The vendor SDK's client, exactly as built before the REST client
+    existed. Raises ImportError where the SDK (or its httpx) is absent."""
     # IPv4 only. Found live 2026-09-25: this network advertises IPv6
     # addresses for api.openai.com but can't route IPv6, so every new
     # connection burned seconds on dead addresses before falling back
@@ -190,8 +290,8 @@ def _sdk_client(name: str, key: str, *, retries: int = 1, timeout: float = 20.0)
     import httpx
 
     http_client = httpx.Client(
-        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=1),
-        timeout=httpx.Timeout(timeout, connect=5.0),
+        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=retries),
+        timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT_SECONDS),
     )
     if name == "openai":
         from openai import OpenAI

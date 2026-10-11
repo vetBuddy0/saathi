@@ -6,7 +6,6 @@ readme = "SPEC.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.10",
-    "deno>=2.9.7",
     # audio/wake.py: hears "Saathi" on-device (tiny.en). Was the
     # `hardware` group, for smoke.py's AEC check only, until the wake
     # word needed it in every run. MIT; aarch64 wheels via ctranslate2.
@@ -37,7 +36,6 @@ dependencies = [
     # than WAV for the same audio, from a smaller upload. See
     # docs/completed/latency-investigation.md for the numbers.
     "soundfile>=0.14.0",
-    "yt-dlp[default]>=2026.8.19",
 ]
 
 [project.scripts]

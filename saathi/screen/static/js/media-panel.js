@@ -35,6 +35,27 @@
 // Rejected: rendering the player through a plain <iframe src=...> with
 // no API. That can't be told to pause, set a volume, or report that a
 // video ended — and "quieter" and "carry on" are half the brief.
+//
+// Targets (2026-10-08): every `play` names where it goes. "embed" (or
+// no target at all — an older controller) is this panel's: the IFrame
+// player as above. "browser" is the real youtube.com watch page, shown
+// by a client that has one (the Android shell's YouTube pane, on its
+// own socket); the controller sends a video there only after this
+// panel's player has refused it (error 150 on a label upload, for
+// one). A "browser" play is ignored here outright: no iframe, no
+// title, no error report, and the panel stays exactly as it was. Not
+// hidden or stopped either — the controller emits `stop` before a play
+// that changes target, so this panel needs no rule of its own, and a
+// panel that reacted to the other target's plays would be two clients
+// each half-deciding the same thing. Rejected: this panel opening the
+// watch page itself (youtube.com refuses to load in a frame; a
+// navigation would take the face with it). The one thing this panel
+// does remember about a "browser" play is that it happened: the
+// controller addresses pause/resume/volume to whichever target is
+// playing, and a hidden, stopped embed player (kept after the `stop`
+// that preceded the switch -- see above) answering her "carry on" with
+// the previous video's audio was found in review. `activeTarget` is
+// that memory, cleared by `stop`.
 
 import {
   ALL_LAYOUT_CLASSES,
@@ -116,6 +137,13 @@ export function createMediaPanel(send, options = {}) {
   let baseVolume = 70;
   let fullscreen = false;
   let coreState = "sleeping";
+
+  // Where the last `play` went -- "embed" (ours) or "browser" (the
+  // watch-page client's) -- until a `stop`; null when nothing plays.
+  // pause/resume/volume are addressed to whichever target is playing,
+  // so they act here only while that is the embed: the hidden player
+  // kept after a target switch must not restart on her "carry on".
+  let activeTarget = null;
 
   let player = null; // YT.Player once the API has attached
   let playerReady = false;
@@ -257,89 +285,8 @@ export function createMediaPanel(send, options = {}) {
     reportError(videoId, code);
   }
 
-  // DEMO ONLY (DECISIONS.md 2026-09-25): play a direct stream the server
-  // resolved with yt-dlp, because label uploads refuse the embed (error
-  // 150). YouTube serves picture and sound separately, so a muted <video>
-  // and an <audio> play side by side; the audio is the clock and the
-  // picture is nudged back if it drifts. Same methods as the YT.Player
-  // the rest of this module drives, so pause/volume/stop are unchanged.
-  function startDirect(stream, videoId) {
-    if (demo) return;
-    clearTimeout(readyTimer);
-    readyTimer = null;
-    attaching = false;
-    pendingVideoId = null;
-    if (player && playerReady && player.kind !== "direct") {
-      try {
-        player.stopVideo();
-      } catch (error) {
-        /* the embed is being replaced anyway */
-      }
-    }
-    const video = document.createElement("video");
-    video.className = "media-player__iframe";
-    video.muted = true;
-    video.playsInline = true;
-    video.src = stream.video;
-    const audio = document.createElement("audio");
-    audio.src = stream.audio;
-    frameHolder.replaceChildren(video, audio);
-    audio.addEventListener("timeupdate", () => {
-      if (Math.abs(video.currentTime - audio.currentTime) > 0.3) video.currentTime = audio.currentTime;
-    });
-    audio.addEventListener("ended", () => {
-      if (view !== "player") return;
-      send({ type: "media_event", event: "ended" });
-      view = "none";
-      render();
-    });
-    audio.addEventListener("error", () => {
-      // The direct stream failed (a network blip, an expired URL): fall
-      // back to the official embed for this video rather than declaring
-      // it unplayable -- found live 2026-09-25, when one transient failure
-      // made "Ed Sheeran - Perfect" vanish from every later search.
-      if (view !== "player" || !player || player.kind !== "direct") return;
-      player.stopVideo();
-      player = null;
-      playerReady = false;
-      frameHolder.replaceChildren();
-      startPlayback(videoId);
-    });
-    player = {
-      kind: "direct",
-      playVideo() {
-        audio.play().catch(() => {});
-        video.play().catch(() => {});
-      },
-      pauseVideo() {
-        audio.pause();
-        video.pause();
-      },
-      stopVideo() {
-        audio.pause();
-        video.pause();
-      },
-      setVolume(level) {
-        audio.volume = Math.max(0, Math.min(1, level / 100));
-      },
-      loadVideoById() {},
-    };
-    playerReady = true;
-    loadedVideoId = videoId;
-    applyVolume();
-    player.playVideo();
-  }
-
   async function startPlayback(videoId) {
     if (demo) return; // the demo draws a fake player region, no network
-    if (player && player.kind === "direct") {
-      // Back to the embed (no stream this time): the direct player can't
-      // load a video id, so start the embed from scratch.
-      player.stopVideo();
-      player = null;
-      playerReady = false;
-      frameHolder.replaceChildren();
-    }
     if (player && playerReady) {
       loadedVideoId = videoId;
       player.loadVideoById(videoId);
@@ -385,31 +332,30 @@ export function createMediaPanel(send, options = {}) {
         if (player && playerReady) player.stopVideo();
         break;
       case "play":
+        activeTarget = message.target === "browser" ? "browser" : "embed";
+        if (message.target === "browser") break; // the watch-page client's, not ours (see above)
         current = { video_id: message.video_id, title: message.title, index: message.index };
         if (typeof message.volume === "number") baseVolume = message.volume;
         if (typeof message.fullscreen === "boolean") fullscreen = message.fullscreen;
         view = "player";
         render();
-        if (message.stream && message.stream.video && message.stream.audio) {
-          startDirect(message.stream, message.video_id);
-        } else {
-          startPlayback(message.video_id);
-        }
+        startPlayback(message.video_id);
         break;
       case "pause":
-        if (player && playerReady) player.pauseVideo();
+        if (activeTarget === "embed" && player && playerReady) player.pauseVideo();
         break;
       case "resume":
-        if (player && playerReady) player.playVideo();
+        if (activeTarget === "embed" && player && playerReady) player.playVideo();
         break;
       case "stop":
+        activeTarget = null;
         view = "none";
         render();
         if (player && playerReady) player.stopVideo();
         break;
       case "volume":
         if (typeof message.level === "number") baseVolume = message.level;
-        applyVolume();
+        if (activeTarget !== "browser") applyVolume();
         break;
       case "layout":
         fullscreen = message.mode === "fullscreen";
@@ -455,7 +401,7 @@ export function createMediaPanel(send, options = {}) {
     },
     // For tests only: the state this module holds, read-only.
     _debug() {
-      return { view, fullscreen, baseVolume, coreState, playerReady, loadedVideoId };
+      return { view, fullscreen, baseVolume, coreState, playerReady, loadedVideoId, activeTarget };
     },
   };
 }

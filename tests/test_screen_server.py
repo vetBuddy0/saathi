@@ -1,13 +1,18 @@
 import asyncio
+import io
 import json
 import logging
 import tempfile
 import threading
+import time
+import wave
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 import saathi.screen.server as server_module
+from saathi.audio.remote import RemoteAudio
 from saathi.core import Core, State
 from saathi.identity.store import IdentityStore
 from saathi.screen.server import build_app
@@ -796,6 +801,8 @@ async def test_the_second_one_that_one_and_again_resolve_across_turns(monkeypatc
                     "index": 2,
                     "volume": 70,
                     "fullscreen": False,
+                    "target": "embed",
+                    "watch_url": f"https://www.youtube.com/watch?v={found[1].video_id}",
                 }
             ]
             assert session.results[-1]["playing"].startswith("Two: ")
@@ -1486,6 +1493,56 @@ async def test_a_player_error_is_logged_with_its_code_and_reaches_the_controller
     assert found[0].video_id in caplog.text and "code 150" in caplog.text
 
 
+async def test_a_second_client_gets_the_browser_target_play_and_its_browser_error_lands(
+    monkeypatch, caplog
+):
+    # The Android shell is just another /ws client: it sees the play the
+    # face page's panel ignores, and its report goes through the same
+    # door as the panel's. The server tells the two apart by nothing.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    watch = f"https://www.youtube.com/watch?v={found[0].video_id}"
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as face, client.ws_connect("/ws") as shell:
+            await _connect(face)
+            await _connect(shell)
+            await _turn_collecting_media(face, session, action="search", query="q")
+            (play,) = await _turn_collecting_media(face, session, action="play", choice=1)
+            assert play["target"] == "embed" and play["watch_url"] == watch
+            # The face page's embed refuses it: the controller re-sends it
+            # on the browser target, to every client.
+            await face.send_json(
+                {
+                    "type": "media_event",
+                    "event": "error",
+                    "video_id": found[0].video_id,
+                    "code": 150,
+                }
+            )
+            while True:
+                message = await shell.receive_json()
+                if message["type"] == "media" and message.get("target") == "browser":
+                    break
+            assert message["action"] == "play"
+            assert message["video_id"] == found[0].video_id and message["watch_url"] == watch
+            assert message["volume"] == 70 and message["fullscreen"] is False
+            assert await face.receive_json() == message  # the panel ignores it; the socket doesn't
+            # The watch page can't play it either: the shell's report refuses it.
+            await shell.send_json(
+                {
+                    "type": "media_event",
+                    "event": "error",
+                    "video_id": found[0].video_id,
+                    "code": "browser",
+                }
+            )
+            await asyncio.sleep(0.1)
+    assert found[0].video_id in controller.unplayable
+    assert found[0].video_id in controller.refused
+    assert controller.playing is False
+    assert "code browser" in caplog.text
+
+
 # -- captions: what was heard and said, only while switched on -------------
 
 
@@ -1895,3 +1952,767 @@ async def test_her_name_is_not_heard_while_a_call_is_on_screen(monkeypatch):
         assert wake.should_listen() is False
         calls.update(None)
         assert wake.should_listen() is True
+
+
+# -- /audio: the phone as the microphone and the speaker (2026-10-08) --------
+
+
+class HearingSession(FakeSession):
+    """A FakeSession that keeps what it was fed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.heard: list[bytes] = []
+
+    def send_audio(self, chunk: bytes) -> None:
+        self.heard.append(chunk)
+
+
+class RemoteSpeakingSession(HearingSession):
+    """Speaks the way cascade.py does: one WAV per sentence, through the
+    player seam, blocking in the executor thread until the handle says
+    the sentence has played; `interrupt()` stops the current handle."""
+
+    def __init__(self, player, wav: bytes) -> None:
+        super().__init__()
+        self._player = player
+        self._wav = wav
+        self.handles: list = []
+
+    def say(self, text: str) -> None:
+        super().say(text)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            path = Path(tmp_file.name)
+        path.write_bytes(self._wav)
+        try:
+            handle = self._player("fake-sink", path)
+            self.handles.append(handle)
+            handle.wait()
+        finally:
+            path.unlink(missing_ok=True)
+
+    def interrupt(self) -> None:
+        super().interrupt()
+        for handle in self.handles:
+            handle.stop()
+
+
+def _silence_wav(seconds: float) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(b"\x00\x00" * int(16000 * seconds))
+    return buffer.getvalue()
+
+
+async def _eventually(condition, seconds: float = 2.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "condition never held"
+        await asyncio.sleep(0.01)
+
+
+def _audio_app(session, remote=None):
+    remote = remote or RemoteAudio()
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source", remote_audio=remote)
+    return app, remote, core
+
+
+async def _hello(audio) -> None:
+    await audio.send_json({"type": "hello", "client": "android", "sample_rate": 16000})
+
+
+async def test_an_audio_clients_frames_reach_the_session_only_between_press_and_release(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    app, remote, core = _audio_app(session)
+    frame = b"\x01\x00" * 1600  # 100 ms of 16 kHz PCM16
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            assert await _connect(ws) == {"type": "state", "state": "sleeping"}
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            # The client may send whenever it likes; before the press
+            # nobody is listening.
+            await audio.send_bytes(frame)
+            await asyncio.sleep(0.05)
+            assert session.heard == []
+
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await audio.send_bytes(frame)
+            await audio.send_bytes(frame)
+            await _eventually(lambda: len(session.heard) == 2)
+            assert session.heard == [frame, frame]
+
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            await audio.send_bytes(frame)
+            await asyncio.sleep(0.05)
+            assert len(session.heard) == 2  # the release closed the mic
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.start_calls == 1
+    assert FakeCapture.instances == []  # the phone was the microphone; parec never ran
+
+
+async def test_with_an_audio_client_attached_a_press_starts_no_capture(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    app, remote, core = _audio_app(session)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            assert FakeCapture.instances == []
+            assert session.start_calls == 1
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert FakeCapture.instances == []
+
+
+async def test_tts_from_a_real_turn_reaches_the_audio_client_and_its_played_ack_ends_the_turn(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    wav = _silence_wav(0.05)
+    remote = RemoteAudio()
+    session = RemoteSpeakingSession(remote.player, wav)
+    app, remote, core = _audio_app(session, remote)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+
+            header = await audio.receive_json()
+            assert header == {"type": "play", "id": header["id"], "format": "wav"}
+            body = await audio.receive()
+            assert body.type == server_module.WSMsgType.BINARY and body.data == wav
+            # Not over until the phone says so: the WAV is 50 ms, the
+            # grace is 3 s, and nothing has arrived after 200 ms.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.receive_json(), 0.2)
+            assert core.state == State.SPEAKING
+
+            await audio.send_json({"type": "played", "id": header["id"]})
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.spoken == ["reply"]
+    assert session.handles[0].acknowledged
+    assert FakeCapture.instances == []
+
+
+async def test_a_barge_in_sends_stop_to_the_audio_client(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    remote = RemoteAudio()
+    session = RemoteSpeakingSession(remote.player, _silence_wav(0.05))
+    app, remote, core = _audio_app(session, remote)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            header = await audio.receive_json()
+            await audio.receive()  # the WAV
+            # She talks over it: the phone is told to stop, and listens again.
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            assert await audio.receive_json() == {"type": "stop"}
+            await audio.send_json({"type": "played", "id": header["id"]})  # what it cut short
+            await asyncio.sleep(0.05)
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            second = await audio.receive_json()
+            assert second["type"] == "play" and second["id"] != header["id"]
+            await audio.receive()
+            await audio.send_json({"type": "played", "id": second["id"]})
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.interrupt_calls == 1
+    assert FakeCapture.instances == []
+
+
+async def test_detaching_the_audio_client_restores_the_parec_path(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    app, remote, core = _audio_app(session)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            async with client.ws_connect("/audio") as audio:
+                await _hello(audio)
+                await _eventually(lambda: remote.attached)
+            await _eventually(lambda: not remote.attached)
+
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            assert len(FakeCapture.instances) == 1
+            assert FakeCapture.instances[0].source_id == "fake-aec-source"
+            assert FakeCapture.instances[0].started is True
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert FakeCapture.instances[0].stopped is True
+
+
+async def test_a_second_audio_client_replaces_the_first(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    app, remote, core = _audio_app(session)
+    frame = b"\x02\x00" * 1600
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as first:
+            await _connect(ws)
+            await _hello(first)
+            await _eventually(lambda: remote.attached)
+            async with client.ws_connect("/audio") as second:
+                await _hello(second)
+                # The server closes the replaced connection itself.
+                closing = await first.receive()
+                assert closing.type in (
+                    server_module.WSMsgType.CLOSE,
+                    server_module.WSMsgType.CLOSING,
+                    server_module.WSMsgType.CLOSED,
+                )
+                await _eventually(lambda: remote.attached)
+                await ws.send_json({"type": "input", "event": "press"})
+                assert await ws.receive_json() == {"type": "state", "state": "listening"}
+                await second.send_bytes(frame)
+                await _eventually(lambda: session.heard == [frame])
+                await ws.send_json({"type": "input", "event": "release"})
+                assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+                assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+                assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert FakeCapture.instances == []
+
+
+async def test_without_a_remote_audio_there_is_no_audio_route():
+    async with TestClient(TestServer(build_app(Core()))) as client:
+        response = await client.get("/audio")
+        assert response.status == 404
+
+
+async def test_with_no_local_mic_a_phone_still_holds_a_turn(monkeypatch):
+    # A device with no usable local capture source (a mic-less laptop,
+    # a Pi whose USB mic is unplugged) still runs a turn through the
+    # phone: the /audio client is the microphone.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    remote = RemoteAudio()
+    core = Core()
+    app = build_app(core, session=session, capture_source_id=None, remote_audio=remote)
+    frame = b"\x03\x00" * 1600
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await audio.send_bytes(frame)
+            await _eventually(lambda: session.heard == [frame])
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.start_calls == 1
+    assert FakeCapture.instances == []
+
+
+async def test_with_no_local_mic_and_no_phone_a_press_starts_nothing(monkeypatch):
+    # The pre-existing rule the `or remote_mic` must not widen: with no
+    # capture source and no /audio client, a press starts no session and
+    # no capture.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    core = Core()
+    app = build_app(core, session=session, capture_source_id=None, remote_audio=RemoteAudio())
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await asyncio.sleep(0.05)
+            assert session.start_calls == 0
+            assert FakeCapture.instances == []
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+    assert session.start_calls == 0
+    assert FakeCapture.instances == []
+
+
+async def test_a_client_that_never_acks_does_not_hold_the_turn(monkeypatch):
+    # "The engine must never hang on a dead client", seen through /ws: a
+    # client that takes the WAV and never says `played` still lets the
+    # state machine reach idle, at the WAV's length plus the grace.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    remote = RemoteAudio(grace_seconds=0.1)
+    session = RemoteSpeakingSession(remote.player, _silence_wav(0.05))
+    app, remote, core = _audio_app(session, remote)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert (await audio.receive_json())["type"] == "play"
+            await audio.receive()  # the WAV; no `played` ever follows
+            assert await asyncio.wait_for(ws.receive_json(), 1.0) == {
+                "type": "state",
+                "state": "idle",
+            }
+            assert remote.attached  # slow is not dead: the client stays
+    assert not session.handles[0].acknowledged
+    assert session.spoken == ["reply"]
+
+
+async def test_bad_audio_text_frames_are_logged_and_the_client_stays_attached(
+    monkeypatch, caplog
+):
+    # A bad frame must not detach the mic mid-hold: each is dropped with
+    # a log line and the socket lives on.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    app, remote, core = _audio_app(session)
+    frame = b"\x04\x00" * 1600
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await audio.send_json({"type": "hello", "client": "android", "sample_rate": 44100})
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await audio.send_str("not json")
+            await audio.send_json({"type": "bogus"})
+            await audio.send_json({"type": "played", "id": 7})
+            await audio.send_bytes(frame)
+            await _eventually(lambda: session.heard == [frame])
+            assert remote.attached
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+            assert remote.attached
+    assert "sample_rate 44100 is not 16000" in caplog.text
+    assert "dropped malformed audio message" in caplog.text
+    assert "dropped unknown audio message" in caplog.text
+    assert FakeCapture.instances == []
+
+
+async def _dropped_by_the_server(ws) -> None:
+    """Read a quiet client's socket (autoping off) until the server's
+    close reaches it; the unanswered pings and the broadcasts sent before
+    the drop sit in its queue first. Used instead of `ws.close()`, which
+    raises on a transport the server has already torn down."""
+    closing = (
+        server_module.WSMsgType.CLOSE,
+        server_module.WSMsgType.CLOSING,
+        server_module.WSMsgType.CLOSED,
+        server_module.WSMsgType.ERROR,
+    )
+    while True:
+        message = await asyncio.wait_for(ws.receive(), 3.0)
+        if message.type in closing:
+            return
+
+
+async def _reading_until(ws, condition, seconds: float = 3.0) -> None:
+    """Wait for `condition` while reading `ws`, so that socket keeps
+    answering the server's pings (aiohttp's client only pongs inside
+    `receive()`). Nothing it reads is expected."""
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "condition never held"
+        try:
+            message = await asyncio.wait_for(ws.receive(), 0.05)
+        except asyncio.TimeoutError:
+            continue
+        raise AssertionError(f"unexpected {message}")
+
+
+async def test_an_audio_client_that_stops_answering_pings_is_detached(monkeypatch):
+    # A phone off Wi-Fi sends no close frame. The server's heartbeat is
+    # what notices: a missed pong closes the socket, the handler detaches
+    # the client, and the local mic and speaker are back.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    monkeypatch.setattr(server_module, "_HEARTBEAT_SECONDS", 0.2)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    app, remote, core = _audio_app(session)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            audio = await client.ws_connect("/audio", autoping=False)  # a client gone quiet
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await _reading_until(ws, lambda: not remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            assert len(FakeCapture.instances) == 1  # parec again
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+            await _dropped_by_the_server(audio)
+
+
+async def test_a_ws_client_that_vanishes_with_its_press_down_is_released(monkeypatch):
+    # The shell's socket dies mid-hold (a Wi-Fi hiccup; here, a client
+    # that stops answering pings): the release it would have sent is
+    # lost with it, and the shell never re-sends one. The heartbeat
+    # notices, the server releases the press on the way out, the turn
+    # runs, and the face does not sit on listening until her next hold.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    monkeypatch.setattr(server_module, "_HEARTBEAT_SECONDS", 0.2)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source")
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as watcher:
+            await _connect(watcher)
+            holder = await client.ws_connect("/ws", autoping=False)
+            await _connect(holder)
+            await holder.send_json({"type": "input", "event": "press"})
+            assert await watcher.receive_json() == {"type": "state", "state": "listening"}
+            assert FakeCapture.instances[0].started is True
+            # Nothing more from the holder: its socket goes with the key down.
+            assert await asyncio.wait_for(watcher.receive_json(), 3.0) == {
+                "type": "state",
+                "state": "thinking",
+            }
+            assert await watcher.receive_json() == {"type": "state", "state": "speaking"}
+            assert await watcher.receive_json() == {"type": "state", "state": "idle"}
+            assert FakeCapture.instances[0].stopped is True
+            await _dropped_by_the_server(holder)
+            # Another client's press afterwards is a fresh hold, not a no-op.
+            await watcher.send_json({"type": "input", "event": "press"})
+            assert await watcher.receive_json() == {"type": "state", "state": "listening"}
+            await watcher.send_json({"type": "input", "event": "release"})
+            assert await watcher.receive_json() == {"type": "state", "state": "thinking"}
+            assert await watcher.receive_json() == {"type": "state", "state": "speaking"}
+            assert await watcher.receive_json() == {"type": "state", "state": "idle"}
+    assert session.start_calls == 2
+    assert len(FakeCapture.instances) == 2
+
+
+async def test_a_ws_client_that_vanishes_without_a_press_down_releases_nothing(monkeypatch):
+    # Only the socket whose press is down is released: the face page
+    # dropping while the shell holds the button must not end her turn.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    monkeypatch.setattr(server_module, "_HEARTBEAT_SECONDS", 0.2)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source")
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as holder:
+            await _connect(holder)
+            bystander = await client.ws_connect("/ws", autoping=False)
+            await _connect(bystander)
+            await holder.send_json({"type": "input", "event": "press"})
+            assert await holder.receive_json() == {"type": "state", "state": "listening"}
+            # The bystander is long dropped by then; the holder, reading
+            # (and so answering pings), hears no state change at all.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(holder.receive_json(), 0.6)
+            await _dropped_by_the_server(bystander)
+            assert core.state == State.LISTENING
+            assert FakeCapture.instances[0].stopped is False
+            await holder.send_json({"type": "input", "event": "release"})
+            assert await holder.receive_json() == {"type": "state", "state": "thinking"}
+            assert await holder.receive_json() == {"type": "state", "state": "speaking"}
+            assert await holder.receive_json() == {"type": "state", "state": "idle"}
+    assert session.start_calls == 1
+
+
+async def test_a_ws_client_that_closes_in_order_with_its_press_down_is_taken_at_its_word(
+    monkeypatch,
+):
+    # A normal close (1000) is a client that had its chance to release:
+    # the shell always releases before it disconnects, and the press
+    # stands -- the rule every earlier test that closes mid-press relies
+    # on. Only a vanished client is released for.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    session = HearingSession()
+    core = Core()
+    app = build_app(core, session=session, capture_source_id="fake-aec-source")
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+        await asyncio.sleep(0.1)
+    assert core.state == State.LISTENING
+    assert FakeCapture.instances[0].stopped is False
+
+
+async def test_a_hold_socket_that_vanishes_mid_hold_abandons_the_hold(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    monkeypatch.setattr(server_module, "_HEARTBEAT_SECONDS", 0.2)
+    FakeCapture.instances.clear()
+    fired = []
+    app, session, cards, hold, core = _cards_app(
+        hold_seconds=1.0, on_hold_complete=lambda: fired.append(None)
+    )
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as watcher:
+            await _connect(watcher)
+            holder = await client.ws_connect("/ws", autoping=False)
+            await _connect(holder)
+            await holder.send_json({"type": "input", "event": "press"})
+            first = await watcher.receive_json()  # the holding card at 0
+            assert first["type"] == "card" and first["card"]["kind"] == "holding"
+            # The socket goes with the key down: the hold is abandoned,
+            # the card cleared, and the handler never fires.
+            message = await watcher.receive_json()
+            while message != {"type": "card", "card": None}:
+                assert message["type"] == "card" and message["card"]["progress"] < 1.0
+                message = await asyncio.wait_for(watcher.receive_json(), 3.0)
+            await _dropped_by_the_server(holder)
+            with pytest.raises(asyncio.TimeoutError):  # well past the threshold: no card, no fire
+                await asyncio.wait_for(watcher.receive_json(), 0.8)
+    assert fired == []
+    assert not hold.holding
+    assert core.state == State.SLEEPING
+    assert cards.current is None
+
+
+async def test_a_reset_names_its_player_and_the_server_passes_it_through(monkeypatch):
+    # The face page's `reset` (no target) on a reconnect while the shell
+    # plays the browser target changes nothing; the shell's own
+    # (`target: "browser"`) is the one that un-plays it.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    app, session, controller, found = _media_app()
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as face, client.ws_connect("/ws") as shell:
+            await _connect(face)
+            await _connect(shell)
+            await _turn_collecting_media(face, session, action="search", query="q")
+            await _turn_collecting_media(face, session, action="play", choice=1)
+            await face.send_json(
+                {
+                    "type": "media_event",
+                    "event": "error",
+                    "video_id": found[0].video_id,
+                    "code": 150,
+                }
+            )
+            await _eventually(lambda: controller.target == "browser")
+            await face.send_json({"type": "media_event", "event": "reset"})
+            await face.send_json({"type": "media_event", "event": "reset", "target": "embed"})
+            await shell.send_json({"type": "media_event", "event": "reset", "target": 3})
+            await asyncio.sleep(0.1)
+            assert controller.playing is True
+            await shell.send_json({"type": "media_event", "event": "reset", "target": "browser"})
+            await _eventually(lambda: controller.playing is False)
+
+
+async def test_without_an_audio_client_an_embed_refusal_is_reoffered_not_sent_to_the_browser(
+    monkeypatch,
+):
+    # cli.py's wiring: the browser target has a taker only while the
+    # shell's /audio socket is attached. With none (the Pi kiosk, a
+    # laptop demo), the embed's refusal refuses the video as it used to.
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    from saathi.tools.media import MediaController, make_media_tool
+    from saathi.tools.registry import Registry
+
+    found = _media_fixture_results()
+    remote = RemoteAudio()
+    controller = MediaController(
+        search=lambda _query: found, browser_available=lambda: remote.attached
+    )
+    registry = Registry()
+    registry.register(make_media_tool(controller))
+    session = ToolSession(
+        lambda name, arguments: registry.call(name, frozenset({"music"}), **arguments)
+    )
+    app = build_app(
+        Core(),
+        session=session,
+        capture_source_id="fake-aec-source",
+        media=controller,
+        remote_audio=remote,
+    )
+    refusal = {"type": "media_event", "event": "error", "video_id": found[0].video_id, "code": 150}
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as face:
+            await _connect(face)
+            await _turn_collecting_media(face, session, action="search", query="q")
+            await _turn_collecting_media(face, session, action="play", choice=1)
+            await face.send_json(refusal)
+            await _eventually(lambda: found[0].video_id in controller.refused)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(face.receive_json(), 0.2)  # no browser play
+            assert controller.playing is False
+            # With the phone attached, the same refusal goes to its pane.
+            async with client.ws_connect("/audio") as audio:
+                await _hello(audio)
+                await _eventually(lambda: remote.attached)
+                await _turn_collecting_media(face, session, action="play", choice=2)
+                await face.send_json({**refusal, "video_id": found[1].video_id})
+                message = await asyncio.wait_for(face.receive_json(), 2.0)
+                assert message["action"] == "play" and message["target"] == "browser"
+                assert message["video_id"] == found[1].video_id
+    assert found[1].video_id in controller.unplayable
+    assert found[1].video_id not in controller.refused
+
+
+# -- /audio: the phone's own voice (2026-10-08, the engine inside the phone) --
+
+
+class PhoneVoiceSession(HearingSession):
+    """Speaks the way voice/tts/remote_backend.py does under cascade.py:
+    asks the phone to render the sentence, then plays the WAV it got
+    back through the same client. A failed request is recorded, not
+    raised, as the backend turns it into silence."""
+
+    def __init__(self, remote) -> None:
+        super().__init__()
+        self._remote = remote
+        self.rendered: list[bytes] = []
+        self.failures: list[str] = []
+
+    def say(self, text: str) -> None:
+        from saathi.audio.remote import RemoteSynthesisError
+
+        super().say(text)
+        try:
+            wav = self._remote.synthesize(text, "english", 2.0)
+        except RemoteSynthesisError as exc:
+            self.failures.append(str(exc))
+            return
+        self.rendered.append(wav)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            path = Path(tmp_file.name)
+        path.write_bytes(wav)
+        try:
+            self._remote.player("remote", path).wait()
+        finally:
+            path.unlink(missing_ok=True)
+
+
+def _phone_app(remote):
+    """Remote mode as cli.py builds it: no capture source at all."""
+    core = Core()
+    session = PhoneVoiceSession(remote)
+    app = build_app(core, session=session, capture_source_id=None, remote_audio=remote)
+    return app, session, core
+
+
+async def test_the_synthesized_route_hands_the_next_binary_frame_to_the_waiting_synthesis(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    remote = RemoteAudio()
+    app, session, core = _phone_app(remote)
+    wav = _silence_wav(0.05)
+    frame = b"\x05\x00" * 1600
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await audio.send_bytes(frame)
+            await _eventually(lambda: session.heard == [frame])
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+
+            # The engine asks the phone for the sentence...
+            request = await audio.receive_json()
+            assert request == {
+                "type": "synthesize",
+                "id": request["id"],
+                "text": "reply",
+                "language": "english",
+            }
+            # ...the phone answers with the text frame, then the WAV...
+            await audio.send_json({"type": "synthesized", "id": request["id"]})
+            await audio.send_bytes(wav)
+            # ...and is then asked to play exactly that WAV.
+            header = await audio.receive_json()
+            assert header["type"] == "play"
+            body = await audio.receive()
+            assert body.type == server_module.WSMsgType.BINARY and body.data == wav
+            await audio.send_json({"type": "played", "id": header["id"]})
+            assert await ws.receive_json() == {"type": "state", "state": "idle"}
+    assert session.rendered == [wav]
+    assert session.heard == [frame]  # the WAV never reached the microphone path
+    assert session.failures == []
+    assert FakeCapture.instances == []
+
+
+async def test_a_synthesized_error_is_routed_and_a_bad_one_is_dropped(monkeypatch, caplog):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    FakeCapture.instances.clear()
+    remote = RemoteAudio()
+    app, session, core = _phone_app(remote)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws, client.ws_connect("/audio") as audio:
+            await _connect(ws)
+            await _hello(audio)
+            await _eventually(lambda: remote.attached)
+            await ws.send_json({"type": "input", "event": "press"})
+            assert await ws.receive_json() == {"type": "state", "state": "listening"}
+            await ws.send_json({"type": "input", "event": "release"})
+            assert await ws.receive_json() == {"type": "state", "state": "thinking"}
+            assert await ws.receive_json() == {"type": "state", "state": "speaking"}
+            request = await audio.receive_json()
+            assert request["type"] == "synthesize"
+            # A malformed answer is dropped with a log line, the socket lives on...
+            await audio.send_json({"type": "synthesized", "id": 7})
+            # ...and the real answer, an error, reaches the waiting synthesis.
+            await audio.send_json(
+                {"type": "synthesized", "id": request["id"], "error": "no voice for english"}
+            )
+            assert await asyncio.wait_for(ws.receive_json(), 1.0) == {
+                "type": "state",
+                "state": "idle",
+            }
+            assert remote.attached
+    assert session.rendered == []
+    assert session.failures == [
+        f"the client could not synthesize {request['id']}: no voice for english"
+    ]
+    assert "dropped unknown audio message" not in caplog.text  # it was a known type

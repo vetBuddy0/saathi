@@ -1,0 +1,124 @@
+# The Android shell, built where there is an Android SDK: this project is
+# written on machines without one, so the APK a phone installs comes from
+# this workflow's artifact (android/README.md, "Get the APK from GitHub
+# Actions on your phone"), not from a laptop. The second job runs the
+# engine's own suite exactly as ci.yml does, so a push that breaks the
+# Python -- the package this APK carries inside it -- is red here too,
+# on the page a person opens to fetch the APK, not only on the CI page.
+#
+# What lost: a job that only builds when android/ changed (the APK
+# carries saathi/, so a Python-only push changes the APK); the Gradle
+# wrapper (its jar is not in git -- android/.gitignore -- so setup-gradle
+# provides the pinned version instead); and `testDebugUnitTest` in this
+# job (the JUnit tests were run on a JVM against stubs while writing;
+# running them under the real android.jar here is a step of its own once
+# the first APK has built).
+name: Android
+
+on:
+  push:
+    branches:
+      - android-app
+      - "android/**"
+  workflow_dispatch:
+    inputs:
+      test_only:
+        description: >-
+          Mark the APK android:testOnly (installs only with `adb install -t`,
+          but a Device Owner set from it can be removed with
+          `dpm remove-active-admin`). Off: the APK installs from the phone itself.
+        type: boolean
+        default: false
+
+# A second push while the last one builds: the newest APK is the one wanted.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Chaquopy's buildPython: it looks for `python3.12` on PATH first
+      # (the interpreter the app ships, `version = "3.12"` in
+      # app/build.gradle.kts), runs its own pip with it, and compiles the
+      # engine to .pyc with it -- which needs the same minor version.
+      - name: Set up Python 3.12 for Chaquopy
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-34 build-tools;34.0.0
+
+      # Gradle 8.7, the version android/gradle/wrapper/gradle-wrapper.properties
+      # pins; the wrapper jar itself is not in the repository. The cache is
+      # written on this branch too (by default only the default branch
+      # writes it), so a second push does not download every dependency
+      # and every Python wheel again.
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+          cache-read-only: false
+          validate-wrappers: false
+
+      # saathi.testOnly: see app/build.gradle.kts. A pushed build is for the
+      # phone, installed from its own Files app, which refuses a testOnly
+      # APK; the manual run can ask for the testOnly one for a tablet.
+      - name: Build the debug APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace -Psaathi.testOnly=${{ github.event_name == 'workflow_dispatch' && inputs.test_only == true }}
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.test_only == true && 'saathi-debug-apk-testonly' || 'saathi-debug-apk' }}
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  # The engine's suite, step for step as .github/workflows/ci.yml runs it
+  # (tests/test_workflows.py checks the two stay in step): the APK carries
+  # saathi/, so a red suite is a red APK.
+  engine:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install the pinned interpreter
+        run: uv python install
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev1
+
+      - name: Install project
+        run: uv sync --all-extras --dev
+
+      - name: Undefined-name check
+        run: uv run ruff check --select=F821 saathi
+
+      - name: Lint
+        run: uv run ruff check saathi tests
+
+      - name: Test
+        run: uv run pytest -v

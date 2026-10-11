@@ -134,6 +134,30 @@ def test_reflect_survives_a_malformed_insights_response(store):
     assert reflect(store, client=client, now=NOW) == []
 
 
+class FakeClientWithNoContent(FakeReflectionClient):
+    """As `FakeReflectionClient`, but a `None` in the script is a message
+    with no text at all -- `content=None`, the SDK's `Optional[str]` and
+    `rest_client.py`'s alike -- not the JSON `null`."""
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        payload = self._responses.pop(0) if self._responses else {}
+        content = None if payload is None else json.dumps(payload)
+        message = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def test_reflect_survives_a_response_with_no_content_at_all(store):
+    # `json.loads(None)` is a TypeError, which the malformed-response
+    # guard did not name (found in review): the background job crashed
+    # instead of reflecting on nothing.
+    _add_episode(store, "one", hours_ago=1)
+    assert reflect(store, client=FakeClientWithNoContent([None]), now=NOW) == []
+    client = FakeClientWithNoContent([{"questions": ["q"]}, None])
+    assert reflect(store, client=client, now=NOW) == []
+    assert len(client.calls) == 2  # the insights call was made and shrugged off
+
+
 def test_reflect_asks_one_insights_call_per_proposed_question(store):
     _add_episode(store, "one", hours_ago=1)
     client = FakeReflectionClient(
@@ -175,3 +199,39 @@ def test_active_rules_are_not_listed_as_wrong(store):
     insights_prompt = client.calls[1]["messages"][0]["content"]
     assert "WRONG" not in insights_prompt
     assert "tablets" not in insights_prompt
+
+
+# -- the client reflect() builds for itself (2026-10-08) -------------------
+
+
+def test_default_client_is_groq_sdk_on_a_machine_that_has_it(monkeypatch):
+    from saathi.identity.reflect import _default_client
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.delenv("SAATHI_AI_CLIENT", raising=False)
+    assert type(_default_client()).__name__ == "Groq"
+
+
+def test_default_client_is_rest_without_the_sdk_or_when_asked(monkeypatch):
+    import sys
+
+    from saathi.identity.reflect import _default_client
+    from saathi.voice.engine.rest_client import GROQ_BASE_URL, RestChatClient
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("SAATHI_AI_CLIENT", "rest")
+    client = _default_client()
+    assert isinstance(client, RestChatClient) and client.base_url == GROQ_BASE_URL
+
+    monkeypatch.delenv("SAATHI_AI_CLIENT")
+    monkeypatch.setitem(sys.modules, "groq", None)  # the phone
+    client = _default_client()
+    assert isinstance(client, RestChatClient) and client.base_url == GROQ_BASE_URL
+
+
+def test_default_client_needs_the_groq_key(monkeypatch):
+    from saathi.identity.reflect import _default_client
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        _default_client()

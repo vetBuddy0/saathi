@@ -138,3 +138,21 @@ def test_local_backends_report_zero_cost():
 def test_tts_backend_is_abstract():
     with pytest.raises(TypeError):
         TTSBackend()
+
+
+def test_piper_backend_reports_the_missing_wheel_instead_of_raising(monkeypatch):
+    # The phone (Chaquopy): no piper-tts. The module imported fine at
+    # the top of this file; construction must not touch piper either,
+    # and available() says why it can't be used -- the same shape as
+    # Kokoro's absence, greyed out in the panel, never a crash.
+    monkeypatch.setitem(sys.modules, "piper", None)  # `import piper` raises ImportError
+    backend = PiperBackend()
+    assert backend.available() == (False, "piper-tts is not installed")
+    backend.preload("english")  # nothing to warm; no thread that can only raise
+    with pytest.raises(RuntimeError, match="piper-tts is not installed"):
+        list(backend.synthesize_stream("english", ["hello"]))
+    # The registry still lists it, unavailable, with the reason.
+    assert default_backends()[DEFAULT_BACKEND_ID].available() == (
+        False,
+        "piper-tts is not installed",
+    )

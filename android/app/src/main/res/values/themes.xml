@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No action bar, black everywhere the WebView is not: what shows for the
+     half-second before the face page paints, and behind the system bars
+     if they ever appear. The face's own warm ground is the page's. -->
+<resources>
+    <style name="Theme.Saathi" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>

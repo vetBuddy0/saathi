@@ -41,7 +41,51 @@ family. The Data API costs 100 quota units per search out of 10,000 a
 day — ample for one person, and this module never loops on it. The key
 is read from the environment (`YOUTUBE_API_KEY`), same precedent as
 `GROQ_API_KEY`; it is never read from a file in the repo and never
-logged.
+logged. (A demo-only direct-stream path through yt-dlp existed on this
+branch for two weeks -- DECISIONS 2026-09-25 -- and is gone: what
+replaced it is the target rule below, 2026-10-08.)
+
+Why every `play` names a target (2026-10-08): label uploads ("Ed Sheeran
+- Perfect") report `embeddable` and `syndicated` through the Data API
+and still refuse the embedded player with error 150; no field predicts
+it, so no filter can. The embed stays the default -- it is the one
+playback route YouTube's terms plainly allow. When the embed refuses a
+video (the panel reports an error that isn't the browser's own), the
+controller remembers that in `unplayable` and from then on plays that
+video with `target: "browser"`: a client that can show the real
+youtube.com watch page (the Android shell's YouTube pane, a second
+WebView) plays it, and `media-panel.js` ignores it. The browser page is
+a grey area in YouTube's terms -- automated control of youtube.com is a
+contract question, not a copyright one -- so it is only ever used after
+an embed refusal, never first. Three separate Google identities keep
+that boundary honest: the Data API project (search), the account signed
+into the kiosk's WebView (watching), and the developer's own account
+(none of the above). An embed refusal of the video she is waiting on
+re-emits the play on the browser target at once, from this module: a
+fallback she has to ask for ("again") is a blank panel first. Only the
+browser's own verdict (`code` "browser" or "wall": the watch page could
+not play it, or a sign-in or consent wall stood in the way) refuses a
+video for the session and puts the rest back on a card whose title
+names it. Lost: dropping embed-refused videos from the offer (the old
+rule) -- the most popular result for a search is often a label upload,
+and losing it every time was the complaint that produced the yt-dlp
+detour. A play that switches target (the embed was playing, the next
+one goes to the browser, or back) is preceded by `stop`, so the two
+never play over each other; the clients need no rule of their own.
+Two things found in review the same day: with no client that can show
+the watch page connected -- the Pi kiosk with the face page alone, a
+laptop demo -- an embed refusal is treated as the browser's verdict
+would be (refused for the session, the rest re-offered on a card,
+which is what happened before the target rule), because a
+browser-target play nobody takes is a blank panel she is told is
+playing; `browser_available` is how the controller knows, and `cli.py`
+hands it the /audio seam's `attached` (the Android shell is the one
+client with a watch page, and its /audio socket is the one sign of it
+the engine already has -- lost: a hello on `/ws`, a protocol change
+the face page would also have to make). And a `reset` -- a page saying
+it has no player -- counts only from the client whose target is
+playing: the face page reconnecting while the watch page plays used to
+un-play it, and "carry on" then started it over.
 
 Why `urllib` and not `aiohttp` here: the handler is synchronous by
 contract and already off the loop thread; a blocking GET is the simple,
@@ -94,7 +138,6 @@ import json
 import logging
 import os
 import re
-import threading
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -135,58 +178,27 @@ MAX_VOLUME = 100
 
 _SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 _VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+_WATCH_URL = "https://www.youtube.com/watch"
 _HTTP_TIMEOUT_SECONDS = 8.0
 
-def direct_playback_enabled() -> bool:
-    """Play from a direct stream (yt-dlp) instead of YouTube's embedded
-    player -- DEMO ONLY, the user's explicit override on 2026-09-25 of the
-    original "official APIs only" rule (DECISIONS.md). Label uploads such
-    as "Ed Sheeran - Perfect" report `embeddable` and `syndicated` yet fail
-    in the embed with error 150; no API field predicts it. Search stays
-    on the official Data API. Opt-in with `SAATHI_YOUTUBE_PLAYBACK=direct`;
-    the default stays the official embed, and must."""
-    if os.environ.get("SAATHI_YOUTUBE_PLAYBACK", "iframe").strip().lower() != "direct":
-        return False
-    try:
-        import yt_dlp  # noqa: F401
-    except ImportError:
-        return False
-    return True
+# Where a `play` goes. The embed is the default and the only route used
+# until the embedded player has refused the video; the browser target is
+# the real watch page, shown by a client that has one (see the module
+# docstring for why that order and never the reverse).
+TARGET_EMBED = "embed"
+TARGET_BROWSER = "browser"
+# The browser target's own verdicts, reported by the client that showed
+# the watch page: "browser" (the page could not play it) and "wall" (a
+# sign-in or consent wall stood in the way). Any other error code is the
+# embedded player's (150/101 embedding disabled, 100 not found, and the
+# panel's own deadlines "no_ready"/"api") and sends the video to the
+# browser target, not out of the offer.
+BROWSER_FAILURE_CODES = frozenset({"browser", "wall"})
 
 
-# YouTube no longer serves one file with both audio and video (checked
-# 2026-09-25, even with a JS runtime): the page plays a muted <video> and
-# an <audio> side by side. Plain HTTPS only -- Chrome can't play the HLS
-# (m3u8) variants -- and 480p is plenty beside the face.
-_STREAM_FORMAT = (
-    "(bestvideo[ext=mp4][protocol=https][height<=480]/bestvideo[protocol=https][height<=480])"
-    "+(bestaudio[ext=m4a][protocol=https]/bestaudio[protocol=https])"
-)
-
-
-def resolve_stream_url(video_id: str) -> dict[str, str] | None:
-    """Direct, time-limited `{"video": url, "audio": url}` for `video_id`,
-    or None (logged) -- None means the page falls back to the embed."""
-    try:
-        import yt_dlp
-
-        options = {"format": _STREAM_FORMAT, "quiet": True, "no_warnings": True, "noplaylist": True}
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-        parts = info.get("requested_formats") or []
-        video = next((f["url"] for f in parts if f.get("vcodec") not in (None, "none")), None)
-        audio = next((f["url"] for f in parts if f.get("acodec") not in (None, "none")), None)
-        if not (video and audio):
-            logger.warning("no separate audio+video streams for %s; falling back", video_id)
-            return None
-        return {"video": video, "audio": audio}
-    except Exception as exc:  # network, extractor change, age gate: fall back
-        logger.warning(
-            "stream lookup failed for %s (%s); falling back to the embed",
-            video_id,
-            type(exc).__name__,
-        )
-        return None
+def watch_url(video_id: str) -> str:
+    """The real youtube.com page for `video_id`, for the browser target."""
+    return f"{_WATCH_URL}?{urllib.parse.urlencode({'v': video_id})}"
 
 
 ACTIONS = (
@@ -205,10 +217,17 @@ ACTIONS = (
 )
 
 CARD_TITLE = "Which one would you like?"
-# The offer again, after the player reported it could not play the one
-# she picked. Shown by the controller between turns, so nothing speaks
-# it; the model learns what happened from the next tool call.
-RETRY_CARD_TITLE = "That one won't play here. Which instead?"
+# The offer again, after the browser target reported it could not play
+# the one she picked (the embed's refusals go to the browser instead --
+# see the module docstring). Shown by the controller between turns, so
+# nothing speaks it; the model learns what happened from the next tool
+# call. It names the video: by the time the card is up the player is
+# gone, so "that one" would point at nothing.
+RETRY_CARD_TITLE = "{title} won't play here. Which instead?"
+
+
+def retry_card_title(result: MediaResult) -> str:
+    return RETRY_CARD_TITLE.format(title=result.title)
 
 ORDINALS = {1: "One", 2: "Two", 3: "Three"}
 
@@ -633,6 +652,7 @@ class MediaController:
         broadcast: Broadcast | None = None,
         cards: CardController | None = None,
         choose: Chooser | None = None,
+        browser_available: Callable[[], bool] | None = None,
     ) -> None:
         self._search: Search = search or youtube_search
         # Which result a search plays at once, if any (`choose_result`,
@@ -640,6 +660,20 @@ class MediaController:
         # the card flow below is still how an ambiguous search asks.
         self._choose = choose
         self._broadcast: Broadcast | None = broadcast
+        # Whether a client that can show the real watch page is connected
+        # right now; asked at the moment an embed refusal would send a
+        # video there, never cached. None (an older wiring, a unit test)
+        # means "assume so" and keeps the target rule as it was. `cli.py`
+        # passes the /audio seam's `attached`: the Android shell is the
+        # one client with a watch page, and its /audio socket is how the
+        # engine knows it is there -- without a hello on /ws, which the
+        # face page would also have to learn (see the module docstring).
+        # Kept as "assume so" when a review (2026-10-08) asked for "no
+        # browser" as the safer default: the target-rule tests build the
+        # controller without the callback and pin the hand-off, and the
+        # one production wiring is pinned by `tests/test_cli.py` instead
+        # -- the kiosk rule does not rest on a lambda nobody tests.
+        self._browser_available = browser_available
         # With a CardController, the offer is a Choice card (screen/
         # cards.py): the same three numbered titles, but tappable and
         # dismissable, and spoken from the card's own text. The panel's
@@ -658,12 +692,22 @@ class MediaController:
         self.paused = False
         self.volume = DEFAULT_VOLUME
         self.fullscreen = False
-        # Videos the player reported it could not play (region-blocked,
-        # embedding disabled despite the status check -- rare now, not
-        # impossible). Without this, "carry on" after an error re-emits
-        # the same unplayable video forever, each time telling the model
-        # "it's starting now".
+        # Videos the embedded player reported it could not play (a label
+        # upload's error 150, embedding disabled despite the status
+        # check, the panel's own deadlines). The name is the embed's
+        # verdict, not the session's: from here on these play on the
+        # browser target (`_play`), they stay on offer, and nothing is
+        # said about them until the browser has had its turn.
         self.unplayable: set[str] = set()
+        # Videos no target will play: the browser page failed on them
+        # too (`BROWSER_FAILURE_CODES`). Never offered again -- by voice
+        # or on a card -- so "carry on" after a failure doesn't re-emit
+        # the same video forever, each time telling the model "it's
+        # starting now".
+        self.refused: set[str] = set()
+        # The target of the current (or last) play, so a play that
+        # switches target is preceded by `stop` for the other one.
+        self.target: str | None = None
 
     def set_broadcast(self, broadcast: Broadcast | None) -> None:
         self._broadcast = broadcast
@@ -739,48 +783,98 @@ class MediaController:
     # -- the browser reporting back ------------------------------------
 
     def on_browser_event(
-        self, event: str, video_id: str | None = None, code: str | int | None = None
+        self,
+        event: str,
+        video_id: str | None = None,
+        code: str | int | None = None,
+        target: str | None = None,
     ) -> None:
-        """`ended`/`error`/`reset` from the browser. The browser reports,
+        """`ended`/`error`/`reset` from a player. The player reports,
         it doesn't decide: the controller is the one place media state
         lives, so "play that again" after a video ended still knows
         what "that" was. `reset` is a freshly loaded page saying it has
-        no player -- whatever was playing isn't any more; the memory of
-        what was offered and last played is kept, so "carry on" starts
-        it again instead of insisting it's already on.
+        no player -- *its* player: `target` names which ("embed" from
+        the face page, "browser" from the shell; absent means the face
+        page, whose frames predate the field), and a reset about the
+        target that is not playing changes nothing. The one that is
+        playing isn't any more; the memory of what was offered and last
+        played is kept, so "carry on" starts it again instead of
+        insisting it's already on. An `ended` naming a video other than
+        the one playing is a late report and changes nothing either.
 
         An `error` is never silent: it is logged with the player's
-        code, the video is never offered again, and if it was one of
-        the results on offer, the rest are put back on the card so she
-        sees the device noticed and can pick another -- by tap, or by
-        number on the next turn."""
+        code, and which player decides what happens next (the module
+        docstring). The embed's refusal sends the video to the browser
+        target -- at once, if it is the one she is waiting on -- and
+        keeps it on offer. The browser's own verdict (`code` "browser"
+        or "wall") refuses the video for the session, and if it was one
+        of the results on offer, the rest are put back on a card naming
+        it, so she sees the device noticed and can pick another -- by
+        tap, or by number on the next turn. With no client able to show
+        the watch page connected (`browser_available`), the embed's
+        refusal is treated as the browser's would be: there is nobody to
+        hand the video to, and a play nobody takes is a blank panel she
+        is told is playing."""
         if event == "error":
-            self.playing = False
-            self.paused = False
             failed = video_id or (self.now_playing.video_id if self.now_playing else None)
             logger.warning("player could not play %s (code %s)", failed, code)
-            # The embed's verdicts (numeric player codes, or a player that
-            # never became ready) mean the video can't be offered again.
-            # "stream" is the direct player's transient failure -- the page
-            # has already fallen back to the embed for it, and a network
-            # blip must not erase the most popular result for the session
-            # (found live 2026-09-25 with "Ed Sheeran - Perfect").
-            if failed and code != "stream":
-                self.unplayable.add(failed)
+            # About what she is waiting on, or a late report about a
+            # video she has already moved past? Only the former means
+            # nothing is playing now.
+            current = self.now_playing is not None and self.now_playing.video_id == failed
+            waiting = current and self.playing and self.target == TARGET_EMBED
+            if current or failed is None:
+                self.playing = False
+                self.paused = False
+            if failed is None:
+                return
+            if code in BROWSER_FAILURE_CODES or not self._browser_taker():
+                self.refused.add(failed)
                 self._reoffer_without(failed)
-        elif event in ("ended", "reset"):
+                return
+            if failed in self.unplayable:
+                # Already handed to the browser target: a second face
+                # page refusing the same embed, or a client reporting a
+                # browser failure under the wrong code. Nothing is
+                # re-emitted -- the browser has it, or she asks again.
+                logger.info("embed refusal for %s repeated; already on the browser target", failed)
+                return
+            self.unplayable.add(failed)
+            if waiting:
+                assert self.now_playing is not None
+                self._play(self.now_playing)  # the fallback, not asked for
+        elif event == "reset":
+            source = target if target in (TARGET_EMBED, TARGET_BROWSER) else TARGET_EMBED
+            if self.target not in (None, source):
+                # The other player's page reloaded (the face page's socket
+                # reconnecting while the watch page plays, most often);
+                # what is playing is still playing.
+                logger.info("reset from the %s player ignored; %s is playing", source, self.target)
+                return
+            self.playing = False
+            self.paused = False
+        elif event == "ended":
+            playing_id = self.now_playing.video_id if self.now_playing is not None else None
+            if video_id is not None and playing_id is not None and video_id != playing_id:
+                logger.info("ended for %s ignored; %s is playing", video_id, playing_id)
+                return
             self.playing = False
             self.paused = False
 
+    def _browser_taker(self) -> bool:
+        """Whether a browser-target play would have a client to play it."""
+        return self._browser_available is None or bool(self._browser_available())
+
     def _reoffer_without(self, failed: str) -> None:
-        if self._cards is None or failed not in {r.video_id for r in self.last_results}:
+        offered = {r.video_id: r for r in self.last_results}
+        if self._cards is None or failed not in offered:
             return
-        remaining = [r for r in self.last_results if r.video_id not in self.unplayable]
+        remaining = [r for r in self.last_results if r.video_id not in self.refused]
         self.last_results = _renumber(remaining)
         if self.now_playing is not None and self.now_playing.video_id == failed:
             self.now_playing = None
         if self.last_results:
-            self._offer_card(RETRY_CARD_TITLE)
+            self._offer_card(retry_card_title(offered[failed]))
         else:
             self._settle_card(None)  # nothing left to offer: no card pretending otherwise
 
@@ -801,20 +895,6 @@ class MediaController:
     def _emit(self, action: str, **fields: Any) -> None:
         if self._broadcast is None:
             return
-        if action == "play" and direct_playback_enabled() and fields.get("video_id"):
-            # Resolve the direct stream off whatever thread we're on -- a
-            # tap arrives on the screen loop, and yt-dlp takes a second or
-            # two. The play goes out when the URL is known; without one it
-            # goes out as before and the page falls back to the embed.
-            broadcast = self._broadcast
-
-            def _resolve_then_play() -> None:
-                streams = resolve_stream_url(fields["video_id"])
-                extra = {"stream": streams} if streams else {}
-                broadcast({"type": "media", "action": action, **fields, **extra})
-
-            threading.Thread(target=_resolve_then_play, daemon=True).start()
-            return
         self._broadcast({"type": "media", "action": action, **fields})
 
     def _do_search(self, query: str | None) -> dict[str, Any]:
@@ -828,11 +908,12 @@ class MediaController:
                 "status": "unavailable",
                 "note": f"{exc} Say so plainly and briefly; don't offer any titles.",
             }
-        # A video the player already failed on is never offered again --
-        # by voice or on a card -- so a tap can't land on one. Renumbered
-        # so what she hears and taps is still One, Two, Three.
-        if self.unplayable:
-            results = _renumber([r for r in results if r.video_id not in self.unplayable])
+        # A video no target could play is never offered again -- by voice
+        # or on a card -- so a tap can't land on one. Renumbered so what
+        # she hears and taps is still One, Two, Three. A video only the
+        # embed refused stays: it plays on the browser target.
+        if self.refused:
+            results = _renumber([r for r in results if r.video_id not in self.refused])
         if not results:
             return {
                 "status": "none",
@@ -909,8 +990,11 @@ class MediaController:
         return self.last_results[0] if self.last_results else None
 
     def _play(self, result: MediaResult) -> dict[str, Any]:
-        if result.video_id in self.unplayable:
-            others = [r.spoken for r in self.last_results if r.video_id not in self.unplayable]
+        """Every way a video starts -- a pick, a tap, "again", "next",
+        "carry on" after it ended, the fallback after an embed refusal
+        -- comes through here, so the target rule is decided once."""
+        if result.video_id in self.refused:
+            others = [r.spoken for r in self.last_results if r.video_id not in self.refused]
             return {
                 "status": "unplayable",
                 "results": others,
@@ -920,10 +1004,16 @@ class MediaController:
                        "something else.")
                 ),
             }
+        target = TARGET_BROWSER if result.video_id in self.unplayable else TARGET_EMBED
+        if self.target not in (None, target) and (self.playing or self.paused):
+            # The other target has the previous video: stop it first, or
+            # the embed and the watch page play over each other.
+            self._emit("stop")
         self._settle_card(result)
         self.now_playing = result
         self.playing = True
         self.paused = False
+        self.target = target
         self._emit(
             "play",
             video_id=result.video_id,
@@ -931,6 +1021,8 @@ class MediaController:
             index=result.index,
             volume=self.volume,
             fullscreen=self.fullscreen,
+            target=target,
+            watch_url=watch_url(result.video_id),
         )
         return {
             "status": "ok",

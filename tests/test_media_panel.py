@@ -479,6 +479,99 @@ def test_an_embed_that_errors_before_it_is_ready_is_reported_and_thrown_away(
     assert error_before_ready["second_is_fresh"] == 1
 
 
+# -- targets (2026-10-08): a "browser" play is the watch-page client's ------
+#
+# The controller sends a video the embed refused with target "browser"
+# for the Android shell's YouTube pane. This panel must do nothing with
+# it -- no iframe, no title, no error report -- and must keep playing
+# "embed" (and target-less) plays exactly as before.
+
+_TARGET_SCENARIO = (
+    _STUB_YT
+    + """
+import { createMediaPanel } from "%(panel)s";
+const sent = [];
+const panel = createMediaPanel((m) => sent.push(m));
+"""
+    + _COMMON
+    + """
+const watch = (id) => `https://www.youtube.com/watch?v=${id}`;
+panel.onMessage({ type: "state", state: "idle" });
+// A browser-target play on a fresh panel: nothing happens at all.
+panel.onMessage({ ...playMsg("vidA", "A", 1), target: "browser", watch_url: watch("vidA") });
+await tick(); await tick();
+out.browser_iframes = document.querySelectorAll("iframe").length;
+out.browser_classes = bodyClasses();
+out.browser_calls = window.calls.slice();
+out.browser_sent = sent.slice();
+out.browser_title = document.querySelector(".media-title").textContent;
+out.browser_state = panel._debug();
+// An embed-target play still plays as before.
+panel.onMessage({ ...playMsg("vidB", "B", 2), target: "embed", watch_url: watch("vidB") });
+await tick(); await tick();
+out.embed_iframes = document.querySelectorAll("iframe").length;
+out.embed_classes = bodyClasses();
+out.embed_calls = window.calls.filter((c) => c[0] !== "new");
+out.embed_title = document.querySelector(".media-title").textContent;
+// A browser-target play while the embed plays: the panel stays as it is
+// (the controller sends `stop` first when it means the embed to stop).
+window.calls.length = 0;
+panel.onMessage({ ...playMsg("vidC", "C", 3), target: "browser", watch_url: watch("vidC") });
+await tick(); await tick();
+out.after_browser_classes = bodyClasses();
+out.after_browser_calls = window.calls.slice();
+out.after_browser_title = document.querySelector(".media-title").textContent;
+out.after_browser_iframes = document.querySelectorAll("iframe").length;
+out.after_browser_state = panel._debug();
+// A play with no target at all (an older controller) is the embed's.
+window.calls.length = 0;
+panel.onMessage(playMsg("vidD", "D", 1));
+await tick(); await tick();
+out.untargeted_calls = window.calls.slice();
+out.untargeted_title = document.querySelector(".media-title").textContent;
+out.sent = sent;
+document.body.dataset.out = JSON.stringify(out);
+"""
+)
+
+
+@pytest.fixture(scope="module")
+def target() -> dict:
+    return run_module_script(_TARGET_SCENARIO % {"panel": module_url("media-panel.js")})
+
+
+def test_a_browser_target_play_creates_no_iframe_and_sends_nothing(target):
+    assert target["browser_iframes"] == 0
+    assert target["browser_classes"] == []
+    assert target["browser_calls"] == []
+    assert target["browser_sent"] == []
+    assert target["browser_title"] == ""
+    assert target["browser_state"]["view"] == "none"
+    assert target["browser_state"]["loadedVideoId"] is None
+
+
+def test_an_embed_target_play_still_plays_as_before(target):
+    assert target["embed_iframes"] == 1
+    assert target["embed_classes"] == ["media--panel"]
+    assert target["embed_calls"] == [["setVolume", 70], ["playVideo"]]
+    assert target["embed_title"] == "B"
+
+
+def test_a_browser_target_play_while_the_embed_plays_leaves_the_panel_as_it_is(target):
+    assert target["after_browser_classes"] == ["media--panel"]
+    assert target["after_browser_calls"] == []
+    assert target["after_browser_title"] == "B"
+    assert target["after_browser_iframes"] == 1
+    assert target["after_browser_state"]["loadedVideoId"] == "vidB"
+    assert target["untargeted_calls"] == [
+        ["loadVideoById", "vidD"],
+        ["setVolume", 70],
+        ["playVideo"],
+    ]
+    assert target["untargeted_title"] == "D"
+    assert target["sent"] == []  # nothing reported, for any of it
+
+
 # -- the player has a size, beside the face, with the real stylesheet -------
 
 _SIZED_SCENARIO = (
@@ -539,3 +632,72 @@ def test_hidden_views_are_really_hidden_with_the_real_stylesheet(sized):
     # results list and the player were both drawn at once.
     assert sized["results_view"] == {"results": "flex", "player": "none"}
     assert sized["player_view"] == {"results": "none", "player": "flex"}
+
+
+# -- controls follow the target (2026-10-08, review) -------------------------
+#
+# After a target switch the embed's player is kept, hidden and stopped.
+# pause/resume/volume are addressed to whichever target is playing, so
+# while that is the browser they must not reach the hidden player: a
+# "carry on" used to restart the previous video's audio under the watch
+# page (display:none hides the picture, not the sound).
+
+_CONTROL_SCENARIO = (
+    _STUB_YT
+    + """
+import { createMediaPanel } from "%(panel)s";
+const sent = [];
+const panel = createMediaPanel((m) => sent.push(m));
+"""
+    + _COMMON
+    + """
+const watch = (id) => `https://www.youtube.com/watch?v=${id}`;
+panel.onMessage({ type: "state", state: "idle" });
+panel.onMessage({ ...playMsg("vidB", "B", 2), target: "embed", watch_url: watch("vidB") });
+await tick(); await tick();
+out.embed_target = panel._debug().activeTarget;
+// The controller switches target: stop, then a browser play.
+panel.onMessage({ type: "media", action: "stop" });
+out.after_stop_target = panel._debug().activeTarget;
+panel.onMessage({ ...playMsg("vidC", "C", 3), target: "browser", watch_url: watch("vidC") });
+out.browser_target = panel._debug().activeTarget;
+window.calls.length = 0;
+panel.onMessage({ type: "media", action: "pause" });
+panel.onMessage({ type: "media", action: "resume" });
+panel.onMessage({ type: "media", action: "volume", level: 30 });
+out.calls_while_browser_plays = window.calls.slice();
+out.base_volume_remembered = panel._debug().baseVolume;
+out.classes_while_browser_plays = bodyClasses();
+// Back to the embed: the controls reach the player again.
+panel.onMessage({ ...playMsg("vidD", "D", 1, 50), target: "embed", watch_url: watch("vidD") });
+await tick(); await tick();
+window.calls.length = 0;
+panel.onMessage({ type: "media", action: "pause" });
+panel.onMessage({ type: "media", action: "resume" });
+panel.onMessage({ type: "media", action: "volume", level: 40 });
+out.calls_with_embed_back = window.calls.slice();
+out.embed_back_target = panel._debug().activeTarget;
+out.sent = sent;
+document.body.dataset.out = JSON.stringify(out);
+"""
+)
+
+
+@pytest.fixture(scope="module")
+def control() -> dict:
+    return run_module_script(_CONTROL_SCENARIO % {"panel": module_url("media-panel.js")})
+
+
+def test_the_panel_remembers_which_target_the_last_play_went_to(control):
+    assert control["embed_target"] == "embed"
+    assert control["after_stop_target"] is None
+    assert control["browser_target"] == "browser"
+    assert control["embed_back_target"] == "embed"
+
+
+def test_pause_resume_and_volume_do_not_reach_the_hidden_player_while_the_browser_plays(control):
+    assert control["calls_while_browser_plays"] == []
+    assert control["base_volume_remembered"] == 30  # the level is kept for the next embed play
+    assert control["classes_while_browser_plays"] == []
+    assert control["calls_with_embed_back"] == [["pauseVideo"], ["playVideo"], ["setVolume", 40]]
+    assert control["sent"] == []

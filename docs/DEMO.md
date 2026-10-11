@@ -38,6 +38,14 @@ Open the page in Chrome (or `scripts/saathi-face-kiosk.sh`). Tests:
 `env PYTHONPATH= uv run pytest -q` (PYTHONPATH must be cleared on this
 laptop — ROS plugins break pytest otherwise).
 
+**Phone as mic and speaker (2026-10-08):** the Android shell connects to
+`ws://<laptop>:8765/audio` as well as `/ws`. While it is connected, a
+press takes the microphone from the phone and every reply sentence plays
+on the phone, not the laptop; disconnect it and the laptop's parec/paplay
+path is back at the next press. The protocol both sides implement is in
+`saathi/screen/server.py`'s docstring; the engine side is
+`saathi/audio/remote.py`.
+
 **Mic:** if every press ends silently, the input has probably switched to
 a headset jack with no mic:
 
@@ -207,11 +215,16 @@ Pairings are in `~/.saathi/family.sqlite3`.
 
 ## Known gaps (TODO.md has details)
 
-- **YouTube playback is direct (demo only).** `SAATHI_YOUTUBE_PLAYBACK=direct`
-  in `~/.saathi/env` plays via yt-dlp, because label uploads ("Ed Sheeran -
-  Perfect") refuse the official embed (error 150). This breaches YouTube's
-  terms and must not ship; remove the line for the official player. A
-  pick takes ~3 s to start while the stream is looked up.
+- **Label uploads refuse the embed.** "Ed Sheeran - Perfect" and similar
+  report embeddable through the API and still fail in the official
+  player (error 150). The player reports it, and from then on that video
+  is sent with `target: "browser"` — the real youtube.com page, which
+  only the Android shell's YouTube pane can show (DECISIONS.md
+  2026-10-08). On a laptop with just the face page there is no taker,
+  so the refusal is treated as the browser's would be: the video is
+  dropped for the session and the other results come back on a card.
+  (The yt-dlp direct stream that covered this is gone: it breached
+  YouTube's terms.)
 - **Name matching** can dial a near-miss ("Deepa" → Deepak) and mixes up
   two people with the same name or relation (S2–S4). Stick to "call my
   son" / the test number in a demo.

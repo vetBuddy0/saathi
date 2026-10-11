@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Device Owner needs a DeviceAdminReceiver with this meta-data to point
+     at; it does not need any legacy device-admin policy, so none is
+     claimed. `dpm set-device-owner` grants everything lock-task mode needs. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies />
+</device-admin>

@@ -8,26 +8,121 @@ Saathi, not just "has she stopped" between turns. Wraps `pysilero-vad`
 `pysilero-vad` ships real `manylinux aarch64` wheels, which SPEC.md's "a
 missing ARM wheel must fail a build" made the deciding factor).
 
+Two gates behind one class. `pysilero-vad` is imported when the first
+detector is built, not when this module is: on Android (Chaquopy, the
+engine inside the APK) there is no wheel for it at all, and the same
+engine has to run there. When the import fails the detector is an RMS
+energy gate over the same 32 ms chunks, with the same debounce on top —
+`SpeechStartDetector` and `contains_speech()` don't know which one they
+got, and `VoiceActivityDetector.gate` says. The process logs which gate
+is active, once. What lost for the fallback: `webrtcvad` (a C extension
+with no Chaquopy wheel either — the same problem again), and a spectral
+gate written here in numpy (more to get wrong, and nothing to measure it
+against until a phone has been in a room; an RMS gate is at least
+predictable). The energy gate is the degraded path, not a second
+product: Linux with everything installed behaves exactly as before.
+
 Fixed input shape: 16kHz mono 16-bit PCM, 512 samples (32 ms) per chunk —
 `audio/capture.py` is what guarantees frames arrive in exactly that shape,
-so nothing here resamples or buffers partial chunks.
+so nothing here resamples or buffers partial chunks. The constants are
+written down rather than read off the Silero class because the import is
+lazy now; `_silero_class()` checks the package still agrees the moment it
+loads, so a chunk-size change upstream fails loudly instead of feeding
+the model the wrong window.
 """
 
 from __future__ import annotations
 
-from pysilero_vad import SileroVoiceActivityDetector
+import logging
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-CHUNK_SAMPLES = SileroVoiceActivityDetector.chunk_samples()
-CHUNK_BYTES = SileroVoiceActivityDetector.chunk_bytes()
+# Silero's fixed window at 16 kHz. pysilero-vad's own
+# `chunk_samples()`/`chunk_bytes()` return exactly these; see the module
+# docstring for why they are not read from it.
+CHUNK_SAMPLES = 512
+CHUNK_BYTES = CHUNK_SAMPLES * 2
+
+# The energy gate's threshold: per-chunk RMS, in int16 sample units after
+# removing the chunk's DC offset (a biased mic must not read as constant
+# speech). 1000 is about -30 dBFS. Why there: the echo-cancelled source's
+# silence, measured on this machine (2026-09-24, see `contains_speech`'s
+# docstring), sat at RMS 1-750, so 1000 clears it with margin; the
+# `known_sentence.wav` fixture's spoken chunks have a median RMS of
+# ~1650 and runs of 16+ consecutive chunks over 1000, against the
+# three-chunk debounce `SpeechStartDetector` asks for. A single click
+# or a door closing is one or two chunks, not three.
+ENERGY_GATE_RMS = 1000
+
+# Which gate has been logged for this process, so it's said once —
+# `contains_speech()` builds a fresh detector every turn.
+_announced_gate: str | None = None
+
+
+def _silero_class():
+    """The real detector's class, or None when `pysilero_vad` isn't
+    importable (Android). Imported here, at first use, and never at
+    module import — that is what lets the rest of the package load
+    without it."""
+    try:
+        from pysilero_vad import SileroVoiceActivityDetector
+    except ImportError:
+        return None
+    if SileroVoiceActivityDetector.chunk_bytes() != CHUNK_BYTES:
+        raise RuntimeError(
+            f"pysilero-vad wants {SileroVoiceActivityDetector.chunk_bytes()}-byte chunks; "
+            f"this module and audio/capture.py are built for {CHUNK_BYTES}"
+        )
+    return SileroVoiceActivityDetector
+
+
+def _announce(gate: str) -> None:
+    global _announced_gate
+    if gate == _announced_gate:
+        return
+    _announced_gate = gate
+    if gate == "silero":
+        logger.info("voice activity gate: Silero (pysilero-vad)")
+    else:
+        logger.info(
+            "voice activity gate: RMS energy, threshold %d (pysilero-vad not importable)",
+            ENERGY_GATE_RMS,
+        )
+
+
+class _EnergyGate:
+    """Stands in for `SileroVoiceActivityDetector`: the same two methods,
+    so `VoiceActivityDetector` is one class, not two. "Probability" is
+    the chunk's RMS scaled so that `ENERGY_GATE_RMS` lands exactly on
+    0.5 — the default threshold — and twice it saturates at 1.0."""
+
+    def process_chunk(self, chunk: bytes) -> float:
+        samples = np.frombuffer(chunk, dtype="<i2").astype(np.float64)
+        samples -= samples.mean()
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        return min(1.0, 0.5 * rms / ENERGY_GATE_RMS)
+
+    def reset(self) -> None:
+        pass  # no state to clear
 
 
 class VoiceActivityDetector:
     """One chunk in, one speech probability out. No state beyond the
-    model's own internal recurrent state — `reset()` clears that."""
+    model's own internal recurrent state — `reset()` clears that.
+    `gate` is "silero" or "energy": which one this process got."""
 
     def __init__(self, threshold: float = 0.5) -> None:
-        self._model = SileroVoiceActivityDetector()
+        silero = _silero_class()
+        if silero is not None:
+            self._model = silero()
+            self.gate = "silero"
+        else:
+            self._model = _EnergyGate()
+            self.gate = "energy"
+        _announce(self.gate)
         self.threshold = threshold
 
     def probability(self, chunk: bytes) -> float:
@@ -92,7 +187,9 @@ def contains_speech(pcm: bytes, *, consecutive_chunks: int = 3) -> bool:
     threshold, so "speech" here means the same ~96 ms of sustained
     voice that barge-in already trusts — one definition, not two.
     A trailing partial chunk is dropped, not zero-padded: it is under
-    32 ms and can't change the answer.
+    32 ms and can't change the answer. Whichever gate the detector
+    resolved to (see the module docstring), this walks the buffer the
+    same way.
     """
     detector = SpeechStartDetector(VoiceActivityDetector(), consecutive_chunks)
     for offset in range(0, len(pcm) - CHUNK_BYTES + 1, CHUNK_BYTES):

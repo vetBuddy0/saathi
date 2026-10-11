@@ -51,6 +51,12 @@ Never runs during a turn, same rule as `compile.py` — this is
 explicitly a background/maintenance pass (`initiative/scheduler.py` or
 a future cron-like trigger calls it), not something `cascade.py` ever
 calls directly.
+
+The `groq` SDK is imported only when `reflect()` has to build its own
+client (2026-10-08): on the phone there is no SDK, and a module-level
+import would have made this module unimportable there, so nothing
+could ever learn a rule. `client` is duck-typed: the SDK's, or
+`voice/engine/rest_client.py`'s, or a test's fake.
 """
 
 from __future__ import annotations
@@ -60,10 +66,10 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from groq import Groq
-
 from saathi.identity.compile import retrieve_episodes
 from saathi.identity.store import IdentityStore
+from saathi.voice.engine.provider import choose_client_kind
+from saathi.voice.engine.rest_client import GROQ_BASE_URL, RestChatClient
 
 # Same default as cascade.py's _LLM_MODEL -- one model, one config value,
 # not a second constant to drift out of sync with item D's decision.
@@ -110,7 +116,7 @@ def _format_statements(episodes: list[dict[str, Any]]) -> str:
     return "\n".join(f"{i + 1}. {e['text']}" for i, e in enumerate(episodes))
 
 
-def _propose_questions(client: Groq, episodes: list[dict[str, Any]]) -> list[str]:
+def _propose_questions(client: Any, episodes: list[dict[str, Any]]) -> list[str]:
     completion = client.chat.completions.create(
         model=_REFLECTION_MODEL,
         messages=[
@@ -122,7 +128,10 @@ def _propose_questions(client: Groq, episodes: list[dict[str, Any]]) -> list[str
         response_format={"type": "json_object"},
     )
     try:
-        parsed = json.loads(completion.choices[0].message.content)
+        # `content` is None for a message with no text (the SDK's
+        # Optional[str], and rest_client.py's); `json.loads(None)` is a
+        # TypeError the except below does not name, so it is read as "".
+        parsed = json.loads(completion.choices[0].message.content or "")
         questions = parsed.get("questions", [])
     except (json.JSONDecodeError, AttributeError):
         # A malformed response is a reason to reflect on nothing this
@@ -141,7 +150,7 @@ def _format_retired(retired: list[str]) -> str:
 
 
 def _propose_insights(
-    client: Groq,
+    client: Any,
     question: str,
     candidates: list[dict[str, Any]],
     retired: list[str] | None = None,
@@ -161,7 +170,7 @@ def _propose_insights(
         response_format={"type": "json_object"},
     )
     try:
-        parsed = json.loads(completion.choices[0].message.content)
+        parsed = json.loads(completion.choices[0].message.content or "")
         insights = parsed.get("insights", [])
     except (json.JSONDecodeError, AttributeError):
         return []
@@ -187,10 +196,29 @@ def _propose_insights(
     return results
 
 
+def _default_client() -> Any:
+    """`reflect()`'s client when none is injected: Groq, from
+    `GROQ_API_KEY`, as it has been since this module was written (the
+    model name above is Groq's). The SDK where it imports, built exactly
+    as before; `RestChatClient` where it doesn't (the phone) or when
+    `SAATHI_AI_CLIENT=rest` asks for it."""
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not set in the environment")
+    if choose_client_kind(os.environ) != "rest":
+        try:
+            from groq import Groq
+        except ImportError:
+            pass
+        else:
+            return Groq(api_key=api_key)
+    return RestChatClient(GROQ_BASE_URL, api_key)
+
+
 def reflect(
     store: IdentityStore,
     *,
-    client: Groq | None = None,
+    client: Any | None = None,
     now: datetime | None = None,
     episode_limit: int = 30,
 ) -> list[dict[str, Any]]:
@@ -209,10 +237,7 @@ def reflect(
     second read."""
     now = now or datetime.now(timezone.utc)
     if client is None:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY is not set in the environment")
-        client = Groq(api_key=api_key)
+        client = _default_client()
 
     episodes = store.read("episodes")
     if not episodes:

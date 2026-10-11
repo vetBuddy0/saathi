@@ -1892,3 +1892,1774 @@ flourishes 45-90 s, blinks every 3-7 s, breathing 6.5 s, nods every
 6-12 s and slower, a smaller perk, a sway instead of the confused/laugh
 shake, slower visitors. Browser tests (tests/test_eyes_*.py) could not be
 run on this laptop: snap Chromium can't read /tmp and hangs headless.
+**2026-10-08 — The yt-dlp direct stream is gone; every `play` names a
+target, the embed first and the real watch page only after the embed
+refuses.** The 2026-09-25 detour breached YouTube's terms and was
+never to ship; it is removed whole (`direct_playback_enabled`,
+`resolve_stream_url`, the muted `<video>`+`<audio>` player, yt-dlp,
+yt-dlp-ejs and deno from the lock). What replaces it: the controller
+sends `target: "embed"` (and `watch_url`) with every play; when the
+embedded player reports an error -- any code of its own: 150/101
+embedding disabled, 100, the panel's "no_ready"/"api" deadlines -- the
+video goes into `unplayable` and from then on is sent with `target:
+"browser"`, which `media-panel.js` ignores and a client that can show
+youtube.com itself (the Android shell's YouTube pane, on its own `/ws`)
+plays. The embed is the default because it is the one route YouTube's
+terms plainly allow; the watch page under automated control is a grey
+area in those terms -- a contract question, not a copyright one -- and
+so is only ever the fallback, never tried first. Three Google
+identities keep that boundary honest and auditable: the Data API
+project that searches, the account signed into the kiosk's WebView
+that watches, and the developer's own account, which does neither.
+Only the browser's own verdict (a `media_event` error with code
+"browser" or "wall") refuses a video for the session (`refused`), drops
+it from searches and puts the rest back on a card; the card's title now
+names the video, since by then the player is gone and "that one" would
+point at nothing. Lost: dropping embed-refused videos from the offer
+(the old rule). The most popular result for a search is usually the
+label upload the embed refuses, and losing it every time was the
+complaint that produced the yt-dlp detour.
+
+**2026-10-08 — An embed refusal of the video she is waiting on falls
+back to the browser target by itself; a play that changes target is
+preceded by `stop`.** The alternative -- mark the video and wait for
+"again" -- shows her a blank panel first and asks her to know why. The
+re-emission happens in `on_browser_event`, from the controller, so
+"again"/"next"/"carry on" take the same decision through the same
+`_play`. A repeated embed refusal for a video already on the browser
+target (a second face page open, or a client reporting under the wrong
+code) is logged and re-emits nothing, so nothing can loop by itself.
+The `stop` before a target switch is the controller's, not the clients':
+without it the embed and the watch page would play over each other,
+and a panel that reacted to the other target's plays would be two
+clients each half-deciding the same thing. On a laptop with only the
+face page a browser-target play has no taker and nothing plays
+(docs/DEMO.md says so); the controller cannot tell who is connected,
+and inventing a hello on `/ws` for it belongs with the shell's step.
+
+**2026-10-08 — Renumbering keeps the thumbnail.** `youtube_search`,
+the search's refused-filter and the re-offer all rebuilt each
+`MediaResult` from id and title, so the picture the card was given on
+2026-09-25 never reached it from a real search. `dataclasses.replace`
+now; one new test pins it.
+
+**2026-10-08 — The phone is the microphone and the speaker; the engine
+stays on the Pi or the laptop. One WAV per sentence over `/audio`, not
+a PCM stream.** `audio/remote.py`'s `RemoteAudio` is the engine's side
+of the Android shell: a second WebSocket path, one client at a time,
+binary PCM16/16 kHz frames in (forwarded to the session only between
+a press and its release on `/ws`, whatever the client sends), and for
+each TTS sentence a `play` header, one binary WAV and a `played` ack
+back; `stop` cuts it short. `CascadeSession` gained a `player`
+constructor seam with `play()`'s signature; `cli.py` hands it
+`RemoteAudio.player`, which sends to the attached client and falls
+back to the local `paplay` when none is -- the session never knows
+which. With no client the server is byte-for-byte what it was. Lost:
+streaming the reply as PCM chunks the way the mic comes in. The
+cascade already synthesises and plays one whole sentence at a time
+(`synthesize_stream`), so chunking would have bought no
+time-to-first-audio and cost a jitter buffer on the phone and a second
+barge-in clock on the engine; a client is a dumb speaker -- play this
+file to the end, then say so. Also lost: the engine in the APK now.
+The seam is shaped so it can move later without the shell changing.
+Decided alone, and recorded here, four smaller things. A play waits
+for its ack at most the WAV's length plus 3 s, then moves on with a
+warning -- a dead phone costs one sentence, never a face stuck on
+"speaking"; the client leaving mid-sentence releases the wait at once.
+Every send to the client joins one ordered chain on the loop, so a
+`stop` cannot overtake the frames of the play it stops. A press with a
+client attached needs no local capture source to run a turn -- the
+phone *is* the mic -- though `cli.py` still only builds a session when
+the local echo-cancelled pair exists, so this matters to tests today
+and to a mic-less laptop later. And the route is registered only when
+`build_app` is given a `remote_audio` (always, from `cli.py`), so
+every checkpoint-1 test and the fake press/release path see no
+difference at all.
+
+**2026-10-08 — The Android shell is its own Gradle build under
+`android/`, not a module of the Python package, and it is not compiled
+in CI yet.** The repo's CI runs the Python suite; `uv run pytest` must
+never need a JDK, and this container had no Android SDK (dl.google.com
+is unreachable), so nothing under `android/` has been through AGP. What
+was verified instead: the pure-Kotlin files (`Protocol.kt`, the three
+interfaces, `EngineAddress.kt`) and their JUnit tests were compiled with
+Kotlin 2.0.21 and run on a plain JVM in a scratch project, with warnings
+as errors. The Android-dependent files (`MainActivity`, `Settings`,
+`SetupDialog`, the receivers, the service) were written against API
+26-34 by hand and have not met a compiler; the README says so, in
+those words. Lost: skipping the Kotlin check because "it can't build
+anyway" -- the protocol parser is the thing most likely to be wrong,
+and it is the thing that *can* be checked.
+
+**2026-10-08 — Cleartext "only for private LAN ranges" is enforced in
+code, not in the network security config.** Android's config matches
+host names (with an optional subdomain suffix); it has no CIDR, so
+`192.168.0.0/16` cannot be written there, and listing one household's IP
+would make every household a rebuild. The config therefore permits
+cleartext in its base config, and the rule lives at the one gate an
+engine address passes through: `EngineAddress.normalise()` refuses to
+store anything that is not RFC 1918, link-local, loopback, ULA or a
+`.local` name, and the shell loads no cleartext URL it did not get from
+there (the YouTube pane is https). Lost: a false base config with a
+hand-kept domain list. Raised rather than narrowed silently: the brief
+asked for the config to do it, and the config cannot.
+
+**2026-10-08 — `EngineAddress.DEFAULT` is a placeholder address, and
+that is not the device name CLAUDE.md forbids.** A card number in config
+is a detected thing written down and wrong after a hotplug; the default
+URL is the pre-filled text of a dialog whose purpose is to replace it,
+and nothing is detected from it or depends on it. Recorded because the
+rule will look violated to the next reader. mDNS discovery should
+pre-fill that dialog eventually; it lost for now because a discovery
+that fails silently on a Wi-Fi that drops multicast is worse than a
+dialog, and `Settings.kt` says so.
+
+**2026-10-08 — The setup dialog (five-second hold on the face) is in
+step 1, not step 3.** Without it the engine address could not be set on
+a real phone and the README's "run on a phone" would be false. A
+long-click listener lost (fires at ~500 ms, which a resting thumb trips)
+and a hidden tap sequence lost (what a curious grandchild finds first).
+The hold is a touch listener that returns false, so the WebView still
+gets every event; text selection and haptics are turned off on the face
+WebView so the only long press it knows is this one.
+
+**2026-10-08 — The pure half of the shell is split from the Android
+half so it can be tested without a device.** `EngineAddress.kt` (no
+Android imports) beside `Settings.kt` (SharedPreferences), and
+`Protocol.kt` on `org.json` with the real `org.json:json` on the test
+classpath, because the platform's copy is a stub in local unit tests
+and every method throws "not mocked". Lost: kotlinx.serialization or
+Moshi for the protocol -- a code generator or a reflection runtime for
+seven small shapes, and both stricter than an engine that adds fields
+between releases. An unknown `type` parses to `UnknownMessage`, never a
+crash; a frame with no string `type`, or a known type missing the one
+field that gives it meaning, parses to null and is dropped.
+
+**2026-10-08 — The talk button is a child of the root, not of the face
+pane.** A fullscreen video (step 3) takes the face pane down to a
+corner; the button must not go with it. Same reason the layout's root
+is a FrameLayout around the horizontal LinearLayout the brief asked
+for, rather than the LinearLayout itself.
+
+**2026-10-08 — `BootReceiver`, `SaathiAdminReceiver` and `EngineService`
+exist as classes, not only as manifest lines.** A manifest that names a
+class the APK does not contain installs fine and crashes at the first
+broadcast; the three are a few lines each, with their reasons in their
+headers. `EngineService` does nothing yet: on API 34 its `microphone`
+type must be in the manifest at install time, so the declaration is
+step 1's and the behaviour is a later step's.
+
+**2026-10-08 — `OkHttpEngineLink` keeps all of its state on the main
+thread; OkHttp's threads only post to it.** One socket reference, one
+connected flag and one attempt counter, mutated only by `Handler`
+callbacks on the main looper, which also times the backoff. Lost: a
+lock around the three (every OkHttp callback would take it, and the
+listener would still have to hop to the main thread to touch a view),
+and coroutines (channels and a retry loop for what is twenty lines of
+state). The cost accepted: a window of a few milliseconds between the
+socket opening on OkHttp's thread and the main thread hearing of it,
+during which a send is dropped rather than queued. Also lost: a
+WebSocket of our own over `java.net.Socket` -- framing, masking,
+ping/pong and the close handshake are a few hundred lines OkHttp
+already has, and `build.gradle.kts` names OkHttp as the one
+dependency with a job the platform cannot do.
+
+**2026-10-08 — A frame sent while the engine link is down is dropped
+and logged, never queued.** `main.js` sends only on `readyState ===
+OPEN`; the link follows it, although OkHttp would happily enqueue a
+message during a handshake and deliver it on open. A press that lands
+seconds late is a turn she did not start (the engine would open the mic
+on a room with nobody holding the button), and a release that lands
+late ends one she did. The listener hears `onDisconnected` only when a
+connection that was up goes down, and `onConnected` on every open;
+failed attempts in between are logged, not reported -- the link's job
+is to be up, and there is no status to show for it being down.
+
+**2026-10-08 — The reconnect schedule and the delivery rule are pure
+and tested on the JVM; the socket is not.** `ReconnectBackoff` pins
+`min(30000, 500 * 2 ** attempt)`, reset on open, to the face page's
+constants so a restarted engine sees both clients come back in step;
+the shift is capped so a night of retries cannot overflow.
+`OkHttpEngineLink.deliver()` is the whole of what a `/ws` frame may do
+to a listener (`state` and `media` reach it, cards, captions, settings
+and unknown types stop at the link). Testing the socket itself would
+need Robolectric for `Handler` and a fake server for OkHttp, neither of
+which a build without the SDK can run; same split as `EngineAddress`
+from `Settings`.
+
+**2026-10-08 — The link needs OkHttp pings, and `newClient()` is the
+client that has them.** A Wi-Fi hop that dies silently leaves a socket
+"open" with every press going into it unanswered, and nothing in the
+`/ws` protocol would ever notice; a missed pong fails the socket, which
+is what starts the reconnect. Lost: an application-level heartbeat
+frame on `/ws` -- the server has no such frame, and adding one changes
+a protocol the face page also speaks for a problem the transport
+already solves. The interval (15 s) is the time a dead hop can go
+unnoticed; shorter costs a sleeping tablet its battery for nothing.
+
+**2026-10-08 — `PushToTalk` consumes every touch on the talk button
+and sets the pressed state itself.** A `Button` turns down-and-up into
+a click with a click sound on every release, and a click is not a hold;
+the listener returns true, so the button's own touch handling never
+runs, and drives `isPressed` so the drawable still shows the hold.
+`performClick()` is deliberately not called (lint's
+`ClickableViewAccessibility` is suppressed with that reason in the
+file). Lost: `OnLongClickListener` (its ~500 ms clock is the engine's
+hold seam's to keep), and a toggle (a state she would have to remember
+and a label to show it, which the face must not have). `ACTION_CANCEL`
+is a release: a press with no release would leave the engine listening
+to an empty room. No timer of any kind: a hold is a long press, and the
+engine times it from the one press it receives. `cancel()` exists for
+the activity's `onPause`, the one case where the touch stream may not
+deliver the cancel itself. Release sends the `/ws` release before it
+stops the mic: the engine gates frames on press/release on its own side
+(`audio/remote.py`'s `feed`), so a frame captured after the release is
+dropped there either way, and the order on the phone is the order the
+brief gave.
+
+**2026-10-08 — The WAV header reader is its own pure-Kotlin file,
+`WavHeader.kt`, beside the two files the audio brief named.** Same
+split as `EngineAddress.kt` from `Settings.kt`: the parser is the part
+of the speaker most likely to be wrong (a `LIST` chunk, an odd-sized
+chunk, a streaming writer's 0xFFFFFFFF size field, a backend at 24 kHz
+instead of 16) and the part that can be checked on the JVM without an
+SDK, so it has no Android import and eleven JUnit cases. Lost: assuming
+44 bytes and the engine's rate, which every backend here would satisfy
+today and one ffmpeg flag would break. 16-bit PCM in one or two
+channels is all it accepts; that is all the engine writes, and anything
+else is acknowledged unplayed (below) rather than guessed at.
+
+**2026-10-08 — `played` goes back through `OkHttpAudioLink.sendPlayed`,
+not through the `AudioLink` interface.** Step 1's interface has no
+path for the acknowledgement and is not edited here (another agent
+integrates against it). The method is on the concrete class with the
+gap named in its header; the integrator calls it from the `Speaker`'s
+`onDone`. Raised rather than patched into the interface: an interface
+change is a conversation, and this one needs step 3 in the room.
+
+**2026-10-08 — The speaker streams through `AudioTrack` on its own
+thread and watches the playback head; `MODE_STATIC` lost.** Static
+mode wants the whole clip in shared memory and a position marker (with
+a Looper for its listener) to learn that it ended; a thread that writes
+in `MODE_STREAM` and polls the head until it reaches the last frame
+ends exactly where the data does, for a clip of any length, and `stop()`
+is a pause and a flush from any thread. A play is declared done by the
+clock at the WAV's length plus one second if the head never gets there,
+so the ack always beats the engine's "length plus three seconds" wait: a
+device that lies about its head position mis-times one ack, never
+stalls a turn. A WAV the reader refuses is acknowledged at once, so the
+engine moves on now rather than after its grace; the link passes every
+`play` through regardless of its `format` field for the same reason --
+one path for every unplayable sentence, in the speaker.
+
+**2026-10-08 — Playback asks for `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`
+with `USAGE_ASSISTANT`/`CONTENT_TYPE_SPEECH`, keeps it 1.5 s past the
+last sentence, and stops on a `LOSS`.** May-duck over plain transient
+because the engine's own rule (20%, `Ducking`) already decided a video
+is lowered under her voice, not paused, and the system-wide focus
+should say the same thing to the watch page and to every other app.
+The hold-over is so a four-sentence reply is one duck, not four
+(request/abandon per sentence pumps the video's volume). A `LOSS` or
+`LOSS_TRANSIENT` (a call) stops the sentence because she cannot hear
+both; a denied focus request is logged and the sentence plays anyway,
+because a companion that goes quiet when something else holds focus is
+worse than one that talks over it. Lost: no focus at all.
+
+**2026-10-08 — The microphone is `VOICE_COMMUNICATION`, opened per
+hold on one parked thread, with a buffer four times the device
+minimum and the short tail frame sent on release.** The source asks
+the platform for its own echo cancellation and gain control for a
+near-field voice -- what "local AEC is mandatory" means on a phone,
+where PipeWire's reference path does not exist -- with
+`AcousticEchoCanceler`/`NoiseSuppressor` attached where the device has
+them. Capture runs only between `startSending` and `stopSending`
+(the interface allows always-on): the engine would drop the frames,
+the privacy indicator would be lit all day, and a care facility's
+network admin would ask why. One long-lived thread parked between
+holds, so a second hold never races the first's release of the
+AudioRecord. The buffer is `4 x getMinBufferSize` at run time, no
+number written down (a number would be a device name). The partial
+last frame goes up on release because it is the end of her sentence
+and the engine joins frames of any size. Lost: `AudioSource.MIC`,
+a thread per hold, and dropping the tail.
+
+**2026-10-08 — The audio link reconnects after 1 s doubling to 15 s,
+reset on open, timed on the main looper, with no jitter.** One client
+per engine on one Wi-Fi: there is no herd to spread out, and a
+deterministic schedule is the one that can be tested (`backoffMs`).
+OkHttp's WebSocket has no read timeout after the upgrade, so a dead
+Wi-Fi hop is only noticed through the client's `pingInterval`; the
+link's header asks the integrator to set one on the shared client.
+
+**2026-10-08 — The audio component was type-checked against
+hand-written stubs, not the SDK, and that is recorded as what it is.**
+No Android SDK in this container (dl.google.com is blocked), so
+`OkHttpAudioLink.kt`, `AudioTrackSpeaker.kt` and `WavHeader.kt` were
+compiled with Kotlin 2.0.21 (warnings as errors) against Java stubs of
+the API 26 shapes they call -- signatures as published, bodies empty --
+plus the real okhttp 4.12.0/okio 3.6.0 jars and the step-1 pure files,
+and `WavHeaderTest`/`OkHttpAudioLinkTest` ran there (14 passed). That
+catches Kotlin mistakes and interop shape (synthetic properties, SAM
+conversion, overload choice); it cannot catch a wrong constant value
+or a behaviour the real platform has. The first `assembleDebug` is
+still the first real build, as the README says.
+
+**2026-10-08 — The YouTube pane is two files: the rules in `WatchPage.kt`
+(pure Kotlin) and the WebView in `WebViewYouTubePane.kt`.** The same
+split as `EngineAddress`/`Settings` and `ReconnectBackoff`/
+`OkHttpEngineLink`: what is a wall, what is YouTube at all, which user
+agent to wear and what the injected scripts say are pinned by
+`WatchPageTest` on the JVM; the WebView that applies them needs a
+device. The scripts' behaviour on a page (the poll, the grace, the
+deadlines) was driven under node against a fake `<video>` with fake
+timers -- which is what found the poll giving up at 28 s instead of 30
+-- but node is on neither the Python nor the Android test path, so that
+harness is not in the repo and the JUnit test pins the scripts' shape
+only. Lost: a Chromium test in `tests/` like `test_media_policy.py`'s
+-- the scripts are generated by Kotlin, and a copy in a JS file for
+pytest to load would be a second source of truth. The pane was
+type-checked against hand-written stubs of the API-26..34 shapes it
+uses, with the documented nullability on each override, not against
+an SDK (none here); the first `assembleDebug` is still the first real
+compile.
+
+**2026-10-08 — The watch page's user agent is desktop Chrome with the
+platform's own Chrome version.** YouTube serves the full player only to
+a desktop browser and serves it by version; a version frozen in the
+source is an "update your browser" banner a year on, so only the
+`Chrome/x.y.z.w` of `WebSettings.getDefaultUserAgent` is kept and the
+rest of the string is the canonical Windows one (`wv`, `Mobile` and
+`Android` gone). A platform UA with no Chrome version falls back to a
+fixed string.
+
+**2026-10-08 — `ended` and `error` from the `<video>` count only after
+a two-second grace.** YouTube plays its ads in the same element as the
+content, so an ad ending fires `ended` too; the element is checked two
+seconds later and an `ended` counts only if it is still at its end
+(`ended` or `paused`) rather than playing what came next. The same for
+`error`: the player recovers from a format it cannot decode by loading
+another, and the element's `error` clears when it does. Lost: reading
+`#movie_player`'s `ad-showing` class -- certain, and the page's DOM
+rather than the element's, which is the line the pane does not cross.
+Also added: a start deadline. A `<video>` that exists but has not
+played thirty seconds after it appeared is reported (`no_start`, as
+code "browser"): an age gate and "video unavailable" are drawn inside
+the player with no navigation, so the host rule never sees them, and
+`Protocol.CODE_BROWSER` already names "never started". The deadline
+stands down while the pane itself has paused the video.
+
+**2026-10-08 — The pane leaves the watch page on its own `ended` and on
+every failure, and the face comes back with it.** `YouTubePane.kt`
+says the pane decides nothing after reporting, and it still does not
+decide what plays next; but a watch page left up after its video ends
+autoplays a next one nobody chose within seconds, and the face page's
+panel hides itself at the same moments (`view = "none"` in
+`media-panel.js`). So `ended`, a wall, a page that failed to load and
+a player that failed all end in `stop()` -- `about:blank`, the
+container gone, the face restored if the pane had hidden it -- and
+then the listener hears. Fullscreen, per the brief, hides the face
+container outright (`GONE`), which diverges from the face page's
+"small in a corner" and from `activity_main.xml`'s comment; it is one
+method (`applyLayout`) and the integrating step can make it a strip
+instead. The face is hidden only while the pane is showing: a `layout
+fullscreen` with nothing playing leaves the face alone, and the pane
+restores only what it hid.
+
+**2026-10-08 — The pane shows youtube.com and nothing else; walls are
+three hosts and one path; sign-in is the one exception.** Main-frame
+navigations to a non-YouTube host are blocked (a tapped ad, a channel's
+website: the engine stopped nothing, so the pane stays where it was);
+`intent:` and `vnd.youtube:` links go nowhere a kiosk can show and are
+dropped. `accounts.google.com`, `consent.youtube.com` and
+`consent.google.com` (one more than the brief: Google's own consent
+host serves the same wall) and any path containing `/sorry/` are
+reported as "wall", checked at `shouldOverrideUrlLoading`,
+`onPageStarted` and `onPageFinished` so a server redirect is caught
+wherever it surfaces. `open()` refuses a URL that is not https on a
+YouTube host without loading it: the engine builds these, the pane
+checks them, and a kiosk WebView with a desktop UA and persistent
+cookies must not be a general browser. `signIn()` (on the class, not
+the interface) is the one time a wall is the point: it loads Google's
+sign-in and the pane hides itself when Google returns to youtube.com,
+flushing cookies then and only then (`CookieManager.flush()` blocks
+the UI thread, and the store persists on its own; a flush on every
+stop would be jank for a sign-in that is weeks old). Google may refuse
+a sign-in from a WebView; the pane plays signed out.
+
+**2026-10-08 — No hardware layer on the watch WebView; the renderer
+dying does not kill the shell.** Video needs the window's hardware
+acceleration, which targetSdk 34 gives every window; `LAYER_TYPE_
+HARDWARE` on the view would be a second full-size texture with
+reports of black fullscreen video, and a software layer must never be
+set. `onRenderProcessGone` returns true: the WebView is taken off the
+screen, every later `open()` is refused with "browser" until the shell
+restarts, and the current video is reported lost. The face WebView
+shares the renderer, so its client (a plain `WebViewClient` in step 1)
+still decides the shell's fate; step 3's to change. The page's own
+fullscreen (`onShowCustomView`) fills the pane, not the screen, so the
+face and the talk button stay. The bridge's two methods take nullable
+strings: a page passing `undefined` must not throw inside the
+WebView's thread. Every code the page reports (`no_video`,
+`no_start`, a MediaError number) is logged and sent as "browser"; the
+controller treats the two browser codes alike and only the log needs
+the detail.
+
+**2026-10-08 — `Kiosk.exitLockTask` gives back the whitelist, the status
+bar and the keyguard; it leaves the persistent HOME and
+`DISALLOW_SAFE_BOOT` in place.** The activity is `lockTaskMode=
+"if_whitelisted"`, so a `stopLockTask()` on its own lasts until the next
+launch, when the system pins the whitelisted task again: an "exit" that
+ends at the next reboot is not one, so the owner-side exit also clears
+`setLockTaskPackages` and re-enables the bar and the keyguard. The HOME
+and the safe-boot restriction stay because they are what makes the
+tablet Saathi's rather than what pins the screen, and a safe boot is a
+way around the owner that no dialog should hand out. Every
+DevicePolicyManager call is wrapped to log and continue (a
+`RuntimeException`, not only `SecurityException`, because a few throw
+`IllegalArgumentException` for a flag a device refuses): a kiosk that
+cannot be entered is a log line, a crash would take the face with it.
+`enterLockTaskIfOwner` on a non-owner build is one log line and no
+`startLockTask()` -- the screen-pinning prompt is not a kiosk, and it is
+not hers to answer. Lost: a kiosk launcher app, and
+`lockTaskMode="always"` with no code (pins only the task; the bar and
+the keyguard stay).
+
+**2026-10-08 — The lock-task feature set is `LOCK_TASK_FEATURE_NONE`,
+and YouTube's app is in the whitelist.** The brief allowed a feature
+set only if the API required one; none is required, and NONE is the
+one the face wants (no keyguard, no notifications, no home, no
+overview, no global actions, no system info). It is written as the
+value `0` in `Kiosk.kt` with a test comparing it to the SDK's constant
+under the real `android.jar`, so the stub check and the Gradle test
+check the same number. `com.google.android.youtube` is whitelisted
+because the watch page can hand a video to the app (an "open in app"
+banner, a share sheet) and a package outside the whitelist cannot start
+while the task is locked -- the tap would do nothing, silently.
+
+**2026-10-08 — The setup dialog's Save applies the kiosk box through
+`Kiosk` as well as storing it, and "Exit kiosk" is shown only when the
+app is not Device Owner.** Ticking a box and seeing nothing happen until
+a reboot is a support call; Save enters lock task (owner only) or leaves
+it, then calls back so the activity reloads the face. The explicit exit
+button exists for the demo phone, where a pinned screen with the system
+bars hidden has no other way out; on the owner tablet leaving the kiosk
+is the checkbox's job, and a one-tap exit reachable by anyone who finds
+the five-second hold is not something that tablet should have. Lost:
+the same button for both.
+
+**2026-10-08 — "Test" has an OkHttp client of its own, and shares the
+address rule with Save.** The links' client has no read timeout on
+purpose (a WebSocket with one dies on the first quiet minute) and the
+probe wants three seconds, so the probe builds one small client, once.
+`SetupDialog.probeUrl` is `EngineAddress.normalise` plus a trailing
+slash, tested to agree with Save on every address, so the test cannot
+pass for an address Save then refuses. Any 2xx is an answer. The
+callback hops to the main thread; a dialog that has gone by then gets a
+harmless update to detached views.
+
+**2026-10-08 — `SetupDialog.show` gained a five-argument overload that
+takes the two links; the three-argument form from step 1 stays and
+delegates.** The brief asks Save to reconnect both links, and the step-1
+signature (`show(activity, settings, onSaved)`) has no way to reach
+them. `MainActivity` is another agent's file, so its call is not edited;
+the integrator picks the overload. Lost: changing the three-argument
+signature (breaks a call this agent must not touch) and reconnecting
+through a global (a link the dialog can find without being handed one
+is a link the activity no longer owns).
+
+**2026-10-08 — `EngineService` is started and stopped by the activity's
+lifecycle, is `START_NOT_STICKY`, and on API 34 does not start until
+`RECORD_AUDIO` is granted.** On API 34 `startForeground` with the
+`microphone` type throws `SecurityException` without the permission and
+`ForegroundServiceStartNotAllowedException` when the app is not visible,
+so `EngineService.start` checks the permission first (the pure rule is
+`startAllowed`, tested across API 26-36) and the service stops itself if
+the platform still refuses: the face stays up, the mic works while the
+screen is on, logcat says why it is no more than that. Not sticky
+because a service the system restarts with no activity to serve has
+nothing to do and a notification to explain. The partial wake lock has
+no timeout (one clock, the service's own). The notification -- "Saathi
+is listening", low importance, in the shade -- is the one Android
+requires of every foreground microphone service and is not the status
+text under the face that CLAUDE.md forbids; the face shows nothing.
+Lost: a bound service (its life is the binder's, which is the
+activity's, which is the problem) and `START_STICKY`.
+
+**2026-10-08 — `SaathiAdminReceiver` logs its callbacks and applies no
+policy from them.** `onEnabled` and `onProfileProvisioningComplete` do
+not both fire for `dpm set-device-owner` on every release, and a policy
+whose presence depends on which path granted the owner is one that is
+missing on the day it matters; `Kiosk.enterLockTaskIfOwner` applies the
+whole set whenever the activity asks, idempotently. The overrides exist
+so logcat answers the first three questions asked of a tablet found on
+a launcher instead of the face: was the owner granted, did a lock task
+begin and end, did anything ask to remove the admin.
+
+**2026-10-08 — The kiosk strings are in `values/strings_kiosk.xml` and
+the notification icon is a new `drawable/ic_notification.xml`, two files
+the brief did not name.** Other components are being written in
+parallel and `strings.xml` is step 1's file; Android merges every
+`values/` file, so a file of this component's own cannot collide. The
+icon is needed because a notification without a small icon is dropped,
+and the launcher icon's filled ground would render as a white square in
+the status bar.
+
+**2026-10-08 — The kiosk component was type-checked against hand-written
+stubs, as the audio component was.** No Android SDK in this container:
+`Kiosk.kt`, `SaathiAdminReceiver.kt`, `BootReceiver.kt`,
+`SetupDialog.kt` and `EngineService.kt` were compiled with Kotlin 2.0.21
+(warnings as errors) against Java stubs of the API 26-34 shapes they
+call -- `DevicePolicyManager`, `DeviceAdminReceiver` with `@NonNull`
+parameters, `Service`, `Activity`, `ActivityManager`, the widgets,
+`AlertDialog.Builder`, `NotificationCompat.Builder`, `PowerManager` --
+plus the real okhttp 4.12.0/okio 3.6.0 jars and the step-1 pure files,
+and `KioskTest`, `SetupDialogTest`, `EngineServiceTest` ran there (12
+passed). That catches Kotlin mistakes and override shape; it cannot
+catch a wrong constant or a platform behaviour. The first
+`assembleDebug` is still the first real build.
+
+**2026-10-08 — The target rule and ducking live in `MediaTargets`, a
+pure class on the two interfaces, not in `MainActivity`.** The engine
+addresses pause/resume/stop/volume/layout to "whichever target is
+playing" and never names it, so this side remembers which target the
+last `play` went to and hands a frame to the pane only while the pane
+is that target; ducking (20% while listening/thinking/speaking/handoff)
+is applied through the same memory. In the activity none of that is
+testable without a device; as its own class it implements
+`EngineLink.Listener` and `YouTubePane.Listener` and `MediaTargetsTest`
+pins it on the JVM against fakes of both interfaces (14 cases: an embed
+play never reaches the pane, nor does any control frame while the embed
+is the target; `stop` and the pane's own `ended`/`error` clear the
+memory; a late `ended` from the pane after the embed took over does
+not). Lost: stopping the pane on an embed play "to be safe" -- `media.py`'s
+`_play` already emits a `stop` before a play that changes target, and
+a shell that second-guessed that would stop the pane twice on every
+switch. Lost: asking the engine to name the target on every frame, a
+protocol change for a rule one side can keep, as the face page keeps
+it. One thing the engine did not say: a browser play that arrives
+without `watch_url` is opened at the canonical watch URL for its id
+(the string `media.py`'s `watch_url()` builds), so an older engine
+still plays rather than being refused.
+
+**2026-10-08 — The kiosk is entered on every resume only when the setup
+dialog's box is ticked.** The brief said `enterLockTaskIfOwner` in
+`onResume` unconditionally; that would make the dialog's checkbox a
+lie -- unticking it exits lock task and the next resume would pin the
+screen again. `settings.kiosk` gates it, matching what Save does and
+what step 1's marker said ("when settings.kiosk and the app is Device
+Owner"). On the owner tablet with the box ticked every resume re-applies
+the whole policy set, idempotently, so a reboot lands on the face
+locked.
+
+**2026-10-08 — The face WebView reloads on the links' schedule when the
+engine does not answer, refuses to leave the engine's address, and
+recreates the activity when its renderer dies.** A tablet that boots
+before the engine must show the face once the engine is up without
+anyone touching it: a main-frame load error or HTTP error schedules a
+reload after `ReconnectBackoff` (500 ms doubling to 30 s, `main.js`'s
+numbers, so the page and the sockets come back in step), reset by a
+load that finishes without an error; one retry per load. Chromium's own
+"webpage not available" page shows in between -- lost: a native "engine
+not found" screen, which would be status text on the face's screen, and
+Chromium's page already says in words what is wrong. Main-frame
+navigations not under the stored address are refused
+(`EngineAddress.isOn`, pinned in `EngineAddressTest`): the embed
+player's "watch on YouTube" link would otherwise replace the face with
+youtube.com in this WebView, and the watch page has its own pane. On
+`onRenderProcessGone` the activity calls `recreate()` and returns true:
+both WebViews share the renderer, so a fresh activity is a fresh face, a
+fresh pane and fresh links in one step. Lost: returning false (the
+system kills the process -- the owner tablet relaunches its HOME, the
+demo phone drops to the launcher) and rebuilding the two WebViews in
+place (a second recovery path for the same event). Known cost: the
+pane's own `onRenderProcessGone` fires first and reports the open video
+as a browser failure, so a renderer crash mid-video refuses that video
+for the session; the recreate restarts everything else.
+
+**2026-10-08 — The microphone permission is asked for at start through
+the activity-result contract, and the grant starts `EngineService`.**
+Asking on the first hold would put a prompt in the middle of her first
+sentence; `onRequestPermissionsResult` is deprecated in
+`ComponentActivity` for the same contract. On API 34 the microphone
+service cannot start until the permission is granted, so the callback
+starts it if the activity is started by then; `EngineService.start`
+itself stays the one place that checks. One `OkHttpClient` for the
+process (a lazy in `MainActivity`'s companion, built by
+`OkHttpEngineLink.newClient()` for its ping interval) rather than one
+per activity instance, so a recreate does not leave a second pool
+behind. The back button is swallowed by an `OnBackPressedCallback`
+rather than an `onBackPressed` override (deprecated since API 33 and
+bypassed by predictive back).
+
+**2026-10-08 — The whole `android/` tree was type-checked at once
+against a merged stub set; the YouTube sign-in button is still not
+offered.** The three earlier stub sets (kiosk, audio, pane) were merged
+and extended with the AppCompat/activity/core shapes `MainActivity`
+uses; every main file and every test compiled under Kotlin 2.0.21 with
+warnings as errors, and all 87 JUnit tests ran green on the JVM. What
+that cannot catch is recorded in `android/README.md`. `WebViewYouTubePane.
+signIn()` exists for the device's Google account; the setup dialog's
+three buttons are taken (Save, Cancel, Exit kiosk) and a fourth control
+was not added in this step -- the pane plays signed out, and the README
+says so. Lost: adding it now, one more untested widget in the one
+dialog that already carries the kiosk switch.
+
+**2026-10-08 — Review pass over the Android port, engine side: both
+sockets have a heartbeat, a vanished `/ws` client is released, a
+replaced `/audio` client releases the play it was waiting on, and
+reports are routed by target.** Five findings, each verified by reading
+before it was fixed. (1) `web.WebSocketResponse()` had aiohttp's
+default `heartbeat=None` on `/audio` and `/ws`, so a phone that died
+without a close frame stayed "attached" for as long as the kernel kept
+the TCP connection: every press used the dead remote mic, every
+sentence waited its bound into the void, and the local mic and speaker
+never came back. Both sockets now ping every 5 s
+(`_HEARTBEAT_SECONDS`); a missed pong closes the socket and the
+handler's `finally` detaches the client. Lost: detaching on a play's
+timeout (a slow phone is not a dead one; the heartbeat is the right
+instrument). (2) `RemoteAudio.attach()` replacing a client left
+`_current` in place, and the replaced handler's late `detach` found it
+was no longer the client and returned early, so a reconnect
+mid-sentence (the app resumed, a Wi-Fi blip) cost the WAV's length plus
+3 s with her face on "speaking"; `attach` now releases it as `detach`
+does. The sentence is lost, not re-sent: the new client never saw its
+header. (3) A `/ws` socket that *vanished* with its press down (no
+close frame, 1006; or a page going away, 1001) is released for on the
+way out, through the same `handle_input` every real press and release
+goes through -- the shell drops a `release` it cannot send and never
+re-sends it, so core.py sat in LISTENING with the capture open until
+her next full hold, whose press was a no-op. A socket that closed in
+order (1000) is taken at its word: the shell always releases before it
+disconnects, and the existing tests close their socket mid-press and
+expect the press to stand, which is the right rule, not a test
+accommodation -- a client that could say goodbye could have said
+release. (4) `reset` and `ended` were honoured from any client: the
+face page sends `reset` on every socket open it has no player for, so
+a reconnect while the shell's watch page played un-played it, "carry
+on" restarted the video from the top, and the next embed play skipped
+the `stop` the target switch relies on. A `media_event` may now name
+its player (`target`: "embed" or "browser"; absent means the face
+page, whose frames predate the field), a `reset` counts only from the
+player whose target is playing, and an `ended` naming a video other
+than the one playing is a late report. The shell sends `reset` with
+`target: "browser"` on every `/ws` open with nothing playing, as the
+panel does, so a restarted shell is reported too. Lost: gating a bare
+`ended` by source as well -- the panel never sends one while the
+browser target plays (its view is "none" after the `stop`), and two
+existing tests send one while the browser plays and expect it honoured;
+they are right about today's clients. (5) With no client that can show
+the watch page connected -- the Pi kiosk with the face page alone,
+which is the production configuration, not only the laptop demo the
+entry above allowed for -- an embed refusal re-emitted the play on the
+browser target, nobody took it, and the controller answered "it's
+already playing" to a blank panel. `MediaController` takes a
+`browser_available` callable and, when it says no, treats the embed's
+refusal as the browser's verdict would be: refused for the session and
+the rest re-offered on a card, which is what happened before the target
+rule. `cli.py` hands it `remote_audio.attached` -- the Android shell is
+the one client with a watch page and its `/audio` socket is the one
+sign of it the engine already has. Lost: a `hello` on `/ws` (a protocol
+change the face page would also have to make, for a fact one existing
+seam already knows) and treating the panel's own "api"/"no_ready"
+deadlines as transient rather than marking the video: the finding is
+fair -- they are the network's failure -- but the rule that every
+non-browser code is the embed's is pinned by
+`test_every_error_code_but_the_browsers_own_is_the_embeds`, and a test
+is not changed to pass; raised here instead, for a later pass that
+retries those two codes once. The panel, for its part, now remembers
+which target the last play went to (`activeTarget`) and lets
+pause/resume/volume reach its player only while that is the embed: the
+hidden, stopped player kept after a target switch answered her "carry
+on" with the previous video's audio under the watch page.
+
+**2026-10-08 — Review pass, tests the engine side lacked.** Added, not
+changed: the contract's number itself (`DEFAULT_GRACE_SECONDS == 3.0`),
+a client replaced mid-play, a press with no local capture source held
+through the phone and its inverse (no source, no phone: nothing
+starts), a client that never acks still letting the state machine reach
+idle, the four bad `/audio` text frames (a wrong sample rate, non-JSON,
+an unknown type, a non-string `played` id) leaving the client attached,
+a quiet client detached by the heartbeat, a vanished `/ws` client
+released and a bystander not, a hold socket vanishing mid-hold, a
+`reset` named by target through the server, an embed refusal with no
+`/audio` client re-offered rather than sent to the browser, and a
+Chromium scenario for the panel's control gating. Two harness facts
+worth writing down: aiohttp's test client answers pings only while it
+is inside `receive()`, so a socket left idle at a short heartbeat is
+dropped too (the tests keep a live socket reading while they wait), and
+`close()` on a socket the server has already torn down raises, so a
+quiet socket is drained to its close instead. The suite was run on
+x86_64 only (`uname -m`); CLAUDE.md's "Done means" asks for arm64 as
+well, and no arm64 machine was reachable from this container. The
+`/audio` path and the fixes above have no architecture-specific code,
+so this is a verification gap to close on the Pi before the engine side
+is called done, not a suspected failure.
+
+**2026-10-08 — Review pass over the Android shell: what each finding
+changed, and what was left.** The sign-in path is gone
+(`WebViewYouTubePane.signIn()`, its state and the README's promise of a
+button): Google refuses sign-in from an embedded browser, the pane
+wears a desktop user agent, and the only way that page could have
+worked was by getting past the refusal -- the circumvention the
+product's own "legal way" rule forbids and the thing that puts a device
+account at risk. The pane plays signed out; `WatchPage.SIGN_IN_URL`
+stays as the canonical wall for the host rule and its test. The
+three-identity rule is now in the README, where the person signing
+things into a tablet reads. The `/ws` `release` is sent after the mic's
+last frame: `AudioLink.stopSending` takes a callback the mic thread
+runs once the capture has sent its tail, and `PushToTalk.release` sends
+the release from it -- the engine stops forwarding the instant it reads
+the release and the two sockets give no ordering guarantee, so the
+first draft's order (release, then stop the mic) lost the end of every
+sentence; lost: an engine-side grace after a remote-mic release, which
+would put 150 ms on every turn's hot path. A hold while the `/audio`
+socket is down opens no microphone (one log line); the first draft lit
+the privacy indicator for frames `sendFrame` dropped. The `/audio`
+link's `Request.Builder().url()` has the `IllegalArgumentException`
+guard the `/ws` link had, since the reconnect runnable runs on the main
+looper. `HoldListener.cancel()` exists and the activity calls it in
+`onPause`/`onDestroy`, so a renderer crash recreating the activity
+mid-hold cannot open the dialog on a finished window. A drop of `/ws`
+ends a hold on the shell's side too (`MainActivity.LinkEvents`, which
+delegates everything else to `MediaTargets`), matching the engine's
+release of a vanished socket. On a first run nothing connects until an
+address is saved: `Settings.engineUrl` is null until then and the
+dialog opens itself; `EngineAddress.DEFAULT` is the field's hint and
+nothing else (the first draft reconnected forever to a placeholder
+that, on a common home network, is a stranger's device). The
+fullscreen layout keeps the face as a corner cell (22% of the screen
+each way, bottom-left, the face page's `22vw x 22vh`) with the pane
+taking the rest of the row; the first draft set the face container
+`GONE`, which made the engine's own "your face is in the corner" untrue
+and broke SPEC.md's "the face is in every layout" for this target;
+lost: a true overlay, which means re-parenting a WebView. `stop()`
+forgets the layout, since the engine sends `fullscreen` with every
+play. The install script tells the bridge when the `<video>` is found
+(`onVideo`) and the pane answers with the level it holds then: the
+element can appear 30 s after the script was built with the level of
+that moment, and a ducking change in between was lost until her next
+press. Navigation in the pane requires https (`isWatchUrl`, the same
+rule `open()` applies), and `network_security_config.xml` denies the
+YouTube hosts cleartext -- what the config can express, beside the LAN
+rule it cannot. `EngineService` is started with `startService`, not
+`startForegroundService`: the latter promises a `startForeground()`
+within seconds and kills the process when the service stops without
+one, so the first draft's `stopSelf()` fallback was a crash, not the
+degrade its header described; from a visible activity a plain start is
+allowed and the fallback is real. Its header now says what it does
+(keeps capture and the wake lock across a paused-but-visible activity;
+`onStop` ends it), not what the first draft claimed (a dimmed kiosk's
+whole life). The notification is titled "Saathi": the first draft's
+"Saathi is listening" was a status label and a false one most of the
+time. `BootReceiver` does nothing on Android 10+ (the system ignores a
+background activity start by an ordinary app; the owner tablet is HOME
+and needs no receiver) and says so in its header and the README; it
+still serves an Android 8/9 phone, which is why it was kept. The debug
+manifest overlay sets `android:testOnly` so `dpm remove-active-admin`
+works for the build the README tells you to make (it never did: only
+Android Studio's Run button injects the flag), at the cost of `adb
+install -t`. `androidx.webkit` and `kotlinx-coroutines-android` are
+gone from the dependencies: nothing imported them.
+
+**2026-10-08 — What the review pass could and could not verify on the
+Android side.** The earlier merged stub set was not kept, so a smaller
+one was rebuilt in a scratch Gradle project: eleven `android.webkit`
+shadow classes (the API 21-26 shapes the pane uses, with the API-26
+getters that Kotlin's property syntax needs) and
+`androidx.core.content.ContextCompat`, ahead of the Maven `android`
+API-16 jar and the real okhttp/okio jars. Thirteen main files --
+`Protocol`, `EngineLink`, `AudioLink`, `YouTubePane`, `EngineAddress`,
+`OkHttpEngineLink`, `OkHttpAudioLink`, `PushToTalk`, `WatchPage`,
+`MediaTargets`, `WavHeader`, `Settings`, `WebViewYouTubePane` -- and a
+mirror of `MainActivity`'s delegation and call shapes compiled under
+Kotlin 2.0.21 with warnings as errors, and 79 JUnit tests in ten
+classes passed (`MediaTargetsTest` 16, `ProtocolTest` 16,
+`WatchPageTest` 13, `WavHeaderTest` 11, and the rest). Not compiled
+again: `MainActivity`, `SetupDialog`, `EngineService`, `BootReceiver`
+(androidx, `R` and API 26-34 platform shapes the small stub set lacks),
+whose edits were read twice instead; their three test classes (12
+tests) were not re-run. The first `assembleDebug` remains the first
+real build, as the README says.
+
+**2026-10-08 — `pysilero-vad` is imported when the first detector is
+built, and an RMS energy gate stands in when it can't be.** Engine step
+"vad-flac" of the Chaquopy port: there is no Android wheel for
+`pysilero-vad`, and a module-level import would have taken
+`audio/vad.py`, and with it `cascade.py`, down at import time. The
+import now happens inside `VoiceActivityDetector.__init__` (through
+`_silero_class()`), so `monkeypatch.setitem(sys.modules,
+"pysilero_vad", None)` in a test produces exactly the phone's state;
+a module-level `try/except` would have been simpler but untestable
+without reloading the module, and its constants would still have
+needed a fallback. `CHUNK_SAMPLES`/`CHUNK_BYTES` are written down as
+512/1024 instead of read off the class, and the loader raises if a
+future `pysilero-vad` disagrees — a silent chunk-size change would
+feed the model the wrong window. The fallback is a per-chunk RMS gate
+with the chunk's DC offset removed, "probability" scaled so that
+`ENERGY_GATE_RMS` (1000, about -30 dBFS) lands on the default 0.5
+threshold; the same `SpeechStartDetector` debounce sits on top, so
+three consecutive loud chunks are still the definition of "she's
+talking" on either gate. 1000 clears the echo-cancelled source's
+measured silence (RMS 1-750, 2026-09-24) and sits well under the
+`known_sentence.wav` fixture's spoken chunks (median ~1650, runs of
+16+ over 1000). What lost: `webrtcvad` (a C extension, the same
+no-wheel problem), and a numpy spectral gate (more to get wrong and
+nothing to tune it against until a phone has been in a room). The
+gate in use is logged once per process, at `INFO` on both paths —
+on the phone the energy gate is the expected configuration, not a
+fault. Linux with `pysilero-vad` installed behaves exactly as before;
+`VoiceActivityDetector.gate` says which one a process got.
+
+**2026-10-08 — The STT upload is chosen per call: FLAC through
+`soundfile` where it imports, a stdlib WAV where it doesn't.**
+`cascade.py`'s `import soundfile as sf` is guarded (`sf = None` on
+`ImportError`, there is no libsndfile wheel for Chaquopy), and
+`end_turn()` calls `_encode_for_stt(pcm) -> (filename, bytes)` and
+uploads under the returned name, because the endpoint reads the
+container off the extension and the two must not be able to drift
+apart at the call site. `_pcm_to_flac_bytes` keeps its name and
+signature as the FLAC leg beside a new `_pcm_to_wav_bytes`, so the
+round-trip test written against it still runs unchanged; folding it
+into the chooser would have meant rewriting a passing test for no
+behaviour change. Dropping FLAC altogether for one code path was
+considered and rejected: the ~11% median time-to-response win
+(docs/completed/latency-investigation.md) is real on the Pi and the
+laptop and costs the phone nothing. The absent-soundfile test sets
+`cascade_module.sf = None` rather than reloading the module with
+`sys.modules` patched: that is the exact state the guarded import
+leaves behind, and a reload would invalidate the class objects every
+other test in the file holds.
+
+**2026-10-08 — The AI service is reached without its SDK where the SDK
+is absent, and `SAATHI_AI_CLIENT=rest` makes a laptop do the same.**
+Engine step "rest-ai" of the Chaquopy port: `openai` and `groq` both
+sit on `pydantic-core`, which has no Android wheel, so
+`voice/engine/rest_client.py` is a `RestChatClient(base_url, api_key)`
+over `urllib` that exposes exactly the attribute paths the engine
+reads -- `chat.completions.create(...)` giving `.choices[0].message
+.content`/`.tool_calls[i].id/.type/.function.name/.arguments` and
+`.usage.prompt_tokens/.completion_tokens`, and
+`audio.transcriptions.create(model, file=(name, bytes),
+response_format)` giving `.text`/`.language` -- as frozen dataclasses,
+with a hand-built multipart body for the upload, bearer auth, a 30 s
+timeout, and one `RestClientError` whose message has the key scrubbed
+out (the 401 test's server echoes the header back; the exception is
+raised `from None` so a traceback can't print the body either).
+`tools=None` is omitted from the request rather than sent as `null`:
+the cascade passes `schemas or None` and the follow-up call passes
+nothing, and both mean the same thing. `provider.py` tries the SDK
+first and falls back to REST on `ImportError`, so a Linux install with
+the SDK is byte-for-byte unchanged; `SAATHI_AI_CLIENT=rest` forces
+REST and `sdk` forces the SDK (loudly, if missing), and a bad value is
+reported by `missing_key()` the way a bad `SAATHI_AI_PROVIDER` already
+is. Two things the SDK path had are carried over so a comparison is
+fair: the IPv4 bind of the local side (the 2026-09-25 network finding)
+through a custom `HTTPSHandler`, and a CA bundle -- the platform's,
+falling back to `certifi`'s only when the platform store is empty,
+which is Android's case. What lost: `requests` (on the phone, but
+nothing over `urllib` for two POSTs), an `aiohttp` client (the cascade
+is synchronous in an executor; an async client is a loop hop per call),
+vendoring a pure-Python pydantic to keep the SDKs. Two module-level
+`from groq import Groq` lines went with it: `cascade.py`'s was an
+annotation only, and `reflect.py`'s now happens inside
+`_default_client()`, which still builds `Groq(api_key=...)` exactly as
+before where the SDK imports and `RestChatClient` where it doesn't or
+`SAATHI_AI_CLIENT=rest` is set -- `reflect()` stays Groq-only because
+its model name is Groq's. `smoke.py`'s key checks still import the SDKs
+lazily (`client.models.list()` is not part of the surface the task
+fixed); smoke doesn't run on the phone. Proven on Linux by
+`tests/test_rest_client.py`: an aiohttp fake of both routes, and a real
+`CascadeSession` turn over the REST client, tool call and follow-up
+included.
+
+**2026-10-08 — Chirp and Neural2 reach Google over plain REST where the
+client library can't be installed, behind the same two ids.** Engine
+step "google-rest" of the Chaquopy port: `google-cloud-texttospeech`
+sits on `grpcio`, which has no Android wheel; `google-auth` is pure
+Python and is what mints the token, and the REST `text:synthesize`
+answers the same voice names with the same LINEAR16 WAV. So
+`voice/tts/google_rest.py` holds `GoogleRestChirp3HDBackend` and
+`GoogleRestNeural2WaveNetBackend`, each a subclass of its client-library
+class with two things swapped -- the library probe (`_importable()`, a
+new one-line hook in `google_backend.py` so the credentials check and
+the cooldown are inherited, not copied) and the synthesis call (one
+`urllib` POST per sentence through `voice/engine/rest_client.py`'s
+opener, so the phone gets the same IPv4 bind and `certifi` fallback the
+AI client already has). Voice tables, `chirp3_hd_voice_name()`,
+`pcm_to_wav()`, the regional endpoint, the deadline, the cooldown and
+`_guarded()`'s silence-not-raise rule are all imported. `registry.py`
+decides per process through `google_tts_implementation()` -- the client
+library where it imports, REST where only `google-auth` does, the client
+classes (with their "optional dependency group" reason) with neither --
+using the same two probes the backends' `available()` use, so the
+choice and the panel's reason can't disagree; it logs the choice once,
+the way `audio/vad.py` announces its gate. What lost. Separate
+`google-rest-*` ids with an honest "per-sentence" display name for
+Chirp (REST has no bidirectional stream; `stream_pcm()` keeps its
+contract but yields the rendered sentence as one chunk): they would
+have made the phone a different voice in `voices.py`, the stored
+preference and the settings panel for a difference she cannot hear, and
+the task's rule was no change to what she hears. `google.auth.default()`
+in place of `from_service_account_file(path, scopes=[cloud-platform])`:
+it would also honour a developer's `gcloud` login, and the three Google
+identities `android/README.md` keeps apart must stay apart on the
+laptop too. A whole-call deadline: `_REQUEST_TIMEOUT_S` is urllib's
+per-socket-operation timeout here, read off `google_backend` at call
+time so there is one number for both transports; a watchdog thread per
+sentence was more machinery than a stall on Wi-Fi (which stalls, not
+trickles) justifies. `find_spec()` in the registry: cheaper than the
+import probe, but a second opinion on "installed" that could disagree
+with `available()`'s. Making `rest_client._build_opener` public or
+moving it to a shared `saathi/net.py`: either meant editing an earlier
+step's module and its test for one import; the private import carries a
+comment and the shared module is the thing to make when a third caller
+appears. Proven on Linux by `tests/test_tts_google_rest.py`: an aiohttp
+fake of `text:synthesize` (request shape, one POST per sentence, lazy
+per sentence, a 403 whose body quotes the header degrading to 100 ms of
+silence with a cooldown reason that has the token scrubbed out, the
+deadline, a reply without `audioContent`, a refused connection), the
+token fetched once and reused across sentences and both backends and
+refreshed only when `google-auth` says it expired, the loader's exact
+call shape through fake `google.oauth2`/`google.auth` modules in
+`sys.modules`, the registry's three states, and a real
+`CascadeSession.say()` through the REST Chirp backend. Credentials are
+faked at the `ServiceAccountToken(credentials=, transport=)` seam; no
+key file is ever read. Not verified here: a live call -- no credentials
+and no network to Google from this machine -- and the Chaquopy `pip`
+list (`google-auth`, `requests`, `cryptography`), which belongs to the
+Gradle step.
+
+**2026-10-08 — Remote-only audio mode, and the phone's own voice as the
+TTS of last resort.** Engine step "remote-mode" of the Chaquopy port:
+the engine runs inside the Android app at `127.0.0.1:8765`, so the
+`/audio` client is the only microphone and speaker there is.
+`SAATHI_AUDIO=remote` (a fourth knob in `config.py`, beside the port;
+anything but `local`/`remote` is refused at load, not guessed) makes
+`cli.build_runtime()` skip `DeviceManager`, PulseAudio and echo-cancel
+entirely -- `audio/aec.py` and `audio/devices.py` are no longer even
+imported on that path, since `pywebrtc-audio` and `pyudev` have no
+wheels on the phone -- and build the `CascadeSession` on sink id
+`"remote"` (not a device name: nothing local plays) with
+`player=remote_audio.player` and `capture_source_id=None`, so
+`screen/server.py` listens only through `RemoteAudio` and a press with
+no client attached starts nothing and ends as a silent turn, never a
+`parec`. `_build_calling(runtime, None)` makes calling report itself
+unavailable (no cloudflared on a phone, no echo-cancelled pair). The
+option that lost: probing anyway and letting `pactl` fail -- it would
+have landed on "no microphone found; running without the voice engine",
+the checkpoint-1 path with no session, on a phone whose microphone is
+on `/audio`. In remote mode `RemoteAudio`'s fallback is
+`_no_local_playback` (drop the sentence, warn) rather than `paplay`,
+which the phone hasn't got; it is reachable only between a client
+leaving and the turn noticing. The seam runs backwards now too:
+`RemoteAudio.synthesize(text, language, timeout)` sends `{"type":
+"synthesize", "id", "text", "language"}` to the client and waits for
+`{"type": "synthesized", "id"}` followed at once by one binary WAV
+(`server.py` routes the text frame to `on_synthesized`, and `feed()`
+hands the next binary frame to the waiting request instead of the mic
+sink), or `{"type": "synthesized", "id", "error"}` with nothing after
+it. A `synthesized` for a request already timed out still tags the WAV
+that follows, which is eaten, not heard: without that an answer
+arriving during the next hold would be transcribed as her. The wait is
+bounded (10 s by default; a dead client is detached by the heartbeat
+and releases it at once, as for a play), and `RemoteSynthesisError`
+is the one failure -- no client, left, replaced, error, timeout.
+`voice/tts/remote_backend.py`'s `RemoteTTSBackend` ("android-tts",
+"Phone voice", local, $0) is the `TTSBackend` over it: `available()`
+iff a client is attached; one WAV per sentence; a failed sentence is
+100 ms of silence plus a warning, never a raise, because
+`cascade._prefetch_next_chunk()` only enqueues on success and a raise
+there hangs `say()` (the rule `google_backend._guarded()` already
+records; proposal 6 in docs/completed/voice.md is still the real fix
+and still out of scope). Why over the socket and not Chaquopy's Java
+bridge: a backend calling `android.speech.tts` from Python would have
+been the voice engine reaching into the shell, and would exist only on
+the phone; this one is the same class on a laptop with a phone on
+Wi-Fi and in the suite with a fake. `cascade._current_backend()` no
+longer ends in `self._backends[DEFAULT_BACKEND_ID]`: after the
+preferred backend and the Google Neural2 rule it tries Piper if present
+and usable, then the first usable backend in the dict, and when nothing
+can speak (boot on a phone, before the client attaches -- construction
+preloads the current backend) hands back Piper if present else the
+dict's first entry rather than raise; an empty dict is a
+`RuntimeError`. `cli._remote_backends()` therefore puts the phone's
+voice first and the registry's after, minus Piper where `piper-tts`
+does not import: first so the "nothing yet" answer is the one backend
+whose synthesis cannot hang the prefetch thread and that becomes
+available the moment the phone connects; the stored preference (Chirp)
+and an installed Piper still win over it whenever they can.
+`PiperBackend` imports `piper` lazily now (`_piper_importable()`,
+`TYPE_CHECKING` for the annotation) and `available()` says "piper-tts
+is not installed" instead of the module raising at import and taking
+the registry and the screen server down with it; `preload()` is a
+no-op in that state so no daemon thread exists only to raise. The
+registry still lists Piper on the phone, greyed out with that reason --
+leaving it out would have made `DEFAULT_BACKEND_ID` name a key that may
+not exist and told the panel nothing. What lost, besides: the phone's
+voice in the settings panel (`_settings_message` builds from
+`default_backends()`, which has no `RemoteAudio`; it is reached
+automatically as the last resort, and offering it as a choice is a
+later step if anyone asks for it); a `preload()` on the remote backend
+(the shell initialises its engine on connect, where the cost belongs);
+a BCP-47 tag in the request (the shell maps `english`/`chinese`/
+`hindi`/`bengali` to a `Locale`, a lookup, not a decision). Proven on
+Linux by `tests/test_cli.py` (remote mode builds no `DeviceManager`,
+sink "remote", the remote player, android-tts first in the backends,
+Piper left out when `piper` is unimportable, calling unavailable with
+and without Twilio, the dropped-sentence fallback, the unknown-mode
+refusal), `tests/test_audio_remote.py` (round trip beside mic frames,
+timeout with the late answer eaten, no client, the error answer,
+detach/replace release, a second `synthesized` before the first WAV),
+`tests/test_tts_remote.py` (the backend's contract, and a real
+`CascadeSession.say()` rendered by a fake phone and played back through
+it), `tests/test_cascade.py` (fallback to the first usable backend
+without Piper, Piper still preferred when usable, the nothing-can-speak
+answer, the empty-dict error), `tests/test_screen_server.py` (the
+`synthesized` route end to end, the error answer, a malformed one
+dropped) and `tests/test_tts.py` (Piper's reason without raising). Not
+verified here: a real phone's `TextToSpeech` output, and the shell's
+side of the two frames, which is the Chaquopy step's.
+
+**2026-10-08 — The entry point Chaquopy calls is `saathi/android.py`:
+`start(config)` and `stop()`, module-level, and nothing at import.**
+Engine step "entry-point" of the Chaquopy port. Chaquopy calls Python
+by module and attribute from a Java thread that must get control back
+(a service's `onCreate`/`onDestroy`), so the entry is two functions
+and a module-level "what is running" -- no argparse, no console
+script. What lost: `saathi.cli.main(["run"])` on a thread under a fake
+argv. `main()` ends in `web.run_app()`, which owns the loop, installs
+signal handlers (main thread only; Chaquopy's caller is not it),
+prints, and returns only when the process is told to stop: no
+`stop()`, no way to know the server was up before the shell pointed
+its WebViews at it, and the keys would have had to be in the
+environment before `main()` ran. `start()` still goes through the same
+`cli.build_runtime()` and `screen/server.py`'s `build_app()` that
+`saathi run` does; it is the thin thing around them a Java thread can
+hold. The keys are a dict argument (`OPENAI_API_KEY`, `GROQ_API_KEY`,
+`YOUTUBE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS_JSON`, `TWILIO_*`),
+not a file in the APK -- an APK is readable by anyone who has it --
+and go into the environment, the one place the engine already looks,
+so the engine is byte-for-byte what runs on Linux. Only those names
+are accepted: an unknown one is a `ValueError` before anything starts
+(a typo in the shell's constant is a build mistake to find on the
+first run, and a dict that could set `SAATHI_AUDIO` would be the shell
+choosing the engine's mode -- `start()` sets `SAATHI_AUDIO=remote` and
+`SAATHI_AI_CLIENT=rest` itself); an empty or null value is "not set";
+names the shell did not send are left as the process had them (a
+laptop exercising this path keeps its own keys). The Google credential
+is JSON in the shell's hands but a path to every Google client, so it
+is written to `<data_dir>/gcp.json` with mode 0600 (`os.open` with
+0600 and `fchmod`, so a file a previous run left world-readable is
+tightened, not trusted) and `GOOGLE_APPLICATION_CREDENTIALS` points at
+it; the JSON itself never enters the environment. JSON that does not
+parse is noted and not written -- the Google voices then report
+themselves unavailable with a plain reason and the phone's own voice
+carries on -- rather than refusing to start; an empty credential
+removes a stale file, so a key taken out of the shell's settings is
+gone. The socket is bound on the caller's thread before anything else
+(`web.SockSite` over it), so "the port is taken" is a `RuntimeError`
+with the number in it raised by `start()`, not a traceback on another
+thread; port 0 is honoured and the bound port returned, which is what
+the tests use. Readiness is `GET /` answering 200 over a real socket,
+through an opener with no proxy whatever the environment says (this is
+localhost), for up to ten seconds; the runner's own "started" would
+not have proven what the WebView is about to ask. The runtime is built
+on the server thread, not the caller's -- found by the first test run,
+not by inspection: `IdentityStore`'s sqlite connection is bound to the
+thread that opened it and `screen/server.py` reads the store on the
+loop (settings on connect, the turn log, captions); under `saathi run`
+the two are one main thread, and building on the caller's thread here
+killed the first `/ws` connection with `ProgrammingError`. For the
+same reason the store is closed on that thread, after the runner, and
+calling's `shutdown()` runs there too (never built in remote mode;
+the contract is still "stop what was started"). `stop()` signals the
+loop, joins the thread (10 s, then a warning), closes the socket and
+puts every variable `start()` set back the way it found it, so a
+second `start()` with different keys starts clean; the runner's
+`shutdown_timeout` is 3 s, not aiohttp's 60, because the shell closes
+its sockets before it stops the engine and a service's `onDestroy`
+must not hang a minute for the one that did not. A `start()` while
+running is refused ("call stop() first"), not a silent restart:
+restarting would hide a shell that leaks engines. A start that cannot
+finish (port taken, the server thread dying, no answer in time) tears
+everything down and raises; nothing is left running or set. Tests
+(`tests/test_android_entry.py`) use `test_cli.py`'s fake
+`CascadeSession` because the real one warms a voice at construction,
+which on a Linux box with `piper-tts` means a voice model downloaded
+into `~/.saathi` from inside a test; the one start without any AI key
+runs the real `build_runtime()` end to end. Importing the module is
+proven inert in a subprocess: no environment change, one thread,
+`aiohttp`/`saathi.cli`/`saathi.screen.server` not even imported,
+nothing written under a scratch `HOME`. Not verified here: what a
+Chaquopy-wrapped `java.util.Map` does under `config["data_dir"]`
+(`android/README.md`'s snippet builds a Python `dict` for that
+reason), and the Gradle plugin, requirements and the service call
+itself, which are the Chaquopy step's.
+
+**2026-10-08 — The engine goes into the APK with Chaquopy 15.0.1 and
+Python 3.12; the package is staged by a Gradle `Sync` task; five pip
+packages and nothing else.** Android step 1 of the Chaquopy port. Why
+Chaquopy: it is the one maintained way to put CPython in an APK that
+also has a pip resolving Android wheels from its own index, so the
+engine is the same package the suite tests, not a port. What lost:
+BeeWare's Briefcase (a different app shape, the shell already exists),
+python-for-android (builds a toolchain for an hour in CI), Termux
+(a second app, and not installable from the store). The version: 15.0.1
+is the first line with Python 3.12, the interpreter `uv` pins
+(`requires-python >= 3.12`); its AGP range could not be checked --
+chaquo.com was unreachable (proxy 403, DNS) from the machine this was
+written on -- so the root build file says what to do if the first CI
+build refuses AGP 8.5.2 (Chaquopy 16.x, one line). The DSL is Chaquopy
+14+'s `chaquopy { defaultConfig { ... } }` block, not the
+`android.defaultConfig.python { }` block the task text sketched: that
+form was deprecated in 14.0 and is the one that would fail on 15; the
+method names (`pip { install(...) }`, `extractPackages(...)`,
+`sourceSets { getByName("main") { srcDir(...) } }`) are from the
+documentation as remembered and are flagged in the README as what the
+first build checks. How the package gets in: `syncSaathiPython`, a
+`Sync` (a module deleted from the repo must leave the APK too) from
+`../../saathi` into `app/build/saathi-python/saathi`, excluding
+`__pycache__`, `*.pyc` and `audio/testdata` (the AEC bench's recordings,
+megabytes the phone never plays); `app/build/saathi-python` is the
+Python source set, because a source set is the parent of the package
+and the repo root holds tests, docs and scripts. `preBuild` depends on
+it, and so does every task named `generate*Python*`, by pattern: AGP
+promises `preBuild` before its own tasks, not before a third-party
+plugin's, and a Chaquopy update that renames a task still matches. What
+lost: a symlink `app/src/main/python -> ../../saathi` (Git on Windows
+and AGP's source scanning treat symlinks unevenly) and a wheel built by
+`uv build` for Chaquopy's pip (a build inside a build, and its pip
+takes wheels from its index, not from a path). `extractPackages("saathi")`
+because `screen/server.py` serves the face from `Path(__file__).parent
+/ "static"`, which must be a real directory whatever Chaquopy's rule
+for data files is; a few megabytes unpacked once. ABIs `arm64-v8a` and
+`x86_64` (Chaquopy refuses a build with no filter; 32-bit ABIs are
+another interpreter each for devices this is not for). The pip list is
+`aiohttp`, `numpy`, `requests`, `google-auth`, `cryptography`,
+unpinned: the versions are what Chaquopy's index carries for cp312, and
+pinning to `pyproject.toml`'s floors (`aiohttp>=3.10`, `numpy>=2.5.3`)
+would fail the build if the index is behind them -- a known gap: the
+phone may run older aiohttp/numpy than the laptop, and the suite does
+not run under those versions. Everything else in `pyproject.toml` has
+no Chaquopy wheel and is guarded at import by the earlier steps;
+`tests/test_android_phone.py` proves the sum (below). Also in the
+`settings.gradle.kts`: `https://chaquo.com/maven` in both repository
+blocks, after Google and Central (where the plugin and runtime have
+been published since Chaquopy 12), as the task asked and as Chaquopy's
+documentation names; pip packages never come from there.
+
+**2026-10-08 — `EmbeddedEngine` is an object with one worker thread;
+Python starts there; a start with the engine's current keys is "ready",
+with other keys a restart; the engine is stopped when the activity
+finishes or the brain moves, not when the activity is recreated.**
+One worker, not a pool and not the main thread: `Python.start()`
+unpacks the standard library on a first launch and
+`saathi.android.start()` imports numpy and aiohttp and waits for the
+server -- seconds, and an ANR over her face if on the main thread; one
+thread so a `stop()` queued after a `start()` runs after it, and two
+activities (a renderer crash recreates one) cannot start the engine
+twice. `runningKeys` is the engine's state on this side: equal keys
+report ready at once, different keys stop and start again, so the
+dialog's Save with new keys is a restart and a recreated activity is a
+reconnect. The config crosses as a Python `dict` built through the
+interpreter's builtins (`__setitem__` per entry), not a Kotlin `Map`
+handed to `callAttr`: what Chaquopy's `java.util.Map` proxy does under
+`dict(config)` and `config["data_dir"]` is not something the Linux
+tests prove, and a dict is what they prove against (the README snippet
+of the entry-point step said the same). What is logged: a Python
+exception's type and message (a port, a variable *name*), and the dict
+`start()` returns (host, port, url, notes) -- never a key value; the
+worker catches `Throwable` as well as `PyException` so a missing native
+library (`UnsatisfiedLinkError`) is a reported error and a dialog, not
+a dead thread and a black face. What lost: a foreground service for the
+engine (the engine is a daemon thread in Python in this process, and
+`EngineService` already holds the process foreground while the face is
+up; a second service is a second lifecycle for one process), and
+`PyApplication` (starts the interpreter on the main thread at every
+process start, including in remote mode, which never needs it).
+Stopping on `isFinishing` only: a kiosk never finishes, a recreate must
+not restart a ten-second engine, and Android kills the process anyway.
+
+**2026-10-08 — The keys are one pasted `.env`, kept in
+`EncryptedSharedPreferences` with a plain-file fallback; names shown,
+values never; a blank value removes; `brainMode` defaults to the
+phone.** `Settings.kt` gains `brainMode` (`"phone"` | `"remote"`;
+anything else stored reads as phone, `Settings.brainModeOf`) and a
+`Keys` store on its own file: the keys are what an APK must never
+contain (it is readable by anyone who has it), so they live in the
+app's private storage and in a file the keystore encrypts
+(`androidx.security:security-crypto:1.1.0-alpha06`, `MasterKey`
+AES256-GCM, `EncryptedSharedPreferences` AES256-SIV keys / AES256-GCM
+values), and a backup or a copied `shared_prefs` directory holds
+ciphertext. When the keystore throws at open -- it does, on some old
+phones and after some restores -- the keys go to a plain private
+preferences file with one warning: a phone that cannot think at all is
+worse than one whose keys are as protected as its identity database
+already is. A single entry that no longer decrypts reads as "not set"
+(name logged, never the value) rather than crashing the dialog. One
+multi-line box for the whole file, not nine fields: the keys arrive as
+the laptop's `.env`, and nine fields are nine chances to paste into the
+wrong one. `Keys.parseEnvText` is pure and tested on the JVM: `KEY=VALUE`
+lines, a leading `export ` dropped, matching single or double quotes
+stripped and the content otherwise verbatim (no escape processing: a
+service-account JSON in single quotes must survive untouched), an
+unquoted value cut at an inline ` #` comment (API keys have no spaces),
+`#` lines and blank lines skipped, a name that is not `[A-Za-z_][A-Za-z0-9_]*`
+ignored, later lines winning; `GOOGLE_APPLICATION_CREDENTIALS_JSON=` may
+open a `{` the line does not close, and the following lines are taken
+until the braces balance outside JSON strings (a backslash escapes), so
+the file pasted as-is after the `=` is one value; a JSON that never
+closes takes the rest of the text (one wrong value the engine then
+notes as "not valid JSON", rather than a parser that guesses where it
+ended). Every name found is returned; `Keys.known` / `putAll` keep the
+nine the engine reads (`saathi/android.py` refuses any other, so the
+shell never sends one) and a blank value removes that key. The dialog
+lists which names the phone holds and never a value, and the required
+rule is `Keys.canThink`: `OPENAI_API_KEY` or `GROQ_API_KEY`, the rest
+optional. What lost: showing stored keys masked (a masked key cannot be
+checked and the name is what a person needs), and refusing to run
+without the keystore (above).
+
+**2026-10-08 — The setup dialog: the brain choice above two pages
+(Engine, Keys) under one Save; it opens on the page that is missing
+something; in phone mode it no longer connects the links -- the
+activity does, once the engine answers.** `SetupDialog.show` takes a
+`Page`; `MainActivity.applyBrain()` opens it on Keys when the phone is
+to think and has no AI key, on Engine when it is to use an address and
+has none, and the hold opens it on Engine. Save stores what changed
+(the address is required and validated for a remote engine, optional
+but still validated for the phone's own, so a typo is never stored),
+stores what was pasted (a toast names what was stored or removed --
+names), the mode and the kiosk box, and calls back; only with a remote
+engine does it still point the links at the stored address itself,
+since with the engine on the phone there is nothing to connect to until
+`EmbeddedEngine` reports ready, which the dialog cannot know.
+`applyBrain()` is the one path for both modes and for every Save: it
+stops the embedded engine when the brain moves out and starts it when
+the brain moves in, disconnects the links first (a switch from an
+address must stop talking to it now), and connects face and links to
+`EmbeddedEngine.URL` or the stored address through one `useEngine()`.
+The active address is a field of the activity, not `Settings.engineUrl`:
+storing `127.0.0.1:8765` there would lose the typed address on every
+switch and would be the placeholder mistake of the first draft again
+(an address nothing typed). A failed start is a toast with the
+exception's text and the dialog on the Keys page, so the person setting
+up can paste again or move the brain; the loop is driven by their Save,
+never by a timer. The dialog's title became "Setting Saathi up"
+("Where is Saathi's engine?" is now one page's question). Tabs are two
+buttons toggling two columns inside a `ScrollView` (a pasted credential
+is long and the screen is a phone's in landscape); a `ViewPager` or a
+second dialog lost as more code for the same two columns.
+
+**2026-10-08 — `tests/test_android_phone.py` proves the APK's five pip
+packages are enough: a subprocess with every phone-absent package made
+unimportable, the real `CascadeSession`, `GET /` 200.** The earlier
+steps proved each fallback alone (`test_vad`, `test_cascade`,
+`test_tts`, `test_provider`, ...); this is the sum, the way the app
+calls it (`saathi.android.start()` with an AI key, `SAATHI_DATA_DIR` as
+the app's files directory), with `pysilero_vad`, `soundfile`, `piper`,
+`onnxruntime`, `pyudev`, `pywebrtc_audio`, `grpc`, `openai`, `groq`,
+`pydantic_core`, `pydantic`, `google.cloud`, `faster_whisper`, `kokoro`
+and `torch` absent at once, and a `HOME` of its own so a voice download
+would show up as a file. An absent package is `sys.modules[name] =
+None` -- exactly what the import system does for one that is not
+installed: `import` raises `ModuleNotFoundError` and
+`importlib.util.find_spec` returns None. The first draft of the probe
+was a `meta_path` finder that raised for the blocked names, and it took
+the server thread down: `yarl` (under aiohttp) calls
+`find_spec("pydantic_core")` at import and expects None, not an
+exception. A probe that is stricter than a real phone proves nothing
+about the phone; this one matches it. Subprocess, not in-process, for
+the same reason as the import-side-effect test: the suite's process has
+every package loaded already and `sys.modules` cannot be unloaded
+honestly. The Kotlin side was compiled on this machine's JVM (Kotlin
+2.0.21, warnings as errors) against stubs of the API 26-34 classes the
+tree uses plus Chaquopy's and security-crypto's documented shapes, with
+all 103 JUnit tests green; what that cannot check -- the Gradle script,
+the real Chaquopy signatures, the AGP range, the wheels' existence for
+cp312 -- the README lists for the first CI build.
+
+**2026-10-08 — The Keys page is one masked field per key, a plain box
+for the Google JSON, "Clear" per key, and "Paste .env from clipboard"
+that fills the fields by name; an empty field changes nothing; Save
+stays open when it refuses; the dialog's pages are Brain and Keys.**
+This replaces the one-box Keys page of the Chaquopy step, and the
+reason is what that box did in a living room: it showed every key in
+clear for as long as the file sat in it, a person with one new key
+re-pasted the whole file to be sure which name it landed under, and
+nothing on the page said, per key, what the phone already held. Now
+`SetupDialog.kt` builds, for each name in `Keys.NAMES`, a label that
+says only `NAME: set` or `NAME: missing`, a field with
+`TYPE_TEXT_VARIATION_PASSWORD` (dots on the screen, no keyboard
+suggestions) and a Clear button; `GOOGLE_APPLICATION_CREDENTIALS_JSON`
+gets the one plain multi-line field, because a masked multi-line box
+cannot be checked for a missed brace and the file is pasted whole,
+once. The `.env` file can still be pasted once: the button reads the
+clipboard (`ClipboardManager.primaryClip`, text coerced; Android 10+
+hands it only to the focused app, which a press on the dialog's own
+button is) through the same `Keys.parseEnvText` and fills the fields
+by name, a blank `NAME=` clearing that key as it did before, and a
+toast names the keys it touched. What lost: a box on the page to
+paste the file into as well as the button (a second place to paste the
+same thing); masking the JSON box (above); and a layout file for the
+page (nine copies of a row that is a loop in code). The model of what
+Save will do is `KeyEdits`, pure Kotlin tested on the JVM, and the
+widgets only show it: the dialog opens with every field empty and a
+stored value is never shown back, so an empty field has to mean "as it
+was" -- the first draft read the nine fields at Save and treated an
+empty one as "remove", which would have wiped every key on the first
+Save of a dialog opened to tick the kiosk box -- so a typed value
+replaces, Clear removes a stored key and forgets what was typed, the
+last action on a name wins, and `changes()` comes in the engine's order
+with a blank meaning remove, exactly `Keys.putAll`'s shape, so Save is
+one call and the toast names what was stored and what was removed.
+Save is wired to the positive button after `show()` rather than through
+the builder: a builder listener has the dialog dismissed whatever it
+decided, and a Save refused for an address off the home network, or
+for a phone that is to think and would hold no AI key (`KeyEdits.canThink`,
+the same rule `MainActivity.applyBrain()` applies -- it used to let the
+dialog close and reopen it at once with the pasted keys gone), now
+shows the page that needs attention, says why, and keeps everything
+typed. The restart of the engine with new keys stays the activity's:
+Save calls back into `applyBrain()`, which hands `Settings.keys.all()`
+to `EmbeddedEngine.start`, and that restarts the engine only when the
+keys differ from the running ones; the dialog calling `EmbeddedEngine`
+itself lost, since the links can only be connected once the engine
+answers, which the activity's callback is the one place to know. The
+pages are now Brain (the choice, with the address and Test indented
+under "on another computer") and Keys; `SetupDialog.Page.ADDRESS`
+became `Page.BRAIN`, the "Engine" tab "Brain", and
+`setup_keys_hint`/`setup_keys_present`/`setup_keys_none`/`setup_page_engine`
+left the strings with the box. Compiled and run on the JVM as before
+(the stubs gained `ClipboardManager`, `ClipData`, `TextWatcher` and the
+password input type, written from the platform's documentation); what
+that cannot check is that a masked `EditText` takes a long paste and
+that the clipboard read succeeds from the dialog on Android 10+ --
+both for the first run on a device.
+
+**2026-10-08 — The TTS bridge: the shell answers the engine's
+`synthesize` with `android.speech.tts.TextToSpeech`, as a WAV sent
+back over `/audio`, not as speech played on the phone.** The engine
+inside the APK has no Piper (`onnxruntime` has no Chaquopy wheel) and
+Chirp needs a key file and a network, so `audio/remote.py`'s
+`synthesize()` asks the attached client for each sentence; this is the
+client's half, in `OkHttpAudioLink.kt` (`PhoneVoice`). It renders with
+`synthesizeToFile` into a file of its own under the app's cache
+directory (`cache/tts/`, `File.createTempFile`, never a name derived
+from the engine's id: `tts-1` comes round again with every engine
+restart), reads it back when the `UtteranceProgressListener` says it
+is done, sends `{"type":"synthesized","id"}` and the WAV as the very
+next frame, and deletes the file in every outcome. `speak()` to the
+speaker lost: the WAV goes up so the engine plays it through the one
+`play`/`played`/`stop` path every backend's sentence takes, and
+barge-in, the face's "speaking" and the turn's clock stay the engine's.
+Bundling a TTS model lost as tens of megabytes and a second speech
+stack for a voice used only when the better ones are not; calling the
+platform from Python through Chaquopy's bridge lost because that is
+the voice engine reaching into the shell, and it would exist only on
+the phone (`remote.py` and `remote_backend.py` say the same from their
+side). One `TextToSpeech` per connected span, made in `connect()` and
+shut down in `disconnect()`, kept across reconnects: its first start
+is a second or two and belongs at connect time, not on her first
+sentence; sentences asked before `onInit` wait for it in order, and an
+`onInit` of ERROR (a phone with no engine at all -- it can even fire
+inside the constructor, which is why `engine` is the last property
+initialised) refuses each with an error. The engine's language keys
+map to `Locale.US`, `Locale.SIMPLIFIED_CHINESE`, hi-IN and bn-IN
+(`localeFor`, built with `forLanguageTag` because the two-argument
+`Locale` constructor is deprecated from JDK 19 -- not on Android -- and
+the value is the same, which the JUnit test pins against the
+constructor); a key this build does not know is answered with an error,
+not a guess at a locale, as is a language whose voice is not installed
+(`setLanguage` < 0), an engine that refuses the sentence, a WAV that is
+not 16-bit PCM (checked with `WavHeader.parse`, so the failure is named
+here rather than silent when the engine plays it back), and an
+utterance the engine neither finished nor failed within 15 s -- longer
+than the engine's own 10 s wait, so the shell never gives up first and
+its late error is eaten there as stale. Every send on the socket -- mic
+frames, `played`, `synthesized` and its WAV -- now goes through one
+`sendLock`, taken before the state lock and never after it: the text
+frame tags the *next* binary frame as the sentence, and a mic frame
+from the capture thread landing between the two would have been played
+as her reply and the WAV transcribed as her speech. A reply is sent
+only to the socket that asked (`socketOf`): the engine fails a replaced
+socket's requests when the new one attaches, and an answer with a stale
+id would only be eaten. The engine side was checked, not changed:
+`server.py` routes `{"type":"synthesized","id","error"}` to
+`RemoteAudio.on_synthesized`, which fails that request, `synthesize()`
+raises `RemoteSynthesisError`, and `RemoteTTSBackend` plays a short
+silence -- `test_the_clients_error_answer_fails_the_request_and_no_wav_follows`
+and `test_a_synthesized_error_is_routed_and_a_bad_one_is_dropped` pin
+it. `AudioLink` did not change for this: the voice is the
+implementation's, nothing on the screen takes part, and the engine
+plays the WAV back through the existing `onPlay`. Checked on the JVM as
+before: the whole `android/` tree compiled with Kotlin 2.0.21, warnings
+as errors, against the stub set plus `TextToSpeech` and
+`UtteranceProgressListener` written from their documentation (the
+listener's `String` parameters are platform types, so the overrides
+take `String?`; the deprecated abstract `onError(String)` is overridden
+and marked deprecated, the two-argument form beside it), and all 118
+JUnit tests in 17 classes green -- also the bridge's own files alone,
+so an unfinished edit in a file another step was changing at the same
+time could not have hidden a fault here. Not checkable from here: which
+sample rate and format a given phone's engine writes (the header check
+covers the format), how long its first synthesis takes against the
+engine's 10 s wait, and that `cacheDir` is writable for the engine's
+process through the file descriptor `synthesizeToFile` hands it.
+
+**2026-10-08 — The APK is built on GitHub Actions
+(`.github/workflows/android.yml`): `gradle assembleDebug` under
+setup-gradle 8.7 with setup-java 17, setup-python 3.12 and
+setup-android, the APK kept 14 days; a second job runs ci.yml's engine
+suite step for step.** Android step 2 of the Chaquopy port, "ci". The
+machines this project is written on have no Android SDK and Google's
+hosts are blocked from them, so the only builder is a runner, and the
+artifact page is where the phone gets its APK from. The engine job is a
+copy of ci.yml's `test` job, matrix and all (x86 and arm64: SPEC.md's
+"CI on x86 and arm64", and CLAUDE.md's "done" is both), not a `needs:`
+on the APK job or a reuse through `workflow_call`: the APK should come
+out as early as it can, the run is red if either job is, and a change
+to ci.yml that reaches for a reusable workflow was out of scope ("do not
+edit ci.yml"); the copy is pinned to the original by
+`tests/test_workflows.py`, which fails when a `run:` step of ci.yml is
+missing from android.yml or runs out of order -- with a regular
+expression over single-line `run:` values, not a YAML parser, because
+PyYAML is not a dependency and one test is no reason to add one (the
+test's docstring says what that does not catch: a drifted `uses:` or
+`with:`). What else was decided: `actions/setup-python` 3.12 is in the
+APK job although the runner's own `python3` is 3.12 today, because
+Chaquopy's build Python compiles the engine to `.pyc` and must be the
+same minor version as the 3.12 in the APK, and a runner image's default
+Python moves; `cache-read-only: false` on setup-gradle, since by default
+only the default branch writes the Gradle cache and this workflow runs
+on `android-app`, where every push would otherwise re-download the
+runtime and the wheels; `validate-wrappers: false`, since the wrapper
+jar is not in git (android/.gitignore) and there is nothing to validate;
+a `concurrency` group that cancels the previous run of the same ref (a
+second push wants the newer APK, not two); `timeout-minutes: 45` (a hung
+Chaquopy pip must not run for six hours); `--stacktrace` on the one
+Gradle call, because the first build is expected to turn something up
+and a second round trip to see where is the expensive part. What lost:
+`testDebugUnitTest` in the job -- the JUnit tests ran green on a JVM
+against stubs, and whether they run under the real `android.jar` (its
+"not mocked" stubs, `unitTests.isReturnDefaultValues`) is a question for
+after the first APK has built, not one to make the first run red over;
+and a path filter on `android/**`, because the APK carries `saathi/`
+and a Python-only push changes it. Verified, with Chaquopy's source
+(github.com/chaquo/chaquopy, tag 15.0.1; chaquo.com itself is
+unreachable from here): the plugin checks only a minimum AGP (7.0.0,
+`Common.MIN_AGP_VERSION`; `checkAgpVersion` has no maximum, and the
+current docs list 15.0 as 7.0-8.5), so AGP 8.5.2 passes; Python 3.12.1
+is in `PYTHON_VERSIONS`, with `arm64-v8a` and `x86_64` the ABIs for it;
+`findBuildPython` tries `python3.12`, then `python3`, then `python`,
+and makes a venv `--without-pip` to run its own bundled pip, so the
+runner's Python needs no pip of its own; the DSL names in
+`app/build.gradle.kts` (`chaquopy { defaultConfig { version; pip {
+install(...) }; extractPackages(...) }; sourceSets { getByName("main") {
+srcDir(...) } } }`) are the ones `PythonDsl.kt` declares; and a
+build Python of the wrong minor version is a warning and no `.pyc`,
+not a failure. Not verified, and what the first run will say: whether
+Chaquopy's package index carries cp312 wheels for `aiohttp` (recipe
+3.9.1 at that tag), `numpy` (1.26.2) and `cryptography` (3.4.8) -- the
+recipes exist, the built wheels are on chaquo.com -- and which SDK root
+`setup-android` chooses on the runner (either way it exports
+`ANDROID_HOME`, which is all AGP needs). The workflow's YAML was parsed
+here; its actions' input names were checked against their action.yml
+files where memory was not enough.
+
+**2026-10-08 — `android:testOnly` on the debug build is a Gradle
+property, `saathi.testOnly` (default true), through a manifest
+placeholder; the workflow builds a push with it false and a manual run
+with it true by request.** The task asked for a README section that
+ends "install (allow unknown sources)" -- the APK tapped on the phone
+-- and the debug manifest overlay of the kiosk step says
+`android:testOnly="true"` so that `dpm remove-active-admin` can take a
+Device Owner off a tablet. Those two cannot both hold for one APK:
+Android's package installer refuses a testOnly APK outright
+(`INSTALL_FAILED_TEST_ONLY`; only `pm install -t`, which is `adb
+install -t`, sets the flag that allows it), so the task as written
+could not be done with that manifest, and rather than narrow it
+silently or drop the dpm path the earlier step chose deliberately, the
+attribute became `android:testOnly="${saathiTestOnly}"` filled from
+`providers.gradleProperty("saathi.testOnly").getOrElse("true")`,
+accepted only as the words true or false. Local builds are unchanged
+(testOnly; `adb install -t`; dpm removal works). The workflow passes
+`-Psaathi.testOnly=false` on a push, since that APK is fetched onto a
+phone with no adb, and a `workflow_dispatch` input `test_only` builds
+the testOnly one again, uploaded as `saathi-debug-apk-testonly` so the
+two cannot be confused on the Artifacts list; the README's tablet
+section says to use that one if the owner is ever to be removed, and
+that an owner set from the pushed APK stays until a factory reset. What
+lost: a second build type or flavor for one attribute (every Chaquopy
+packaging step twice, for every build); dropping testOnly altogether
+(the dpm path was added in review for a reason); and AGP's own
+`android.injected.testOnly` property, which only adds the attribute
+(it is how Android Studio marks a deploy) and cannot take one out of
+the overlay. Noted for later, not done: a Device Owner can clear
+itself with `DevicePolicyManager.clearDeviceOwnerApp()` from an "Exit
+kiosk" that the dialog could offer on the owner tablet, which would
+make testOnly unnecessary for removal; that is a `Kiosk.kt` change and
+a semantics question (a five-second hold that un-owns a tablet) for a
+step of its own.
+
+**2026-10-08 — The debug signing key is `android/app/debug.keystore`,
+in git, and the debug `signingConfig` points at it.** AGP signs debug
+builds with `~/.android/debug.keystore`, which it generates per machine
+when missing; a GitHub runner is a new machine every run, so every APK
+from the Actions page would carry a new key, and Android refuses to
+install over an app signed with a different key
+(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`) -- the only way on would have
+been to uninstall first, which deletes the app's private files: her
+identity database and the pasted API keys, on every update. One key in
+the repository, used by every debug build wherever it is made, is what
+lets "download the newest green run and install" be the whole
+procedure. It is the conventional debug key (PKCS12, alias
+`androiddebugkey`, store and key password `android`, CN=Android Debug,
+RSA 2048, 10,000 days), generated here with the JDK's keytool; it is a
+secret to nobody -- its whole content is the ability to install a debug
+build over this one, on a phone one already holds -- and the Gradle
+header says it must never sign a release. What lost: caching the
+runner's keystore with `actions/cache` (evicted after a week unused,
+and then the same uninstall), and a signing key in a repository secret
+(a real secret for a debug build, and a fork or a local build then
+signs differently again).
+
+**2026-10-08 — The whole `android/` tree was compiled against the real
+API-34 framework classes and the real Chaquopy runtime, as well as
+against the stubs; the Chaquopy plugin was read from its published jar.**
+Google's hosts are unreachable from here (no SDK, no androidx), but
+Maven Central is, and two real things live there: Robolectric's
+`android-all:14-robolectric-10818077`, the API 34 framework built from
+AOSP, and Chaquopy's `chaquopy_java:15.0.1`, which carries `Python`,
+`PyObject`, `PyException` and `AndroidPlatform`. Every main file and
+every test compiled under Kotlin 2.0.21 with warnings as errors against
+those two plus okhttp/okio/org.json, with stubs left only for androidx
+(appcompat, activity, core, security-crypto), and the 118 JUnit tests
+ran green -- so every `android.*` and `com.chaquo.*` signature the shell
+calls is now checked against the real class, not a transcription of its
+documentation. The stub pass stays beside it: android-all is compiled
+with source-retention nullability annotations, so a wrong override
+nullability passes there and fails only against the stubs, which carry
+the documented one. Lost: dropping the stubs (above), and running AGP
+(`com.android.tools.build` is on Google's Maven). The plugin itself
+(`com.chaquo.python:gradle:15.0.1`, also on Maven Central) was read with
+`javap` instead of from GitHub source: its AGP check is a minimum of
+7.0.0 and no maximum, its Python table carries 3.12.1, its DSL is
+`ChaquopyExtension.defaultConfig`/`sourceSets`,
+`PythonExtension.version`/`pip`/`extractPackages`,
+`PipExtension.install`, and its tasks are `<verb><Variant>Python<Noun>`
+(the entry below). What no JVM check reaches is unchanged and recorded
+in `android/README.md`: constants, resources, platform behaviour, and
+whether Chaquopy's index has cp312 wheels of the five packages.
+
+**2026-10-08 — `syncSaathiPython` is a dependency of every task with
+`Python` in its name, not only the `generate*` ones.** The first pattern
+(`startsWith("generate") && contains("Python")`) was written from the
+guess that Chaquopy's tasks are all `generate<Variant>Python...`. Read
+off the plugin jar's `TaskBuilder`: the one that reads the Python source
+set is `merge<Variant>PythonSources`, and it declares the source
+directories as `inputs.files(...)` -- so with `build/saathi-python`
+among them Gradle 8 would have refused the build outright ("uses this
+output of task ':app:syncSaathiPython' without declaring an explicit or
+implicit dependency"), on the first run, before any APK. The others are
+`generate<Variant>Python{Requirements,Proxies,JniLibs,<Source|
+Requirements|Misc|Build>Assets}` and `extract<Variant>PythonBuildPackages`;
+every one has `Python` in its name and nothing else in an AGP/Kotlin
+build does, so that word alone is the match and `syncSaathiPython`
+itself is the one exclusion. Lost: handing the source set a `Provider`
+mapped from the Sync task so that Gradle infers the edge -- Chaquopy
+collects its `SourceDirectorySet`s into `inputs.files(...)`, which
+would carry the producer, but whether its own `sourceSetNames` lookup
+keeps that is not something to bet the first build on when one explicit
+line is certain either way.
+
+**2026-10-08 — Review findings on the phone engine, applied: the REST
+client carries the SDK client's deadline and retry.** `provider.py`
+now owns one set of numbers -- `CONNECT_TIMEOUT_SECONDS = 5`,
+`REQUEST_TIMEOUT_SECONDS = 20`, `MAX_RETRIES = 1`, the SDK path's since
+2026-09-25 -- and builds `RestChatClient` with them, where it used to
+take the client's own 30 s single attempt, so a stalled request on the
+phone held a turn ten seconds longer than on the laptop. The connect
+deadline is the connection class's: `http.client` has one socket
+timeout for connecting and reading, so `_IPv4HTTPSConnection` puts the
+connect timeout on the socket for the TCP connect and the TLS handshake
+and the read timeout after. The retry is narrower than the SDK's on
+purpose: one more attempt only when the request never reached the
+service (`URLError`: refused, unresolvable, connect timed out), never on
+a read timeout, a 5xx or a 429 -- a request that may be in flight is
+not sent twice, and a retry on a timeout would double the wait the
+latency budget protects. Lost: the SDK's backoff-and-retry on 429/5xx
+(on the phone a 429 is a key or a tier, not a blip, and it costs a
+turn). `tests/test_provider.py` asserts both clients are built with the
+same numbers.
+
+**2026-10-08 — The shared `urllib` opener refuses every redirect.**
+urllib's `HTTPRedirectHandler` builds the redirected request from every
+header of the original, Authorization included, so a 302 from the
+service would have sent the API key (or Google's bearer token:
+`google_rest.py` shares `_build_opener()`) to whatever host the
+Location named -- reproduced in review with two local servers. Neither
+endpoint redirects, so `_RefuseRedirects` returns None and a 3xx is
+reported like any other status, key scrubbed. Lost: dropping the header
+only when the host changes, as `requests` does -- more code for a case
+that does not occur, and a same-host redirect of a POST is not a thing
+either service does.
+
+**2026-10-08 — An error body is read whole, then the message is cut.**
+Both REST modules read `_ERROR_BODY_LIMIT` (500) bytes of an error
+body and then tried to parse them as JSON, which fails for any body
+longer than that (a 400 for a bad tool schema, a Google error with
+`details`), leaving a cut-off JSON fragment where the service's own
+message should be. Now `_ERROR_READ_LIMIT` (64 KiB) is read, the
+message picked out, and only that is cut to 500. Cosmetic, since the
+scrubbing still applied, but the message is what a logcat line is for.
+
+**2026-10-08 — Transcription keyword arguments are encoded as the SDK's
+multipart encoder would, or refused.** `rest_client.py` sent every
+extra as `str(value)`, which turns `timestamp_granularities=["word"]`
+into `"['word']"` and `stream=True` into `"True"` -- forms the service
+rejects. No caller sends either; the cascade sends `model`, `file` and
+`response_format` and sometimes `language`. Now a list is one `name[]`
+part per item, a bool is `true`/`false`, a number is its text, and
+anything else is a `TypeError` by name before any request, so a future
+caller fails on the laptop and not with a 400 on the phone. Lost:
+silently stringifying (the status quo) and a full port of the SDK's
+encoder (nested objects, files in lists: nothing here needs them).
+
+**2026-10-08 — `reflect.py` reads a message with no content as "".**
+`json.loads(None)` is a `TypeError`, which the malformed-response guard
+(`JSONDecodeError`, `AttributeError`) did not name, so a model answering
+with `content: null` -- the SDK's `Optional[str]`, and the REST client's
+-- crashed the background reflection instead of reflecting on nothing.
+`digest.py` and `phrase.py` already did `(content or "")`; now so does
+`reflect.py`, in both calls. Pre-existing on the SDK path.
+
+**2026-10-08 — `tests/test_cli.py` fakes the local audio seams only
+where they import, so the remote-mode tests run with the phone's
+packages.** The shared `seams` fixture imported `saathi.audio.aec` at
+the top, which imports `pywebrtc_audio` at module level, so on a
+machine with only the phone's packages every test in the file errored
+at setup -- the nine `test_remote_mode_*` cases included, the only
+tests that document `SAATHI_AUDIO=remote`. Now `_local_audio_modules()`
+returns the two modules or None, the fixture fakes them when it can,
+and `remote_seams` turns them into assertions when it can (where they
+do not import at all, a touch fails louder still, at the import). A
+local-mode test on such a machine fails inside `build_runtime()`, as
+`saathi run` would there, which is the honest result. In the minimal
+venv the file now gives 8 of the 9 remote-mode tests green; the ninth
+asserts "piper is in the backends on Linux with piper-tts installed",
+which is a full-install contract and stays as written. The three
+"Piper is always available" tests were left alone for the same reason:
+they pin the Linux install, and retargeting them to "available where
+piper-tts imports" is a change to what they pin, not to this step.
+
+**2026-10-08 — `MediaController`'s `browser_available=None` stays
+"assume a browser"; `cli.py`'s wiring is pinned instead.** The review
+asked for "no browser" as the safer default, since a controller built
+without the callback re-emits a browser play nobody can take and the
+kiosk rule was reached only because `cli.py` passes
+`lambda: remote_audio.attached`. Declined, for now: the default is the
+constructor's documented choice, twenty-odd target-rule tests build the
+controller without the callback and assert the hand-off on that
+default, and rewriting their setup to make a changed default pass is
+the kind of test change this job does not make on its own. What the
+evidence actually names -- the kiosk rule resting on a lambda nobody
+tested -- is fixed: `test_cli.py` now asserts the controller has a
+browser taker exactly while a phone is attached on `/audio`. Flipping
+the default remains open for a step that owns those tests.
+
+**2026-10-08 — `gcp.json` is not removed by `stop()`; raised, not
+done.** The review asked for `_tear_down()` to unlink the credential
+file so the service-account key does not stay on disk after the engine
+is stopped or the brain moved to another computer. `tests/test_android_entry.py`
+asserts the opposite (`test_stop_closes_the_port_...`: "the credential
+file is the data dir's, not the environment's: it stays for the next
+start to replace or remove"), which is a stated contract of the file,
+like the identity database beside it; changing that test to make the
+fix pass is what CLAUDE.md forbids, so it stays as written and the
+finding is recorded here for whoever owns that contract. The file is
+0600 in the app's private directory: retention, not exposure.
+
+**2026-10-08 — The `.env` parser follows dotenv's rule for quotes and
+ends a JSON value where its braces balance.** `OPENAI_API_KEY="sk-one" #
+openai` was stored with its quotes -- `unquote()` dropped them only when
+the value's last character was the matching quote -- and every call then
+failed with a 401; a one-line `..._JSON={...} # gcp` kept the comment
+and was "not valid JSON" to the engine. A quoted value now ends at the
+first unescaped matching quote, with a JSON object right after the
+opening quote taken whole first (its own `"` are content), and whatever
+follows the closing quote is dropped; a bare JSON value ends where
+`jsonEnd()` balances it. Lost: keeping the last-character rule for an
+apostrophe inside single quotes (`'it's'`), which dotenv does not allow
+either, and escape processing (still none: the value is kept verbatim).
+
+**2026-10-08 — The private-range rule is applied to every request a
+page makes, and "Test" follows no redirect.** `shouldOverrideUrlLoading`
+in both WebViewClients sees only main-frame navigations, and the
+network security config permits cleartext everywhere, so an `<img>`,
+`<script>` or `<iframe>` at `http://<public host>` inside either page
+loaded over cleartext, and the setup dialog's probe (a default OkHttp
+client) would have followed a LAN address's 302 to a public host.
+`CleartextGuard.intercept()` runs from both clients'
+`shouldInterceptRequest` and answers an `http://` request to a host
+`EngineAddress.isPrivateLan()` refuses with an empty 403; the decision
+is `EngineAddress.isCleartextOffLan`, pure and tested on the JVM. The
+probe client is built with `followRedirects(false)` and
+`followSslRedirects(false)`; a 3xx was already "not an answer". Lost: a
+false base config with a domain list (the original reason stands), and
+intercepting everything (the guard would then fetch for the WebView,
+cookies and all).
+
+**2026-10-08 — The Keys page: the clipboard is emptied after a paste,
+the JSON box is masked with a verdict line under it, and the dialog's
+window is `FLAG_SECURE`.** After "Paste .env from clipboard" filled the
+fields, the whole file -- every key in it, read by the engine or not --
+stayed on the system clipboard for the next focused app; now a fill
+that touched anything calls `clearPrimaryClip()` (API 28; an empty clip
+below it) and the toast says so, and the README says to delete the
+message that carried the file. The service-account JSON was the one
+plain field, because a masked multi-line box cannot be checked for a
+missed brace; it showed the private key in clear, in every screenshot
+and Recents thumbnail. Now it wears `PasswordTransformationMethod` like
+the rest and the check is done for the person: `Keys.credentialShape()`
+(pure, tested) says whether the box holds one JSON object whose braces
+balance with nothing after it, and which `client_email` it names, and a
+`TextView` under the box says that -- more than eyes on a key could
+tell. The dialog window gets `FLAG_SECURE` before `show()`, for the
+whole dialog rather than the Keys page alone (toggling a window flag
+per tab is a second thing to get wrong, and the Brain page has nothing
+a screenshot is for). Lost: a "show" toggle on the JSON box (one more
+widget whose only purpose is to unmask a private key).
+
+**2026-10-08 — `tests/test_workflows.py` reading an untracked
+`android.yml`: not real.** The finding predates the commit;
+`git ls-files` and `git ls-tree origin/android-app` both list
+`.github/workflows/android.yml`, and the four workflow tests pass on a
+clean checkout.
+
+**2026-10-12 — android-app merged into udhibranch; one branch for laptop
+and phone.** The Android app is a shell around the same engine and the
+same web face (a WebView, the engine embedded via Chaquopy or reached on
+the LAN), not a second product, so it lives here rather than on a
+parallel "udhibranch-android" that every fix would have to be made on
+twice. android-app itself is untouched. How the overlaps were settled:
+YouTube is android-app's (official embed first, the real watch page only
+after the embed refuses; yt-dlp and deno gone), with udhibranch's
+`choose_result` (play the top result at once) on top of it. STT goes
+through `_transcribe` (Groq hears, OpenAI covers; the chosen language
+always sent) and uploads android-app's `_encode_for_stt` container, so
+the phone's WAV fallback and the laptop's FLAC both reach Groq.
+`build_client` takes retries/timeout so the fail-fast Groq client also
+works over the REST client on the phone. The press handler is
+android-app's `handle_input` (phone mic, a vanished socket's press
+released) carrying udhibranch's ATTENTIVE/open-window/preview logic;
+`begin_capture` takes the phone's mic when one is attached. The phone
+gets the face's moods (`android.py` passes `emotions`). Not on the
+phone: the wake word (needs a local mic and faster-whisper, which
+Chaquopy has no wheel for -- remote mode has no capture source, so
+`_wake_listener` returns None and the phone stays push-to-talk) and
+family calls (segno/pycryptodomex aren't in the APK's pip list, and the
+tunnel needs cloudflared). Two of android-app's tests were written
+against Hindi/Bengali and STT without a language field; both changed on
+udhibranch on 2026-10-09, and the tests were brought in line with that,
+as udhibranch's own were then.

@@ -1,9 +1,26 @@
-"""Piper — MIT, local, always available. The last-resort offline
-fallback: whatever backend wins the comparison this module landed with,
-Piper stays wired so there is always a voice that needs no network, no
-credentials, and no GPU. Moved out of `voice/engine/cascade.py` (where it
-used to be the only option) into its own `TTSBackend` implementation so
-it sits behind the same interface as everything else in `voice/tts/`.
+"""Piper — MIT, local, available wherever `piper-tts` installs. The
+last-resort offline fallback: whatever backend wins the comparison this
+module landed with, Piper stays wired so there is always a voice that
+needs no network, no credentials, and no GPU. Moved out of
+`voice/engine/cascade.py` (where it used to be the only option) into
+its own `TTSBackend` implementation so it sits behind the same
+interface as everything else in `voice/tts/`.
+
+"Always available" became "available where it installs" on 2026-10-08:
+the engine also runs inside the Android app (Chaquopy), where
+`piper-tts` has no wheel (`onnxruntime` underneath it), and the one
+`from piper import PiperVoice` at the top of this module took the whole
+registry -- and the screen server that imports it -- down with it. The
+import is lazy now, the way `kokoro_backend.py`'s always was:
+`available()` probes it and says "piper-tts is not installed" instead
+of the module raising at import, so a phone lists Piper greyed out in
+the panel like any other backend it hasn't got, and `cascade.py` falls
+through to what is there. Linux with `piper-tts` installed is
+byte-for-byte what it was. The option that lost: a registry that
+leaves Piper out when it can't import. The panel would then not say why
+Piper is missing, and `DEFAULT_BACKEND_ID` would name a key that may
+not exist -- `cascade._current_backend()` now treats it as "if present
+and available" instead.
 """
 
 from __future__ import annotations
@@ -14,16 +31,30 @@ import sys
 import threading
 import wave
 from pathlib import Path
-from typing import Callable, Iterator
-
-from piper import PiperVoice
+from typing import TYPE_CHECKING, Callable, Iterator
 
 from saathi.voice.language import SUPPORTED_LANGUAGES
 from saathi.voice.tts import TTSBackend
 
+if TYPE_CHECKING:
+    from piper import PiperVoice
+
 _VOICE_DIR = Path.home() / ".saathi" / "tts-voices"
 
-VoiceLoader = Callable[[str], PiperVoice]
+VoiceLoader = Callable[[str], "PiperVoice"]
+
+_NOT_INSTALLED_REASON = "piper-tts is not installed"
+
+
+def _piper_importable() -> tuple[bool, str]:
+    """The probe `available()` gates on. Module-level, like
+    `google_backend._client_importable()`, so a test can stand in the
+    phone's state without uninstalling anything."""
+    try:
+        import piper  # noqa: F401
+    except ImportError:
+        return False, _NOT_INSTALLED_REASON
+    return True, ""
 
 
 def _ensure_voice_model(voice_name: str) -> Path:
@@ -54,7 +85,9 @@ def _ensure_voice_model(voice_name: str) -> Path:
     return onnx_path
 
 
-def _load_piper_voice(onnx_path: str) -> PiperVoice:
+def _load_piper_voice(onnx_path: str) -> "PiperVoice":
+    from piper import PiperVoice
+
     return PiperVoice.load(onnx_path)
 
 
@@ -70,7 +103,7 @@ class PiperBackend(TTSBackend):
         self._voices_lock = threading.Lock()
 
     def available(self) -> tuple[bool, str]:
-        return True, ""
+        return _piper_importable()
 
     def preload(self, language: str) -> None:
         """Not part of `TTSBackend` — an extra `cascade.py` uses to warm
@@ -80,11 +113,19 @@ class PiperBackend(TTSBackend):
         local model to load (Google) don't need this; a future local
         backend that does can add the same method without it being
         required by `TTSBackend` itself."""
+        if not _piper_importable()[0]:
+            return  # nothing to warm; _voice_for would only raise in a thread
         threading.Thread(target=self._voice_for, args=(language,), daemon=True).start()
 
     def _voice_for(self, language: str) -> PiperVoice:
         with self._voices_lock:
             if language not in self._voices:
+                importable, reason = _piper_importable()
+                if not importable:
+                    # Never chosen while unavailable (cascade.py); said
+                    # plainly if something asks anyway, rather than a
+                    # download subprocess failing on `-m piper`.
+                    raise RuntimeError(f"{self.id}: {reason}")
                 onnx_path = _ensure_voice_model(SUPPORTED_LANGUAGES[language])
                 self._voices[language] = self._voice_loader(str(onnx_path))
             return self._voices[language]

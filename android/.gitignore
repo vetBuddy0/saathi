@@ -1,0 +1,12 @@
+# Gradle and Android Studio output. The wrapper jar is not in git either
+# (README.md: `gradle wrapper --gradle-version 8.7` writes it); the
+# properties file beside it is, so the pinned version is.
+build/
+.gradle/
+.idea/
+local.properties
+*.iml
+.kotlin/
+gradle/wrapper/gradle-wrapper.jar
+gradlew
+gradlew.bat
