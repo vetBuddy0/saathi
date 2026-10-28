@@ -170,10 +170,15 @@ class Console:
         *,
         session: Any = None,
         info: Callable[[], dict[str, Any]] | None = None,
+        settings_changed: Callable[[], None] | None = None,
     ) -> None:
         self.store_path = Path(store_path)
         self.session = session
         self._info = info
+        # Called on the loop after a setting is written, so an open face
+        # shows it now (captions on the tablet, 2026-10-29) rather than
+        # after its next reconnect.
+        self.settings_changed = settings_changed or (lambda: None)
 
     # -- reads ------------------------------------------------------------
 
@@ -542,6 +547,7 @@ def add_routes(app: web.Application, console: Console) -> None:
         await run(
             console.set_preference, _text(data.get("key"), "key"), _text(data.get("value"), "value")
         )
+        console.settings_changed()
         return web.json_response({"ok": True})
 
     app.router.add_get("/admin", page)

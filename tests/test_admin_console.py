@@ -197,3 +197,27 @@ async def test_under_the_hood_reads_the_real_schema_and_numbers(console):
     assert layout["window"]["exchanges"] == conversation.MAX_EXCHANGES
     assert "happy" in layout["moods"]
     assert layout["files"]["persona_edited"] is None
+
+
+async def test_a_setting_saved_in_the_console_reaches_the_open_face_at_once(console):
+    # Captions switched on from the tablet's console show on the face
+    # without waiting for it to reconnect.
+    _client, _session, real = console
+    face = await real.ws_connect("/ws")
+    try:
+        first = await _next_settings(face)
+        assert first["captions"] is False
+        ok = await real.post("/admin/api/preferences", json={"key": "captions", "value": "on"})
+        assert ok.status == 200
+        assert (await _next_settings(face))["captions"] is True
+    finally:
+        await face.close()
+
+
+async def _next_settings(ws) -> dict:
+    import asyncio
+
+    while True:
+        message = await asyncio.wait_for(ws.receive_json(), 5)
+        if message.get("type") == "settings":
+            return message

@@ -1280,7 +1280,15 @@ def build_app(
         # The developer console (screen/admin.py): loopback only.
         from saathi.screen.admin import Console, add_routes
 
-        add_routes(app, Console(store.path, session=session, info=admin_info))
+        add_routes(
+            app,
+            Console(
+                store.path,
+                session=session,
+                info=admin_info,
+                settings_changed=lambda: _send_all(_settings_message(store)),
+            ),
+        )
     app.router.add_get("/ws", websocket_handler)
     if phone is not None and hasattr(phone, "token"):
 

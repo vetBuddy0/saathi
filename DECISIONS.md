@@ -3858,3 +3858,11 @@ playing calls on the media stream, which leaves the communication mode the
 platform's echo cancelling runs in. Saathi's own listening is untouched: a
 kept tablet turn was clean (background gated to zero, transcribed right),
 and boosting quiet audio was measured not to change Whisper's transcript.
+
+**2026-10-29 — Captions switched in the console reach the open face at once.**
+The owner asked for a subtitles option on the tablet. Captions existed
+(captions.js, the `captions` preference) but only the Ctrl+L panel
+broadcast a change, and the tablet has no keyboard; the console's Captions
+setting was written but the face learned it only on its next reconnect.
+The console now takes a `settings_changed` callback, and the server passes
+one that resends the settings message to every open face.
