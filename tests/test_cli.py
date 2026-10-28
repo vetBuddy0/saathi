@@ -506,7 +506,16 @@ def test_remote_mode_builds_no_device_manager_and_listens_only_through_remote_au
     assert session.kwargs["language_preference"]() is None
     assert session.intent is runtime.handle_intent
     names = {tool.name for tool in runtime.registry}
-    assert {"set_language", "correct_memory", "play_music", "call_contact"} == names
+    # Calls over the device's SIM (call/device_phone.py, 2026-10-28):
+    # the whole calling tool set, as on a laptop with Twilio.
+    assert {
+        "set_language",
+        "correct_memory",
+        "play_music",
+        "call_contact",
+        "save_contact",
+        "answer_card",
+    } == names
 
 
 def test_remote_mode_adds_the_phones_voice_to_the_sessions_backends(remote_seams):
@@ -535,15 +544,25 @@ def test_remote_mode_leaves_piper_out_when_piper_tts_is_not_importable(
     assert "android-tts" in backends and "google-chirp3-hd" in backends
 
 
-def test_remote_mode_reports_calling_unavailable_without_dialling(remote_seams):
+def test_remote_mode_calls_over_the_sim_only_once_a_shell_says_it_can(remote_seams, monkeypatch):
     runtime = cli.build_runtime()
-    assert runtime.calling is None
-    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
-    assert reply["status"] == "unavailable"
-    assert any(note.startswith("Calling off") for note in runtime.notes)
+    assert runtime.calling is None  # no Twilio relay on a phone
+    phone = runtime.device_phone
+    sent = []
+    phone.set_broadcast(sent.append)
+    # No shell has said it can place calls: unavailable, nothing sent.
+    reply = runtime.handle_intent("call_contact", {"contact": "the test number"})
+    assert reply["status"] == "unavailable" and "can't place phone calls" in reply["note"]
+    assert sent == []
+    assert any("Calls use this device's SIM" in note for note in runtime.notes)
+    phone.on_status("shell", True)
+    monkeypatch.setenv("TWILIO_TEST_NUMBER", "+6590000000")
+    reply = runtime.handle_intent("call_contact", {"contact": "the test number"})
+    assert reply["status"] == "calling"
+    assert sent == [{"type": "phone", "action": "dial", "number": "+6590000000"}]
 
 
-def test_remote_mode_keeps_calling_unavailable_even_with_twilio_and_cloudflared(
+def test_remote_mode_never_starts_the_twilio_relay_even_with_twilio_and_cloudflared(
     remote_seams, calling_seams, monkeypatch
 ):
     monkeypatch.setenv("SAATHI_AUDIO", "remote")  # calling_seams re-faked the rest
@@ -551,9 +570,11 @@ def test_remote_mode_keeps_calling_unavailable_even_with_twilio_and_cloudflared(
     runtime = cli.build_runtime()
     assert runtime.calling is None
     assert FakeTunnel.instances == []  # no relay was even started
-    reply = runtime.handle_intent("call_contact", {"contact": "Priya"})
-    assert reply["status"] == "unavailable" and "echo-cancel" in reply["note"]
-    assert "save_contact" not in {tool.name for tool in runtime.registry}
+    reply = runtime.handle_intent("call_contact", {"contact": "the test number"})
+    # Twilio stays off (no echo-cancelled pair); the SIM route stands in,
+    # and with no shell attached it says so rather than dialling.
+    assert reply["status"] == "unavailable" and "can't place phone calls" in reply["note"]
+    assert any("echo-cancel" in note for note in runtime.notes)
 
 
 def test_remote_mode_drops_a_sentence_with_no_client_rather_than_paplay(

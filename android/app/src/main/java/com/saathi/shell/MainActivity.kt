@@ -129,6 +129,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pane: WebViewYouTubePane
     private lateinit var media: MediaTargets
     private lateinit var pushToTalk: PushToTalk
+    private lateinit var simDialer: SimDialer
+    private lateinit var phoneCalls: PhoneCalls
     private lateinit var setupHold: HoldListener
 
     private val main = Handler(Looper.getMainLooper())
@@ -151,8 +153,13 @@ class MainActivity : AppCompatActivity() {
     private var started = false
 
     // Registered before the activity is started, as the contract requires.
+    // The microphone and, on a device with a SIM, placing calls: one
+    // prompt sequence, since a second launch while the first is up is
+    // dropped. A refused CALL_PHONE still calls -- through the dialer,
+    // one tap away (SimDialer).
     private val askMicrophone =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+            val granted = results[Manifest.permission.RECORD_AUDIO] ?: hasPermission(Manifest.permission.RECORD_AUDIO)
             if (granted) {
                 Log.i(TAG, "microphone granted")
                 if (started) EngineService.start(this)
@@ -183,6 +190,12 @@ class MainActivity : AppCompatActivity() {
         pane = WebViewYouTubePane(youtubeWeb, youtubeContainer, faceContainer)
         media = MediaTargets(engineLink, pane)
         pushToTalk = PushToTalk(engineLink, audioLink)
+        simDialer = SimDialer(this)
+        phoneCalls = PhoneCalls(
+            simDialer,
+            schedule = { task, delayMs -> main.postDelayed(task, delayMs) },
+            cancel = { task -> main.removeCallbacks(task) },
+        )
 
         engineLink.listener = LinkEvents()
         pane.listener = media
@@ -272,10 +285,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun askForMicrophone() {
-        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!granted) askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+        val wanted = mutableListOf<String>()
+        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) wanted += Manifest.permission.RECORD_AUDIO
+        if (simDialer.canCall() && !hasPermission(Manifest.permission.CALL_PHONE)) {
+            wanted += Manifest.permission.CALL_PHONE
+        }
+        if (wanted.isNotEmpty()) askMicrophone.launch(wanted.toTypedArray())
     }
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun configureFace(web: WebView) {
@@ -394,9 +413,26 @@ class MainActivity : AppCompatActivity() {
      * a press whose socket vanished (server.py's handler), and the shell's
      * own `release` could not reach it anyway; ending the hold here closes
      * the mic and resets the button, so the two sides agree the turn is
-     * over, and her next press is a fresh one. Found in review.
+     * over, and her next press is a fresh one. Found in review. On every
+     * open the engine is told whether this device has a SIM to call on,
+     * and `phone` frames and states go to [PhoneCalls] as well.
      */
     private inner class LinkEvents : EngineLink.Listener by media {
+        override fun onConnected() {
+            media.onConnected()
+            // Every open, so a restarted engine learns it again.
+            engineLink.sendPhoneStatus(simDialer.canCall())
+        }
+
+        override fun onState(state: String) {
+            media.onState(state)
+            phoneCalls.onState(state)
+        }
+
+        override fun onPhone(message: PhoneMessage) {
+            phoneCalls.onPhone(message)
+        }
+
         override fun onDisconnected() {
             media.onDisconnected()
             pushToTalk.cancel()

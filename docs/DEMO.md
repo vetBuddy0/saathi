@@ -126,6 +126,20 @@ Hold nothing — tap space, speak, and it answers.
   unanswered call clears itself after 45 s.
 - Keep the phone away from the laptop, or it howls.
 
+**Calling on the Android app (2026-10-28): the device's own SIM.**
+With the engine inside the app, "call my son" rings a normal phone call
+from the tablet's SIM, on speaker, after she hears "Calling Udhi.".
+- Allow **Phone calls** when the app asks (with the microphone). If it
+  was refused, the dialer opens with the number filled in instead -- one
+  tap on the green button rings.
+- The son has to be a saved contact on the tablet: say "save my son
+  Udhi's number, eight nine six one ..." and answer the read-back card.
+  "Call the test number" uses `TWILIO_TEST_NUMBER` from the keys page.
+- Hang up on the phone's own in-call screen; the face comes back after.
+- No SIM (or the SIM not ready): she says this device can't place calls.
+- Stop any song first ("stop") -- whether YouTube pauses on its own for
+  the call hasn't been checked on the tablet.
+
 ## Family app: free calls to a paired phone
 
 Calls to family go over the internet (WebRTC), at no cost per minute.

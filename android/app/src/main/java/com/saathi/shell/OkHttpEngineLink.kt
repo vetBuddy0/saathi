@@ -89,6 +89,10 @@ class OkHttpEngineLink(private val client: OkHttpClient) : EngineLink {
         send(Protocol.mediaEvent(event, videoId, code, target))
     }
 
+    override fun sendPhoneStatus(canCall: Boolean) {
+        send(Protocol.phoneStatus(canCall))
+    }
+
     private fun send(text: String) {
         val ws = socket
         if (ws == null || !connected) {
@@ -193,7 +197,7 @@ class OkHttpEngineLink(private val client: OkHttpClient) : EngineLink {
                 .build()
 
         /**
-         * Hand one `/ws` text frame to [target]: `state` and `media` reach it,
+         * Hand one `/ws` text frame to [target]: `state`, `media` and `phone` reach it,
          * every other frame -- the face page's, or one this build cannot
          * name -- is ignored. Returns whether the frame was delivered. Pure,
          * so it is tested on the JVM; the socket above is not.
@@ -206,6 +210,10 @@ class OkHttpEngineLink(private val client: OkHttpClient) : EngineLink {
                 }
                 is MediaMessage -> {
                     target.onMedia(message)
+                    true
+                }
+                is PhoneMessage -> {
+                    target.onPhone(message)
                     true
                 }
                 else -> false

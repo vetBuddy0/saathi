@@ -202,6 +202,9 @@ class Runtime:
     # and the phone panel the call controller reports to.
     emotions: Any = None
     call_panel: Any = None
+    # Remote mode's calls over the device's own SIM (call/device_phone.py):
+    # the shell says it can, the engine says whom.
+    device_phone: Any = None
     # The echo-cancel pair and the detected speaker, kept so `_run` can
     # route the default sink through the canceller (and back on exit).
     aec_handles: Any = None
@@ -338,13 +341,17 @@ def build_runtime() -> Runtime:
         # microphone and speaker. No DeviceManager, no echo-cancel, no
         # capture source -- screen/server.py then listens only through
         # RemoteAudio, and a press with no client attached starts
-        # nothing and ends as a silent turn. Calling is off: no
+        # nothing and ends as a silent turn. No Twilio here: no
         # cloudflared on a phone, no echo-cancelled pair for its audio.
+        # Calls go over the device's own SIM instead, placed by the shell.
+        from saathi.call.device_phone import DevicePhone
+
         runtime.notes.append(
             "Audio is remote (SAATHI_AUDIO=remote): the /audio client is the microphone "
             "and the speaker; no local device is probed."
         )
-        _build_calling(runtime, None)
+        runtime.device_phone = DevicePhone()
+        _build_calling(runtime, None, runtime.device_phone)
         session = CascadeSession(
             REMOTE_SINK_ID,
             backends=_remote_backends(remote_audio),
@@ -486,13 +493,15 @@ def _unavailable_call_tool(reason: Callable[[], str]):
     )
 
 
-def _build_calling(runtime: Runtime, handles: Any) -> None:
+def _build_calling(runtime: Runtime, handles: Any, device_phone: Any = None) -> None:
     """Calling, if Twilio is configured and cloudflared is installed
     (docs/completed/calling.md's cli diff). The echo-cancel ids come
     from aec.py here; nothing in saathi/call/ names a device. Missing
     credentials, a missing binary, no echo-cancel pair, or a tunnel that
     never resolves all end the same way: `call_contact` says calling is
-    unavailable and the rest of the device carries on."""
+    unavailable and the rest of the device carries on. `device_phone`
+    (remote mode): with Twilio off, calls go over the device's SIM
+    (call/device_phone.py) instead of being off."""
     import threading
 
     from saathi.call.relay import find_cloudflared
@@ -523,11 +532,14 @@ def _build_calling(runtime: Runtime, handles: Any) -> None:
         twilio_off = "cloudflared is not installed."
     elif handles is None:
         twilio_off = "no echo-cancelled microphone and speaker for the call audio."
-    if twilio_off is not None and family is None:
+    if twilio_off is not None and family is None and device_phone is None:
         off(twilio_off)
         return
     if twilio_off is not None:
-        runtime.notes.append(f"Phone calls (Twilio) off: {twilio_off} Family app only.")
+        fallback = (
+            "Calls use this device's SIM." if device_phone is not None else "Family app only."
+        )
+        runtime.notes.append(f"Phone calls (Twilio) off: {twilio_off} {fallback}")
 
     from saathi.call.audio import CallAudioBridge
     from saathi.call.choosing import ChoiceFlow
@@ -562,10 +574,18 @@ def _build_calling(runtime: Runtime, handles: Any) -> None:
     saves = SaveFlow(path, runtime.cards, locale, on_country_confirmed=learn_country)
     family_route = family.route if family is not None else None
     if twilio_off is not None:
-        choices = ChoiceFlow(runtime.cards, make_contact_dialer(None, family_route))
+        # `device_phone` stands where Twilio's controller would; None
+        # leaves only the family app.
+        sim_ready = device_phone.ready if device_phone is not None else None
+        choices = ChoiceFlow(
+            runtime.cards, make_contact_dialer(device_phone, family_route, sim_ready)
+        )
         flows = [saves, choices] + ([family.calls] if family is not None else [])
+        call_tool = make_call_tool(
+            device_phone, path, choices, family=family_route, phone_ready=sim_ready
+        )
         tools = [
-            (make_call_tool(None, path, choices, family=family_route), CALL_CONTACT_DESCRIPTION),
+            (call_tool, CALL_CONTACT_DESCRIPTION),
             (make_save_contact_tool(saves), SAVE_CONTACT_DESCRIPTION),
             (make_answer_card_tool(runtime.cards, flows), ANSWER_CARD_DESCRIPTION),
         ]
@@ -821,6 +841,7 @@ def _run() -> int:
         emotions=runtime.emotions,
         calls=runtime.call_panel,
         family=runtime.family,
+        phone=runtime.device_phone,
         follow_up_seconds=follow_up_seconds() if runtime.session is not None else None,
         open_after_reply=open_after_reply(),
         remote_audio=runtime.remote_audio,

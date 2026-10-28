@@ -16,6 +16,7 @@ class OkHttpEngineLinkTest {
     private class Recording : EngineLink.Listener {
         val states = mutableListOf<String>()
         val media = mutableListOf<MediaMessage>()
+        val phone = mutableListOf<PhoneMessage>()
         var connections = 0
         var disconnections = 0
 
@@ -25,6 +26,10 @@ class OkHttpEngineLinkTest {
 
         override fun onMedia(message: MediaMessage) {
             media += message
+        }
+
+        override fun onPhone(message: PhoneMessage) {
+            phone += message
         }
 
         override fun onConnected() {
@@ -73,5 +78,20 @@ class OkHttpEngineLinkTest {
         assertTrue(listener.media.isEmpty())
         assertEquals(0, listener.connections)
         assertEquals(0, listener.disconnections)
+    }
+
+    @Test
+    fun aPhoneDialFrameReachesTheListenerWithItsNumber() {
+        val listener = Recording()
+        assertTrue(deliver("""{"type":"phone","action":"dial","number":"+6589614304"}""", listener))
+        assertEquals(listOf(PhoneMessage("dial", "+6589614304")), listener.phone)
+    }
+
+    @Test
+    fun thePhoneStatusFrameIsWhatTheEngineReads() {
+        val frame = org.json.JSONObject(Protocol.phoneStatus(true))
+        assertEquals("phone_status", frame.getString("type"))
+        assertTrue(frame.getBoolean("can_call"))
+        assertFalse(org.json.JSONObject(Protocol.phoneStatus(false)).getBoolean("can_call"))
     }
 }

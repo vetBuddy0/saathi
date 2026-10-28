@@ -42,6 +42,9 @@ through it (`call/routing.py`, `call/webrtc.py`); the phone network is
 the fallback, only when Twilio is configured and the person isn't
 paired. Paired members with no saved number are matchable by name and
 relation like any contact. The resolution order above is unchanged.
+Inside the Android app the "controller" is `call/device_phone.py`'s
+`DevicePhone` instead -- the device's own SIM -- with the same three
+members (`active`, `dial`, `dial_test_number`) and the same notes.
 
 Nothing in any result dict is a phone number or a SID: results are
 serialised into the model's context and logged. The read-back note is
@@ -62,6 +65,7 @@ from saathi.call.choosing import ChoiceFlow
 from saathi.call.match import match as match_name
 from saathi.call.match import similarity
 from saathi.call.controller import CallController
+from saathi.call.device_phone import DevicePhoneError
 from saathi.call.saving import SaveFlow
 from saathi.call.relay import RelayError
 from saathi.call.routing import FamilyRoute, no_phone_route
@@ -109,7 +113,7 @@ def _dial(controller: CallController, number: str, who: str) -> dict[str, Any]:
         }
     try:
         controller.dial(number, who=who)
-    except (TwilioError, RelayError) as exc:
+    except (TwilioError, RelayError, DevicePhoneError) as exc:
         # RelayError too (TODO M5): a tunnel that died is a plain "not
         # just now", never a turn lost to an untranslated exception.
         return {
@@ -210,7 +214,7 @@ def make_call_tool(
                 return _dial(controller, "", "the test number")
             try:
                 controller.dial_test_number()
-            except (TwilioError, RelayError) as exc:
+            except (TwilioError, RelayError, DevicePhoneError) as exc:
                 return {
                     "status": "error",
                     "detail": str(exc),

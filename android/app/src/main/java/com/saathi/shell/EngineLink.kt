@@ -37,6 +37,9 @@ interface EngineLink {
      */
     fun sendMediaEvent(event: String, videoId: String?, code: Any?, target: String? = null)
 
+    /** Whether this device can place a call over its SIM; sent on every open. */
+    fun sendPhoneStatus(canCall: Boolean)
+
     var listener: Listener?
 
     interface Listener {
@@ -45,6 +48,9 @@ interface EngineLink {
 
         /** Every `media` frame, browser-target or not; the pane decides which are its own. */
         fun onMedia(message: MediaMessage)
+
+        /** A `phone` frame: a call the engine has decided on. Only [PhoneCalls] acts on it. */
+        fun onPhone(message: PhoneMessage) = Unit
 
         fun onConnected()
 

@@ -45,6 +45,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.UserManager
+import android.telecom.TelecomManager
 import android.util.Log
 
 object Kiosk {
@@ -63,8 +64,18 @@ object Kiosk {
      */
     const val LOCK_TASK_FEATURES = 0
 
-    /** What [DevicePolicyManager.setLockTaskPackages] is given: this app first, then YouTube's. */
-    fun lockTaskPackages(ownPackage: String): Array<String> = arrayOf(ownPackage, YOUTUBE_PACKAGE)
+    /**
+     * What [DevicePolicyManager.setLockTaskPackages] is given: this app
+     * first, then YouTube's, then -- when the device has one -- the
+     * default dialer, whose in-call screen a SIM call (`SimDialer`)
+     * brings up; without it a locked tablet would refuse the very call
+     * she asked for.
+     */
+    fun lockTaskPackages(ownPackage: String, dialerPackage: String? = null): Array<String> {
+        val packages = mutableListOf(ownPackage, YOUTUBE_PACKAGE)
+        if (!dialerPackage.isNullOrBlank() && dialerPackage !in packages) packages += dialerPackage
+        return packages.toTypedArray()
+    }
 
     /** True on the tablet after `dpm set-device-owner`; false on every phone and every debug install. */
     fun isDeviceOwner(context: Context): Boolean =
@@ -96,7 +107,8 @@ object Kiosk {
         val admin = adminOf(activity)
         val home = ComponentName(activity, MainActivity::class.java)
         guarded("setLockTaskPackages") {
-            policy.setLockTaskPackages(admin, lockTaskPackages(activity.packageName))
+            val dialer = activity.getSystemService(TelecomManager::class.java)?.defaultDialerPackage
+            policy.setLockTaskPackages(admin, lockTaskPackages(activity.packageName, dialer))
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             guarded("setLockTaskFeatures") { policy.setLockTaskFeatures(admin, LOCK_TASK_FEATURES) }

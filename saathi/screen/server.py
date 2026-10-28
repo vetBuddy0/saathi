@@ -145,6 +145,13 @@ panel's End call button: checked against the panel's current call id,
 then handed to the hold seam's `complete()` -- the very handler a
 two-second spacebar hold fires, never a direct hang-up from here.
 
+Calls over the device's SIM (2026-10-28, `phone`, call/device_phone.py):
+`{"type": "phone", "action": "dial", "number": ...}` (server -> every
+screen; the face page ignores it, the Android shell places the call)
+rides the broadcast seam too. `{"type": "phone_status", "can_call":
+bool}` (shell -> server, on every open) is the shell saying whether it
+can; a closed socket takes its yes with it. The server only carries both.
+
 The open conversation (2026-10-08, `follow_up_seconds`): after a spoken
 reply the turn ends in ATTENTIVE, not IDLE, with a hands-free
 `ListenWindow` on the mic -- a follow-up needs no name (SPEC.md,
@@ -453,6 +460,7 @@ def build_app(
     emotions=None,
     calls=None,
     family=None,
+    phone=None,
     follow_up_seconds: float | None = None,
     open_after_reply: bool = True,
     listen_window=None,
@@ -569,7 +577,7 @@ def build_app(
     # `family` (call/family_runtime.py): the family-app call's device
     # end -- `{"type": "rtc", ...}` both ways between this page and
     # call/webrtc.py; the server only carries it.
-    seams = [obj for obj in (media, cards, emotions, calls, family) if obj is not None]
+    seams = [obj for obj in (media, cards, emotions, calls, family, phone) if obj is not None]
     if seams:
 
         async def install_seams(_app: web.Application) -> None:
@@ -1144,6 +1152,11 @@ def build_app(
                             else:
                                 logger.info("tap on %s dropped: not the current card", card_id)
                     continue
+                if payload.get("type") == "phone_status":
+                    can_call = payload.get("can_call")
+                    if phone is not None and isinstance(can_call, bool):
+                        phone.on_status(ws, can_call)
+                    continue
                 if payload.get("type") == "rtc":
                     # The kiosk's half of a family-app call (offer, ICE,
                     # connected/failed). Validated in call/webrtc.py.
@@ -1177,6 +1190,8 @@ def build_app(
                     handle_input(kind, ws)
         finally:
             websockets.discard(ws)
+            if phone is not None:
+                phone.on_status(ws, False)
             if press_owner["ws"] is ws and ws.close_code != WSCloseCode.OK:
                 # Its press is still down and nothing will ever release
                 # it: the Wi-Fi hiccup that took the socket took the
@@ -1269,6 +1284,7 @@ def run(
     emotions=None,
     calls=None,
     family=None,
+    phone=None,
     follow_up_seconds: float | None = None,
     open_after_reply: bool = True,
     remote_audio=None,
@@ -1287,6 +1303,7 @@ def run(
             emotions=emotions,
             calls=calls,
             family=family,
+            phone=phone,
             follow_up_seconds=follow_up_seconds,
             open_after_reply=open_after_reply,
             remote_audio=remote_audio,

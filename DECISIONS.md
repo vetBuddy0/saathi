@@ -3679,3 +3679,35 @@ tablet's loudest room tone (-60). Lost: an adaptive per-hold floor (an
 all-speech hold has none to measure) and Android's AutomaticGainControl
 (lifts the room with the voice). `audio/vad.py`'s constant comment has
 the numbers; two tests pin them.
+
+**2026-10-28 — Inside the Android app, "call my son" rings over the
+device's own SIM.** For the demo on a SIM tablet the owner chose a real
+phone call. Until now remote mode registered an "unavailable"
+`call_contact`: Twilio needs cloudflared and the echo-cancelled pair,
+the family app needs Cryptodome and a public URL, and the phone has
+none of them. `call/device_phone.py`'s `DevicePhone` now stands where
+Twilio's `CallController` stands (`active`, `dial`, `dial_test_number`),
+so matching, relation words, choice cards, notes and the registry's
+permission check are unchanged; it sends one `{"type": "phone",
+"action": "dial", "number"}` frame on `/ws`, and the shell
+(`PhoneCalls.kt`) waits for core.py to go free ("Calling Udhi." heard
+first), then `TelecomManager.placeCall` on speaker, or the dialer with
+the number filled in if `CALL_PHONE` was refused. The route is ready
+only while a connected shell has said `phone_status: can_call` (SIM
+ready); otherwise she hears it can't call. `save_contact` and
+`answer_card` are now registered on the phone too. Lost: dialling from
+Python through Chaquopy's Java bridge (the engine holding an Android
+handle, and embedded-only); reporting the call's end back
+(READ_PHONE_STATE; the in-call screen owns hang-up -- `active` is a 20 s
+debounce instead). Three remote-mode tests that pinned "calling is off on
+a phone" were rewritten to the new behaviour, not loosened: no Twilio
+relay is ever started there, and a shell must say yes before anything
+dials. On a Device Owner tablet the default dialer joins the lock-task
+allowlist, or the in-call screen could not come up.
+
+**2026-10-28 — The udhibranch merge broke the APK's engine at start;
+fixed.** `tools/calling.py` -> `call/routing.py` imported `family.py`
+and `webrtc.py` for annotations, which import `call/push.py`'s
+Cryptodome, which the APK does not carry. Imports are now type-only and
+`_build_family` notes an ImportError. `test_android_phone.py` now lists
+Cryptodome and segno as absent, which is what caught it.

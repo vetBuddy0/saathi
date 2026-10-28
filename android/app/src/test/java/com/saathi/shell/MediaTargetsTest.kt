@@ -57,6 +57,10 @@ class MediaTargetsTest {
         override fun sendMediaEvent(event: String, videoId: String?, code: Any?, target: String?) {
             sent += if (target == null) "$event $videoId $code" else "$event $videoId $code $target"
         }
+
+        override fun sendPhoneStatus(canCall: Boolean) {
+            sent += "phone_status $canCall"
+        }
     }
 
     private val pane = FakePane()

@@ -22,6 +22,16 @@ class KioskTest {
     }
 
     @Test
+    fun theDefaultDialerIsAddedOnceWhenThereIsOne() {
+        assertArrayEquals(
+            arrayOf("com.saathi.shell", "com.google.android.youtube", "com.google.android.dialer"),
+            Kiosk.lockTaskPackages("com.saathi.shell", "com.google.android.dialer"),
+        )
+        assertEquals(2, Kiosk.lockTaskPackages("com.saathi.shell", "").size)
+        assertEquals(2, Kiosk.lockTaskPackages("com.saathi.shell", "com.saathi.shell").size)
+    }
+
+    @Test
     fun theOwnPackageIsWhateverTheBuildSaysNotAConstant() {
         assertEquals("org.example.other", Kiosk.lockTaskPackages("org.example.other")[0])
     }

@@ -66,6 +66,9 @@ data class CaptionMessage(val who: String?, val text: String, val raw: JSONObjec
 /** `{"type":"settings",...}`: the face page's setup panel's; ignored here. */
 data class SettingsMessage(val raw: JSONObject) : WsMessage
 
+/** `{"type":"phone","action":"dial","number":...}`: place this call over the SIM (`call/device_phone.py`). */
+data class PhoneMessage(val action: String, val number: String?) : WsMessage
+
 /** A `type` this build does not know. Kept so it can be logged, never acted on. */
 data class UnknownMessage(val type: String, val raw: JSONObject) : WsMessage
 
@@ -96,12 +99,16 @@ object Protocol {
     const val TYPE_CARD = "card"
     const val TYPE_CAPTION = "caption"
     const val TYPE_SETTINGS = "settings"
+    const val TYPE_PHONE = "phone"
 
     // client -> server types
     const val TYPE_INPUT = "input"
     const val TYPE_CARD_ANSWER = "card_answer"
     const val TYPE_MEDIA_EVENT = "media_event"
     const val TYPE_SET_PREFERENCE = "set_preference"
+    const val TYPE_PHONE_STATUS = "phone_status"
+
+    const val PHONE_DIAL = "dial"
 
     const val EVENT_PRESS = "press"
     const val EVENT_RELEASE = "release"
@@ -166,6 +173,7 @@ object Protocol {
             TYPE_CARD -> CardMessage(obj.obj("card"), obj)
             TYPE_CAPTION -> obj.str("text")?.let { CaptionMessage(obj.str("who"), it, obj) }
             TYPE_SETTINGS -> SettingsMessage(obj)
+            TYPE_PHONE -> obj.str("action")?.let { PhoneMessage(it, obj.str("number")) }
             else -> UnknownMessage(type, obj)
         }
     }
@@ -175,6 +183,13 @@ object Protocol {
         JSONObject()
             .put("type", TYPE_INPUT)
             .put("event", if (pressed) EVENT_PRESS else EVENT_RELEASE)
+            .toString()
+
+    /** `{"type":"phone_status","can_call":...}` -- whether this device can place a call over its SIM. */
+    fun phoneStatus(canCall: Boolean): String =
+        JSONObject()
+            .put("type", TYPE_PHONE_STATUS)
+            .put("can_call", canCall)
             .toString()
 
     /** `{"type":"card_answer","id":...,"answer":{...}}` -- a tap on a card. */

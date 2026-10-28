@@ -372,6 +372,8 @@ async def _serve_until_stopped(engine: _Engine) -> None:
             # asks the model for them, so without this seam the phone's
             # eyes would never show what the laptop's do.
             emotions=runtime.emotions,
+            # "Call my son" over the device's SIM (call/device_phone.py).
+            phone=runtime.device_phone,
         )
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_SECONDS)
         await runner.setup()
