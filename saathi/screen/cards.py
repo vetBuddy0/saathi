@@ -491,6 +491,21 @@ class HoldController:
         self._cards.show(holding(self.label, progress, card_id=self._card_id))
         return False
 
+    def complete(self) -> bool:
+        """A completed hold without the wait: the phone panel's "End
+        call" button (2026-10-07). It fires the *same* registered
+        handler a two-second hold fires -- there is no second hang-up
+        path -- and only while one is registered, so a tap after the
+        call ended does nothing. Any Holding card in progress goes.
+        Returns whether a handler fired."""
+        handler = self._handler
+        if handler is None:
+            return False
+        self._fired = True
+        self.abandon()
+        handler()
+        return True
+
     def abandon(self) -> None:
         """The release before `seconds`: the card goes, nothing fires."""
         card_id = self._card_id

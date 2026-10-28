@@ -2,11 +2,13 @@ from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, resolve
 
 
 def test_supported_languages_match_the_verified_piper_set():
-    # Verified against `python3 -m piper.download_voices`'s own listing:
-    # Piper ships voices for these four and none at all for Tamil or
-    # Malay. This test is the "enforced in code" part — a language added
-    # here without also being real is exactly the bug this guards against.
-    assert set(SUPPORTED_LANGUAGES) == {"english", "chinese", "hindi", "bengali"}
+    # English and Mandarin only (product owner, 2026-10-09); both have
+    # Piper voices. This test is the "enforced in code" part — a language
+    # added here without also being real is exactly the bug this guards
+    # against.
+    assert set(SUPPORTED_LANGUAGES) == {"english", "chinese"}
+    assert "hindi" not in SUPPORTED_LANGUAGES
+    assert "bengali" not in SUPPORTED_LANGUAGES
     assert "tamil" not in SUPPORTED_LANGUAGES
     assert "malay" not in SUPPORTED_LANGUAGES
 
@@ -26,7 +28,7 @@ def test_resolve_language_falls_back_to_last_used_on_unsupported_detection():
 
 
 def test_resolve_language_falls_back_to_last_used_on_no_detection():
-    assert resolve_language(None, "hindi") == "hindi"
+    assert resolve_language(None, "chinese") == "chinese"
 
 
 def test_resolve_language_falls_back_to_default_when_last_used_is_also_unsupported():
@@ -55,9 +57,9 @@ def test_mixed_language_pair_english_mandarin_both_directions_are_trusted():
     assert resolve_language("chinese", "english") == "chinese"
 
 
-def test_mixed_language_pair_english_hindi_both_directions_are_trusted():
-    assert resolve_language("english", "hindi") == "english"
-    assert resolve_language("hindi", "english") == "hindi"
+def test_hindi_and_bengali_detections_fall_back_since_they_were_removed():
+    assert resolve_language("hindi", "english") == "english"
+    assert resolve_language("bengali", "chinese") == "chinese"
 
 
 def test_mixed_language_pair_english_malay_falls_back_since_malay_has_no_voice():
@@ -83,14 +85,16 @@ def test_script_language_reads_a_latin_title_in_english_inside_a_chinese_reply()
     assert script_language("三: The Moon Represents My Heart - Teresa Teng", "chinese") == "english"
 
 
-def test_script_language_recognises_devanagari_and_bengali():
-    assert script_language("नमस्ते। जब भी आप बात करना चाहें, मैं यहीं हूँ।", "english") == "hindi"
-    assert script_language("নমস্কার। আপনি যখনই কথা বলতে চান", "english") == "bengali"
+def test_script_language_lets_unsupported_scripts_fall_back_to_the_turns_language():
+    # Devanagari and Bengali are letters, but not Latin ones: the English
+    # voice must not be handed them as if they were English.
+    assert script_language("नमस्ते। जब भी आप बात करना चाहें", "chinese") == "chinese"
+    assert script_language("নমস্কার। আপনি যখনই কথা বলতে চান", "english") == "english"
 
 
 def test_script_language_falls_back_to_the_turns_language_when_there_are_no_letters():
     assert script_language("50 - 2", "chinese") == "chinese"
-    assert script_language("", "hindi") == "hindi"
+    assert script_language("", "chinese") == "chinese"
     assert script_language("123", "klingon") == DEFAULT_LANGUAGE
 
 

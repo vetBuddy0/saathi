@@ -99,6 +99,7 @@ import json
 import logging
 import os
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -118,6 +119,7 @@ except ImportError:
     sf = None
 
 from saathi.audio.playback import PlaybackHandle, play
+from saathi.audio.wake import is_only_name, mentions_name, strip_wake_word
 from saathi.audio.vad import contains_speech
 from saathi.identity.compile import compile_context
 from saathi.identity.digest import digest_turn, write_episode
@@ -128,11 +130,13 @@ from saathi.voice.engine.provider import (
     GROQ_STT_MODEL,
     AIProvider,
     provider_from_env,
+    stt_reports_language,
+    stt_response_format,
 )
 from saathi.voice.language import (
     DEFAULT_LANGUAGE,
+    STT_LANGUAGE_CODES,
     SUPPORTED_LANGUAGES,
-    resolve_language,
     script_language,
 )
 from saathi.voice.router import Command, Context, route
@@ -168,6 +172,50 @@ _LLM_PRICE_PER_MILLION_USD = {"input": 0.80, "output": 4.00}
 # reject the latter, and Groq accepts both.
 _REPLY_TOKEN_LIMIT = 400
 _SAMPLE_RATE = 16000
+# Keep-alive connections to OpenAI/Groq go cold somewhere past this
+# (measured: warm at 20 s idle, cold at 70 s). See start().
+_WARM_IF_IDLE_SECONDS = 30.0
+
+
+# What she hears when she called the name and then said nothing
+# (screen/server.py waits a few seconds first). Fixed lines, not a model
+# call: the moment is a beat of attention, and a round trip would make
+# it late. Several, rotated, so it isn't a machine's one phrase; in her
+# language, and in the persona's plain warm register -- never "Sure!" or
+# "Certainly", which read as a service desk. Lost: asking the model for
+# the line -- a cloud call for a word, and the one place a hallucinated
+# sentence would be worst.
+NAME_PROMPTS: dict[str, tuple[str, ...]] = {
+    "english": ("Yes?", "I'm here.", "Yes, I'm listening.", "What's up?"),
+    "chinese": ("嗯？", "我在呢。", "我在听。"),
+}
+
+# The cloud transcriber's bias while music is playing: the words she is
+# most likely to say over it, spelled the way the router matches them.
+# Only while something plays -- a prompt nudges every transcript toward
+# its words, and "stop" is not what she usually means.
+MEDIA_STT_PROMPT = (
+    "Kaki, stop. Kaki, pause. Resume. Volume up. Volume down. "
+    "Louder. Softer. Next song."
+)
+
+# A reply's leading mood tag; see CascadeSession._take_mood().
+_MOOD_TAG = re.compile(r"^\s*\[\s*([A-Za-z]+)\s*\]\s*")
+
+
+def _mood_instruction(moods: frozenset[str]) -> str:
+    """Asked of the model when the face can show moods. Why a tag and not
+    a tool: the reply already carries the tone, a tool call would spend
+    the turn's one call (DECISIONS 2026-09-18) and a round trip, and a
+    tag costs about three output tokens (measured: DECISIONS.md
+    2026-10-07). Lost: a second classifier call per reply -- a network
+    hop for a look on the face."""
+    names = ", ".join(sorted(moods))
+    return (
+        "Start every reply with one mood tag in square brackets showing how "
+        f"you feel saying it, one of: {names}. For example: [happy] That's "
+        "lovely news! The tag is never read aloud. Use neutral when unsure."
+    )
 
 
 def command_router_enabled() -> bool:
@@ -235,6 +283,13 @@ def _no_language_preference() -> str | None:
     # saathi/identity/preferences.py). Returning None means "nothing
     # stored yet" -- end_turn() already degrades sensibly for that case.
     return None
+
+
+def _rms(pcm: bytes) -> int:
+    samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype=np.int16)
+    if samples.size == 0:
+        return 0
+    return round(float(np.sqrt(np.mean(samples.astype(np.float64) ** 2))))
 
 
 def _pcm_to_flac_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
@@ -372,6 +427,8 @@ class CascadeSession:
         tool_schemas: list[dict] | None = None,
         speech_gate: Callable[[bytes], bool] | None = None,
         provider: AIProvider | None = None,
+        moods: frozenset[str] | None = None,
+        media_playing: Callable[[], bool] | None = None,
         player: Callable[[str, Path], PlaybackHandle] | None = None,
     ) -> None:
         # Which service hears her and replies (voice/engine/provider.py).
@@ -408,6 +465,9 @@ class CascadeSession:
         else:
             self._compiled_context = _PERSONA_PATH.read_text().strip()
         self._chunks: list[bytes] = []
+        # When the AI clients last talked to their servers (monotonic);
+        # -inf: never, so the first turn warms them.
+        self._network_used_at = float("-inf")
         self._last_language = DEFAULT_LANGUAGE
         self._playback_lock = threading.Lock()
         self._current_playback: PlaybackHandle | None = None
@@ -418,12 +478,26 @@ class CascadeSession:
         self._pending_completion_tokens: int | None = None
         self._last_turn_timings: TurnTimings | None = None
         self._tool_schemas = tool_schemas
+        # The looks the face can show (screen/emotion.py's EMOTIONS), or
+        # None: replies carry no mood tag at all. See _take_mood().
+        self._moods = moods
+        self._mood_callback: Callable[[str], object] | None = None
         self._intent_callback = None
         # The command router's context (voice/router.py), inferred from
         # tool results as they pass through _emit_intent(): how many
         # music titles are on offer, and whether a calling card is up.
         self._results_count = 0
         self._card_pending = False
+        # Whether music is playing right now (cli.py reads the media
+        # controller; this class never does). Biases the transcriber and
+        # lets the router take a command after her name mid-song.
+        self._media_playing = media_playing or (lambda: False)
+        # The turn began with her name (screen/server.py, the wake word),
+        # so the cloud's odder spellings of it are the name too. And
+        # whether the last turn turned out to be only the name.
+        self._started_by_name = False
+        self.heard_only_name = False
+        self._name_prompt_count = 0
         # None means the real Silero gate (audio/vad.py's contains_speech);
         # tests inject a permissive one. Same shape as `client`/`backends`:
         # the default is the real thing, never a stub.
@@ -539,12 +613,125 @@ class CascadeSession:
 
     def start(self) -> None:
         self._chunks = []
+        self._started_by_name = False
+        self._warm_connections_in_background()
+
+    def started_by_name(self) -> None:
+        """This turn began with her name (the wake word). Outside the
+        `VoiceSession` Protocol, like `preview_heard`; reset by start()."""
+        self._started_by_name = True
+
+    def name_prompt(self) -> str:
+        """A short line for when she called the name and said nothing
+        more, in her current language, a different one each time."""
+        lines = NAME_PROMPTS.get(self._last_language) or NAME_PROMPTS["english"]
+        line = lines[self._name_prompt_count % len(lines)]
+        self._name_prompt_count += 1
+        return line
+
+    def _warm_connections_in_background(self) -> None:
+        """Opens (or refreshes) the HTTPS connections the turn is about to
+        use while she is still speaking. Measured from the demo laptop
+        (2026-10-07): the first call after a minute or more of quiet pays
+        a fresh TCP+TLS handshake -- OpenAI chat 840-990 ms against
+        610-800 ms warm, Groq ~430 ms against ~230 ms -- and turns are
+        usually minutes apart, so nearly every real turn paid it twice
+        (STT, then the reply). A free `GET /models` on each client while
+        she talks moves that cost off the critical path. Not context
+        compilation (SPEC.md): nothing is read or sent but the request
+        line. Skipped if the clients were used recently; a failure is
+        ignored -- the turn's own call will simply connect as before.
+        Lost: a keep-alive ping every N seconds, which spends requests
+        all day to save the same handshake."""
+        now = time.monotonic()
+        if now - self._network_used_at < _WARM_IF_IDLE_SECONDS:
+            return
+        self._network_used_at = now
+        clients = {id(c): c for c in (self._provider.client, self._provider.transcriber)}
+
+        def _warm() -> None:
+            for client in clients.values():
+                try:
+                    client.models.list()
+                except Exception:
+                    logger.debug("connection warm-up failed", exc_info=True)
+
+        threading.Thread(target=_warm, name="saathi-warm", daemon=True).start()
 
     def send_audio(self, chunk: bytes) -> None:
         self._chunks.append(chunk)
 
+    def preview_heard(self) -> str:
+        """What she has said so far in the turn still being captured, for
+        live captions only (screen/server.py polls it while the key is
+        held). Not part of the `VoiceSession` Protocol, same as
+        `pop_last_turn_timings`: an optional extra the server reaches
+        with getattr. Nothing here touches the turn -- no language
+        update, no memory, no model call; end_turn() still transcribes
+        the whole buffer itself on release.
+
+        Exists because "I pressed space and nothing came back" could
+        not be told apart from "the mic heard nothing" without reading
+        the log (2026-10-07). The option that lost was a level meter:
+        a moving bar is status, words are content. Gated like
+        end_turn(), so silence never captions as Whisper's " Thank you."
+        """
+        pcm = b"".join(list(self._chunks))  # a snapshot; capture keeps appending
+        if not pcm or not self._speech_gate(pcm):
+            return ""
+        transcription, _ = self._transcribe(*_encode_for_stt(pcm))
+        return transcription.text.strip()
+
+    def _transcribe(self, filename: str, audio: bytes):
+        """One STT call, on the provider's transcriber, falling back to
+        `stt_fallback` if that fails (voice/engine/provider.py: Groq
+        hears her, OpenAI covers for it). Returns the transcription and
+        whether it carries a detected language."""
+        provider = self._provider
+        # Only passed when there is one: an absent prompt is the
+        # transcriber's own default, exactly as before.
+        bias = {"prompt": MEDIA_STT_PROMPT} if self._media_playing_now() else {}
+        # Never a hint with her name in it on a wake turn: tried
+        # 2026-10-09, and Whisper answered unclear speech with the hint
+        # itself ("Kaki."), which read as her calling and opened the
+        # conversation to whoever spoke next.
+        # Always the language she chose, never a guess (voice/language.py).
+        bias["language"] = STT_LANGUAGE_CODES.get(
+            self._last_language, STT_LANGUAGE_CODES[DEFAULT_LANGUAGE]
+        )
+        try:
+            transcription = provider.transcriber.audio.transcriptions.create(
+                model=provider.stt_model,
+                file=(filename, audio),
+                response_format=provider.stt_response_format,
+                **bias,
+            )
+            return transcription, provider.stt_reports_language
+        except Exception:
+            if provider.stt_fallback is None:
+                raise
+            logger.warning(
+                "STT on %s failed; using the fallback", provider.stt_model, exc_info=True
+            )
+        client, model = provider.stt_fallback
+        transcription = client.audio.transcriptions.create(
+            model=model,
+            file=(filename, audio),
+            response_format=stt_response_format(model),
+            **bias,
+        )
+        return transcription, stt_reports_language(model)
+
+    def _media_playing_now(self) -> bool:
+        try:
+            return bool(self._media_playing())
+        except Exception:
+            logger.exception("media_playing check failed")
+            return False
+
     def end_turn(self) -> str:
         self.last_heard = None  # a silent turn must not re-caption the last one
+        self.heard_only_name = False
         pcm = b"".join(self._chunks)
         self._chunks = []
         # The silence bug, fixed where it starts. Whisper hallucinates
@@ -557,6 +744,16 @@ class CascadeSession:
         # IDLE, and never enters SPEAKING. Not a spoken "I didn't catch
         # that" -- she would say it every time a door closed.
         if not self._speech_gate(pcm):
+            # Said in the log, so a silent turn can be traced: no audio
+            # at all is a capture problem, audio without speech is the
+            # mic level or the gate.
+            logger.info(
+                "speech gate: no speech in %.1fs of audio (rms %d); turn ends silently",
+                len(pcm) / 32000,
+                _rms(pcm),
+            )
+            # Called by name and then silence: still a call, not nothing.
+            self.heard_only_name = self._started_by_name
             return ""
         upload_name, upload_bytes = _encode_for_stt(pcm)
 
@@ -585,8 +782,7 @@ class CascadeSession:
         # case's priority against detection, nothing about what counts
         # as trustworthy in the first place.
         preferred = self._language_preference()
-        language_pinned = preferred in SUPPORTED_LANGUAGES
-        if language_pinned:
+        if preferred in SUPPORTED_LANGUAGES:
             self._last_language = preferred
 
         # Betting on last turn's language (or the pinned preference just
@@ -598,30 +794,41 @@ class CascadeSession:
         self._preload_voice_in_background(self._last_language)
 
         stt_started_at = time.monotonic()
-        transcription = self._client.audio.transcriptions.create(
-            model=self._provider.stt_model,
-            file=(upload_name, upload_bytes),
-            response_format=self._provider.stt_response_format,
-        )
+        transcription, _reports_language = self._transcribe(upload_name, upload_bytes)
         self._pending_stt_ms = round((time.monotonic() - stt_started_at) * 1000)
         heard = transcription.text.strip()
         if not heard:
             # The gate heard voice but Whisper made nothing of it. Same
             # contract as the gate: nothing said, end silently.
+            logger.info("speech gate passed but the transcript was empty; turn ends silently")
+            self._pending_stt_ms = None
+            self.heard_only_name = self._started_by_name
+            return ""
+        # A turn the wake listener started must also have her name
+        # somewhere in the cloud's transcript, or it was a false wake (live,
+        # 2026-10-09: two people chatting across the table were answered
+        # again and again, the name never said). Ends silently, with no
+        # "Yes?": nobody called her.
+        if self._started_by_name and not mentions_name(heard):
+            logger.info("woken by name but the transcript has no name (%r); no reply", heard[:60])
+            self.heard_only_name = False
             self._pending_stt_ms = None
             return ""
+        # Her name is the trigger, never the content (live, 2026-10-08:
+        # "Saathi" alone was transcribed "Saudi?" and answered). Only
+        # the name: no model call, and screen/server.py keeps listening
+        # (and says "Yes?" if she stays quiet). Name and request: the
+        # model and the router get the request alone.
+        if is_only_name(heard, loose=self._started_by_name):
+            logger.info("only her name (%r); no reply", heard)
+            self.heard_only_name = True
+            self._pending_stt_ms = None
+            return ""
+        heard = strip_wake_word(heard, loose=self._started_by_name) or heard
         self.last_heard = heard
-        if not language_pinned:
-            if self._provider.stt_reports_language:
-                detected = (getattr(transcription, "language", None) or "").lower()
-            else:
-                # OpenAI's newer transcribers return text only. Her
-                # language is read from the script she was transcribed
-                # in instead: Han -> chinese, Devanagari -> hindi, ...
-                # Latin can't tell English from Malay; English is the
-                # only Latin-script language with a voice here anyway.
-                detected = script_language(heard, self._last_language)
-            self._last_language = resolve_language(detected, self._last_language)
+        # No per-turn detection (2026-10-09, owner): the transcriber was
+        # told her language, so the transcript can't name another one.
+        # Her language changes only when she or the panel says so.
 
         # Three layers of memory, oldest to newest, then her words.
         # Layer 3 (episodes, via compile_context) and layer 2 (the
@@ -637,6 +844,8 @@ class CascadeSession:
                 {"role": "system", "content": f"Earlier in this conversation: {summary}"}
             )
         messages.append({"role": "system", "content": f"Reply in {self._last_language}."})
+        if self._moods:
+            messages.append({"role": "system", "content": _mood_instruction(self._moods)})
         messages.extend(self._conversation.messages())
         messages.append({"role": "user", "content": heard})
 
@@ -690,6 +899,7 @@ class CascadeSession:
             else:
                 reply_text = (message.content or "").strip()
 
+        self._network_used_at = time.monotonic()
         if command is not None and not outcome.model_called:
             # No model in this turn at all: there is no token to time.
             self._pending_first_token_ms = 0
@@ -719,8 +929,30 @@ class CascadeSession:
             self._pending_completion_tokens = None
             self._after_turn_in_background()
             return ""
+        reply_text = self._take_mood(reply_text)
         self._pending_exchange = Exchange(user=heard, assistant=reply_text)
         return reply_text
+
+    def _take_mood(self, reply_text: str) -> str:
+        """The reply without its leading mood tag ("[happy] Lovely!" ->
+        "Lovely!"), handing the mood to whatever `on_mood()` registered
+        on the way -- the face is the core's to move, never this
+        engine's (SPEC.md); this only says which look. Stripped before
+        anything else sees the text, so it is never spoken, captioned or
+        remembered. A tag naming a look the face doesn't draw is
+        stripped and dropped. Not an `on_intent()` tool: the registry is
+        exactly what the model is offered (cli.py), and a mood must not
+        touch the router's card/results context."""
+        match = _MOOD_TAG.match(reply_text)
+        if match is None:
+            return reply_text
+        mood = match.group(1).lower()
+        if self._moods and mood in self._moods and self._mood_callback is not None:
+            try:
+                self._mood_callback(mood)
+            except Exception:
+                logger.exception("showing the mood failed")
+        return reply_text[match.end():].strip()
 
     def _route_command(self, heard: str) -> Command | None:
         """The router's verdict for this transcript, or None when the
@@ -736,6 +968,7 @@ class CascadeSession:
             results_offered=self._results_count > 0,
             results_count=self._results_count,
             card_pending=self._card_pending,
+            media_playing=self._media_playing_now(),
         )
         self._card_pending = False
         return route(heard, context=context)
@@ -1044,6 +1277,11 @@ class CascadeSession:
 
     def on_audio(self, callback) -> None:
         raise NotImplementedError("streaming reply audio isn't built this hour")
+
+    def on_mood(self, callback: Callable[[str], object]) -> None:
+        """Where a reply's mood goes (cli.py: EmotionController.show).
+        Outside the `VoiceSession` Protocol, like `preview_heard`."""
+        self._mood_callback = callback
 
     def on_intent(self, callback) -> None:
         """Item G: real, not a stub anymore. `callback(name, arguments)

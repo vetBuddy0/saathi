@@ -8,23 +8,27 @@
 // something, not to end the song — and a paused video that has to be
 // told to carry on turns every remark into two turns. The duck follows
 // core.py's state, which the browser already receives: down the moment
-// she is listening (so the mic isn't fighting the speaker), held through
+// she is heard (so the mic isn't fighting the speaker), held through
 // thinking and speaking (so the reply is heard over it), back up at idle.
-// 20% was chosen over mute so the room doesn't go dead-silent on every
-// press — that silence reads as "it broke" — and over 50% because the
-// AEC does not currently cover browser audio at all (see
-// docs/completed/youtube.md, "AEC"), so what's left under her voice is
-// what Whisper will hear.
+//
+// 2026-10-08, after live use: the song was being transcribed into her
+// request. Two changes. `attentive` ducks too — it is the moment the
+// wake word heard her name (her request is already arriving) and the
+// whole open follow-up window after a reply (screen/server.py), not
+// just a glance. And the duck is a tenth, not a fifth (20 dB down): a
+// fifth still left the chorus louder than her voice at the mic. Mute
+// still lost — the room going dead on every "Saathi" reads as "it
+// broke" — and the echo canceller now hears the browser too (audio/
+// aec.py, the default sink), so what is left under her voice is small.
 //
 // No PLAYING state exists in core.py and none is added here: playback is
 // media state, not conversation state, and the face is driven by core
 // alone (SPEC.md, "The face is driven by core.py").
 
-export const DUCK_FACTOR = 0.2;
+export const DUCK_FACTOR = 0.1;
 
 // `handoff` is the slower path's own thinking; it ducks like thinking.
-// `attentive` is before she has said anything, so nothing is lowered.
-export const DUCKED_STATES = ["listening", "thinking", "speaking", "handoff"];
+export const DUCKED_STATES = ["attentive", "listening", "thinking", "speaking", "handoff"];
 
 export function effectiveVolume(level, state) {
   const base = Math.max(0, Math.min(100, Number(level) || 0));

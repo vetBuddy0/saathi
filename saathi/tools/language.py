@@ -36,6 +36,13 @@ SET_LANGUAGE_DESCRIPTION = (
 
 
 def make_set_language_tool(store: IdentityStore) -> Tool:
+    # The handler runs on the turn's executor thread, never the thread
+    # that opened `store`, and sqlite3 connections can't cross threads.
+    # Found live (2026-10-08): "objects created in a thread" on a real
+    # "speak to me in Hindi". Same fix as identity/correction.py: a
+    # short-lived connection of its own to the same file per call.
+    path = store.path
+
     def _set_language(language: str) -> dict[str, Any]:
         if language not in SUPPORTED_LANGUAGES:
             # The schema's enum should already keep this from happening --
@@ -46,7 +53,8 @@ def make_set_language_tool(store: IdentityStore) -> Tool:
                 "language": language,
                 "supported": sorted(SUPPORTED_LANGUAGES),
             }
-        write_preference(store, LANGUAGE_KEY, language)
+        with IdentityStore(path) as own:
+            write_preference(own, LANGUAGE_KEY, language)
         return {
             "status": "ok",
             "language": language,

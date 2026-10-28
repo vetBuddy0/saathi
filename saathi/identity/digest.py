@@ -113,7 +113,7 @@ class TurnDigest:
 def _format_unfolded(unfolded: list[Exchange]) -> str:
     if not unfolded:
         return "(none -- the summary does not need to change)"
-    return "\n".join(f"She said: {e.user}\nSaathi replied: {e.assistant}" for e in unfolded)
+    return "\n".join(f"She said: {e.user}\nKaki replied: {e.assistant}" for e in unfolded)
 
 
 def _clamp_importance(value: Any) -> float | None:

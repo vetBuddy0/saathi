@@ -80,24 +80,41 @@ class ProviderUnavailable(RuntimeError):
     """No usable provider: the chosen one's API key is missing."""
 
 
+def stt_reports_language(stt_model: str) -> bool:
+    """Whisper-family models return the detected language
+    (`response_format="verbose_json"`); OpenAI's newer transcribers
+    accept only plain `json` and return text alone. Without it the
+    cascade reads the language from the transcript's script."""
+    return stt_model.startswith("whisper")
+
+
+def stt_response_format(stt_model: str) -> str:
+    return "verbose_json" if stt_reports_language(stt_model) else "json"
+
+
 @dataclass(frozen=True)
 class AIProvider:
     name: str
     client: Any
     llm_model: str
     stt_model: str
+    # Hearing her can use a different service from replying to her (see
+    # provider_from_env). None: `client` does both. `stt_fallback` is
+    # (client, model) to try when `stt_client` fails.
+    stt_client: Any = None
+    stt_fallback: tuple[Any, str] | None = None
+
+    @property
+    def transcriber(self) -> Any:
+        return self.stt_client if self.stt_client is not None else self.client
 
     @property
     def stt_reports_language(self) -> bool:
-        """Whisper-family models return the detected language
-        (`response_format="verbose_json"`); OpenAI's newer transcribers
-        accept only plain `json` and return text alone. Without it the
-        cascade reads the language from the transcript's script."""
-        return self.stt_model.startswith("whisper")
+        return stt_reports_language(self.stt_model)
 
     @property
     def stt_response_format(self) -> str:
-        return "verbose_json" if self.stt_reports_language else "json"
+        return stt_response_format(self.stt_model)
 
     @property
     def llm_extra(self) -> dict[str, Any]:
@@ -184,20 +201,55 @@ def provider_from_env(
         key = environ.get(_key_name(name))
         if not key:
             raise ProviderUnavailable(f"{_key_name(name)} is not set in the environment")
-        client = build_client(name, key, choose_client_kind(environ))
+        kind = choose_client_kind(environ)
+        client = build_client(name, key, kind)
+        # Hearing her on Groq while OpenAI replies (2026-10-07): measured
+        # from the demo laptop, Groq's whisper-large-v3-turbo transcribed
+        # the test sentence in 270 ms median against gpt-transcribe's
+        # 731 ms -- the largest single cut to a turn's latency that
+        # didn't touch what she hears. OpenAI stays the fallback if a
+        # Groq call fails (its free tier rate-limits). Off with
+        # SAATHI_STT_PROVIDER=openai, or by naming SAATHI_STT_MODEL.
+        split = (
+            name == "openai"
+            and environ.get("GROQ_API_KEY")
+            and not environ.get("SAATHI_STT_MODEL")
+            and environ.get("SAATHI_STT_PROVIDER", "groq").strip().lower() == "groq"
+        )
+        if split:
+            return AIProvider(
+                name=name,
+                client=client,
+                llm_model=llm,
+                stt_model=GROQ_STT_MODEL,
+                # No retry and a short deadline: a 429 or a slow call
+                # should reach the fallback now, not after a backoff.
+                stt_client=build_client(
+                    "groq", environ["GROQ_API_KEY"], kind, retries=0, timeout=4.0
+                ),
+                stt_fallback=(client, stt),
+            )
     return AIProvider(name=name, client=client, llm_model=llm, stt_model=stt)
 
 
-def build_client(name: str, key: str, kind: str | None = None) -> Any:
+def build_client(
+    name: str,
+    key: str,
+    kind: str | None = None,
+    *,
+    retries: int = MAX_RETRIES,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> Any:
     """The client for provider `name`: the SDK's, or `RestChatClient`.
     `kind` is `choose_client_kind()`'s answer: None tries the SDK and
     falls back to REST when it does not import (the phone); "rest"
-    skips the SDK; "sdk" refuses to fall back."""
+    skips the SDK; "sdk" refuses to fall back. `retries` and `timeout`
+    are for the Groq STT client, which must fail fast to its fallback."""
     if kind == "rest":
         logger.info("AI client: REST (%s), by SAATHI_AI_CLIENT", _base_url(name))
-        return _rest_client(name, key)
+        return _rest_client(name, key, retries=retries, timeout=timeout)
     try:
-        client = _sdk_client(name, key)
+        client = _sdk_client(name, key, retries=retries, timeout=timeout)
     except ImportError as exc:
         if kind == "sdk":
             raise ProviderUnavailable(
@@ -206,23 +258,27 @@ def build_client(name: str, key: str, kind: str | None = None) -> Any:
         logger.info(
             "AI client: REST (%s); the %s SDK does not import: %s", _base_url(name), name, exc
         )
-        return _rest_client(name, key)
+        return _rest_client(name, key, retries=retries, timeout=timeout)
     logger.info("AI client: %s SDK", name)
     return client
 
 
-def _rest_client(name: str, key: str) -> RestChatClient:
+def _rest_client(
+    name: str, key: str, *, retries: int = MAX_RETRIES, timeout: float = REQUEST_TIMEOUT_SECONDS
+) -> RestChatClient:
     """The stdlib client, with the SDK client's deadline and retry."""
     return RestChatClient(
         _base_url(name),
         key,
-        timeout=REQUEST_TIMEOUT_SECONDS,
+        timeout=timeout,
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
-        retries=MAX_RETRIES,
+        retries=retries,
     )
 
 
-def _sdk_client(name: str, key: str) -> Any:
+def _sdk_client(
+    name: str, key: str, *, retries: int = MAX_RETRIES, timeout: float = REQUEST_TIMEOUT_SECONDS
+) -> Any:
     """The vendor SDK's client, exactly as built before the REST client
     existed. Raises ImportError where the SDK (or its httpx) is absent."""
     # IPv4 only. Found live 2026-09-25: this network advertises IPv6
@@ -234,13 +290,13 @@ def _sdk_client(name: str, key: str) -> Any:
     import httpx
 
     http_client = httpx.Client(
-        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=MAX_RETRIES),
-        timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
+        transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=retries),
+        timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT_SECONDS),
     )
     if name == "openai":
         from openai import OpenAI
 
-        return OpenAI(api_key=key, http_client=http_client, max_retries=MAX_RETRIES)
+        return OpenAI(api_key=key, http_client=http_client, max_retries=retries)
     from groq import Groq
 
-    return Groq(api_key=key, http_client=http_client, max_retries=MAX_RETRIES)
+    return Groq(api_key=key, http_client=http_client, max_retries=retries)

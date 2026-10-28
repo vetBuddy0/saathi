@@ -5,10 +5,9 @@ network access isn't a fallback, it's an assumption — this proves the
 already-cached model transcribes with the network cut off, not just that
 it *should*.
 
-Skipped unless the `hardware` dependency group is installed (`uv sync
---group hardware`) — CI doesn't install it, same reason `saathi smoke
---aec` doesn't run there. This needs a machine where the model has been
-downloaded once, not a headless runner.
+Needs a machine where the `tiny.en` model has been downloaded once (the
+wake word does that on first run); `faster-whisper` itself is a default
+dependency since the wake word (audio/wake.py).
 """
 
 import socket
@@ -17,6 +16,11 @@ from pathlib import Path
 import pytest
 
 faster_whisper = pytest.importorskip("faster_whisper")
+
+from huggingface_hub import try_to_load_from_cache  # noqa: E402  (after the skip)
+
+if not isinstance(try_to_load_from_cache("Systran/faster-whisper-tiny.en", "model.bin"), str):
+    pytest.skip("tiny.en has never been downloaded on this machine", allow_module_level=True)
 
 _KNOWN_SENTENCE_WAV = (
     Path(__file__).parent.parent / "saathi" / "audio" / "testdata" / "known_sentence.wav"

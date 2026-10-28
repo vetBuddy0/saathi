@@ -701,7 +701,12 @@ async def test_the_cascade_runs_a_turn_over_the_rest_client():
     assert reply == "hi there"
     assert session.last_heard == "hello there"
     stt = fake.stt_requests[0]
-    assert stt["fields"] == {"model": "whisper-large-v3-turbo", "response_format": "verbose_json"}
+    # The chosen language always rides along (2026-10-09, cascade.py).
+    assert stt["fields"] == {
+        "model": "whisper-large-v3-turbo",
+        "response_format": "verbose_json",
+        "language": "en",
+    }
     assert stt["filename"] in ("turn.flac", "turn.wav")  # FLAC here; WAV on the phone
     assert stt["data"].startswith(b"fLaC") or stt["data"].startswith(b"RIFF")
     chat = fake.chat_requests[0]["body"]

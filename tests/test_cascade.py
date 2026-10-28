@@ -276,12 +276,14 @@ def test_send_audio_chunks_are_joined_for_transcription(no_real_playback):
     assert len(client.audio.transcriptions.calls) == 2
 
 
-def test_end_turn_resolves_a_supported_detected_language(no_real_playback):
+def test_a_detected_language_never_switches_hers(no_real_playback):
+    # 2026-10-09, owner: her language is the one she chose, never a
+    # per-turn guess (Whisper guessed Spanish, French and Hindi live).
     client = FakeClient(detected_language="Chinese")
     session, _backend = _session(client)
     session.start()
     session.end_turn()
-    assert session._last_language == "chinese"
+    assert session._last_language == "english"
 
 
 def test_end_turn_falls_back_when_detected_language_is_unsupported(no_real_playback):
@@ -289,21 +291,22 @@ def test_end_turn_falls_back_when_detected_language_is_unsupported(no_real_playb
     # supported set must not change what language Saathi replies in.
     client = FakeClient(detected_language="Portuguese")
     session, _backend = _session(client)
-    session._last_language = "hindi"
+    session._last_language = "chinese"
     session.start()
     session.end_turn()
-    assert session._last_language == "hindi"
+    assert session._last_language == "chinese"
 
 
 def test_end_turn_tells_the_llm_which_language_to_reply_in(no_real_playback):
-    client = FakeClient(detected_language="Hindi")
+    client = FakeClient(detected_language="English")
     session, _backend = _session(client)
+    session._last_language = "chinese"
     session.start()
     session.end_turn()
 
     messages = client.chat.completions.calls[0]["messages"]
     system_messages = [m["content"].lower() for m in messages if m["role"] == "system"]
-    assert any("hindi" in content for content in system_messages)
+    assert any("reply in chinese" in content for content in system_messages)
 
 
 def test_say_synthesizes_one_sentence_at_a_time_via_the_selected_backend(no_real_playback):
@@ -608,10 +611,10 @@ def test_end_turn_ignores_an_unsupported_stored_language_preference(no_real_play
         backend_preference=lambda: "fake",
         language_preference=lambda: "klingon",
     )
-    session._last_language = "hindi"
+    session._last_language = "chinese"
     session.start()
     session.end_turn()
-    assert session._last_language == "hindi"
+    assert session._last_language == "chinese"
 
 
 def test_construction_preloads_the_backends_voice_immediately():
@@ -823,11 +826,11 @@ def test_a_tool_call_emits_an_intent_and_speaks_the_follow_up_reply(no_real_play
 
 
 def test_a_tool_calls_result_is_fed_back_as_a_tool_message(no_real_playback):
-    tool_call = _fake_tool_call("call_1", "set_language", {"language": "hindi"})
+    tool_call = _fake_tool_call("call_1", "set_language", {"language": "chinese"})
     client = FakeClient(
         chat_responses=[
             _fake_completion(content=None, tool_calls=[tool_call]),
-            _fake_completion(content="ठीक है।"),
+            _fake_completion(content="好的。"),
         ]
     )
     session, _backend = _session(client)
@@ -840,7 +843,7 @@ def test_a_tool_calls_result_is_fed_back_as_a_tool_message(no_real_playback):
     tool_messages = [m for m in follow_up_messages if m["role"] == "tool"]
     assert len(tool_messages) == 1
     assert tool_messages[0]["tool_call_id"] == "call_1"
-    assert json.loads(tool_messages[0]["content"]) == {"status": "ok", "language": "hindi"}
+    assert json.loads(tool_messages[0]["content"]) == {"status": "ok", "language": "chinese"}
 
 
 def test_a_tool_call_with_no_registered_intent_handler_still_gets_a_reply(no_real_playback):
@@ -1230,19 +1233,21 @@ def _openai_session(client, *, llm="gpt-4.1", stt="gpt-transcribe"):
     )
 
 
-def test_openai_transcriber_is_asked_for_json_and_language_comes_from_the_script(
+def test_openai_transcriber_is_asked_for_json_and_told_her_language(
     no_real_playback,
 ):
-    # OpenAI's newer transcribers return text only; a Mandarin transcript
-    # must still switch her reply language, from its script.
+    # OpenAI's newer transcribers return text only. She chose Mandarin:
+    # the transcriber is told so, and she is answered in it.
     client = FakeClient(heard="请帮我播放一首邓丽君的歌。", detected_language="english")
     session = _openai_session(client)
+    session._last_language = "chinese"
     session.start()
     session.send_audio(b"\x00\x00" * 100)
     session.end_turn()
 
     stt = client.audio.transcriptions.calls[0]
     assert stt["model"] == "gpt-transcribe" and stt["response_format"] == "json"
+    assert stt["language"] == "zh"
     chat = client.chat.completions.calls[0]
     assert chat["model"] == "gpt-4.1"
     assert {"role": "system", "content": "Reply in chinese."} in chat["messages"]
@@ -1365,6 +1370,171 @@ def test_call_my_son_routes_without_any_results_on_offer(no_real_playback):
     assert len(client.chat.completions.calls) == 1  # the follow-up only, never the tool choice
 
 
+# -- live captions: preview_heard() -----------------------------------------
+
+
+def test_preview_heard_transcribes_the_buffer_so_far_and_leaves_the_turn_alone(
+    no_real_playback,
+):
+    client = FakeClient(heard="  play a song  ")
+    session, _backend = _session(client)
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.preview_heard() == "play a song"
+    assert client.chat.completions.calls == []  # no model call for a caption
+    assert session.last_heard is None
+
+    # The audio is still there for the real turn on release.
+    session.end_turn()
+    assert len(client.audio.transcriptions.calls) == 2
+    assert session.last_heard == "play a song"
+
+
+def test_preview_heard_on_silence_spends_no_stt_call(no_real_playback):
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=lambda pcm: False,
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.preview_heard() == ""
+    assert client.audio.transcriptions.calls == []
+
+
+def test_a_gated_turn_says_why_in_the_log(no_real_playback, caplog):
+    client = FakeClient()
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=lambda pcm: False,
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 16000)
+
+    with caplog.at_level("INFO", logger=cascade_module.__name__):
+        assert session.end_turn() == ""
+    assert "speech gate: no speech in 1.0s of audio (rms 0)" in caplog.text
+
+
+class _FailingTranscriptions:
+    def create(self, **kwargs):
+        raise RuntimeError("429 rate limited")
+
+
+def test_a_failed_transcription_falls_back_to_the_other_service(no_real_playback):
+    from saathi.voice.engine.provider import AIProvider
+
+    reply_client = FakeClient(heard="call my son", reply="Calling him now.")
+    groq = SimpleNamespace(audio=SimpleNamespace(transcriptions=_FailingTranscriptions()))
+    provider = AIProvider(
+        "openai",
+        reply_client,
+        "gpt-4.1",
+        "whisper-large-v3-turbo",
+        stt_client=groq,
+        stt_fallback=(reply_client, "gpt-transcribe"),
+    )
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        provider=provider,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+    )
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+
+    assert session.end_turn() == "Calling him now."
+    call = reply_client.audio.transcriptions.calls[0]
+    assert call["model"] == "gpt-transcribe" and call["response_format"] == "json"
+
+
+def test_starting_a_turn_warms_cold_connections_once(monkeypatch):
+    # The first call after a minute of quiet pays a fresh TLS handshake
+    # (~200 ms each for STT and the reply, measured 2026-10-07); start()
+    # opens the connection while she is still speaking instead.
+    import threading as _threading
+
+    from saathi.voice.engine import cascade as cascade_module
+
+    listed = []
+
+    class Models:
+        def list(self):
+            listed.append(True)
+
+    client = FakeClient()
+    client.models = Models()
+    session, _ = _session(client)
+    ran = []
+    real_thread = _threading.Thread
+
+    class InlineThread(real_thread):
+        def start(self):
+            ran.append(True)
+            self.run()
+
+    monkeypatch.setattr(cascade_module.threading, "Thread", InlineThread)
+    session.start()
+    assert listed == [True]  # one client: chat and STT share it here
+    session.start()  # moments later: still warm, nothing sent
+    assert listed == [True]
+
+
+# -- the reply's mood, for the face (2026-10-07) ------------------------------
+
+
+def _mood_session(reply: str, moods=frozenset({"happy", "sad", "neutral"})):
+    client = FakeClient(reply=reply)
+    session = CascadeSession(
+        "fake-sink",
+        speech_gate=_hears_speech,
+        client=client,
+        backends={"fake": FakeTTSBackend()},
+        backend_preference=lambda: "fake",
+        moods=moods,
+    )
+    intents = []
+    session.on_intent(lambda name, arguments: intents.append((name, arguments)) or {})
+    session.on_mood(lambda mood: intents.append(("mood", mood)))
+    session.start()
+    session.send_audio(b"\x00\x00" * 100)
+    return session, client, intents
+
+
+def test_a_mood_tag_goes_to_the_face_and_never_into_her_ears():
+    session, client, intents = _mood_session("[Happy] That's lovely news!")
+    assert session.end_turn() == "That's lovely news!"
+    assert intents == [("mood", "happy")]  # and no tool intent
+    system = [m["content"] for m in client.chat.completions.calls[0]["messages"]]
+    assert any("mood tag" in text for text in system)
+
+
+def test_a_mood_the_face_cannot_draw_is_stripped_and_dropped():
+    session, _, intents = _mood_session("[smug] Of course.")
+    assert session.end_turn() == "Of course."
+    assert intents == []
+
+
+def test_a_reply_without_a_tag_is_untouched():
+    session, _, intents = _mood_session("Hello there.")
+    assert session.end_turn() == "Hello there."
+    assert intents == []
+
+
+def test_without_moods_nothing_is_asked_or_stripped_of_the_model():
+    session, client, intents = _mood_session("Hello there.", moods=None)
+    session.end_turn()
+    system = [m["content"] for m in client.chat.completions.calls[0]["messages"]]
+    assert not any("mood tag" in (text or "") for text in system)
 # -- the player seam (audio/remote.py, 2026-10-08) --------------------------
 
 

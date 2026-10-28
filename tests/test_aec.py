@@ -232,3 +232,65 @@ def test_ensure_echo_cancellation_prefers_the_system_module_when_available():
     result = ensure_echo_cancellation("mic", "speaker", system=SystemEchoCancel(run=pactl))
 
     assert isinstance(result, EchoCancelHandles)
+
+
+# -- PipeWire's pulse server: no device.class, no device.master_device --------
+
+
+class PipeWirePactl:
+    """What `pactl` prints against PipeWire's pulse server (captured on
+    the 800-series laptop, PipeWire 1.6, 2026-10-07): the module's nodes
+    carry only `pulse.module.id`; the pair is named in the module's own
+    load arguments."""
+
+    def __init__(self, modules: dict[str, str]):
+        self._modules = modules  # index -> Argument line
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args: list[str]) -> str:
+        self.calls.append(list(args))
+        if args[:2] == ["list", "modules"]:
+            return "\n\n".join(
+                f"Module #{i}\n\tName: module-echo-cancel\n\tArgument: {a}\n\tProperties:\n"
+                for i, a in self._modules.items()
+            )
+        kind, suffix = {"sources": ("Source", "source"), "sinks": ("Sink", "sink")}.get(
+            args[1] if len(args) > 1 else "", (None, None)
+        )
+        if args[0] == "list" and kind:
+            return "\n\n".join(
+                f"{kind} #{n}\n\tName: echo-cancel-{suffix}\n\tOwner Module: {i}\n"
+                "\tProperties:\n"
+                f'\t\tnode.name = "echo-cancel-{suffix}"\n'
+                f'\t\tpulse.module.id = "{i}"\n'
+                for n, i in enumerate(self._modules, start=1)
+            )
+        return ""
+
+
+def test_find_matches_a_pipewire_pair_by_its_module_arguments():
+    pactl = PipeWirePactl(
+        {
+            "7": "source_master=other_mic sink_master=speaker aec_method=webrtc",
+            "8": "source_master=mic sink_master=speaker aec_method=webrtc",
+        }
+    )
+    handles = SystemEchoCancel(run=pactl).find("mic", "speaker")
+
+    assert handles == EchoCancelHandles(
+        module_index="8", source_id="echo-cancel-source", sink_id="echo-cancel-sink"
+    )
+
+
+def test_ensure_on_pipewire_reuses_the_loaded_pair_instead_of_loading_another():
+    # The leak this fixes: every run loaded a module it then couldn't find.
+    pactl = PipeWirePactl({"8": "source_master=mic sink_master=speaker aec_method=webrtc"})
+
+    SystemEchoCancel(run=pactl).ensure("mic", "speaker")
+
+    assert not any(call[0] == "load-module" for call in pactl.calls)
+
+
+def test_find_ignores_an_unscoped_pipewire_module():
+    pactl = PipeWirePactl({"8": "aec_method=webrtc"})
+    assert SystemEchoCancel(run=pactl).find("mic", "speaker") is None

@@ -13,6 +13,14 @@
 //     multi-hundred-ms animation *playing* is fine, only its *start* is
 //     budgeted.
 //   unmount(): tear down, if the face is ever swapped at runtime.
+//   onEmotion(name, seconds) — OPTIONAL (2026-10-07): a short-lived
+//     feeling (blush, happy, love, sad, surprised, curious; "neutral"
+//     clears) layered on the current state and lapsing back to it after
+//     `seconds`. Sent by screen/emotion.py on core's side, never by the
+//     engine. Optional so the orb and ink faces stay valid unchanged —
+//     main.js only calls it where it exists. Size comes from the
+//     container (it can shrink beside a video or a call), so a face
+//     must draw to its container's box, not the window's.
 //
 // Three faces exist "so a real person can pick — that decision isn't ours
 // to make from intuition" (SPEC.md). Nothing else in this codebase should

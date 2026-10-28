@@ -52,7 +52,7 @@ from saathi.voice.tts.google_rest import (
     wav_pcm,
 )
 
-LANGUAGES = ("english", "chinese", "hindi", "bengali")
+LANGUAGES = ("english", "chinese")  # Hindi and Bengali removed 2026-10-09
 TOKEN = "ya29.fake-access-token-0123456789"
 PCM = b"\x01\x00" * 4800 + b"\x02\x00" * 5760  # 10560 frames at 24 kHz
 REST_CLASSES = (GoogleRestChirp3HDBackend, GoogleRestNeural2WaveNetBackend)
@@ -232,9 +232,12 @@ async def test_neural2_over_rest_posts_the_wavenet_voice_where_google_has_no_neu
     fake = FakeTextToSpeech()
     async with serving(fake) as url:
         backend, _ = rest_backend(GoogleRestNeural2WaveNetBackend, url)
-        wavs = await call(lambda: list(backend.synthesize_stream("bengali", ["নমস্কার।"])))
+        wavs = await call(lambda: list(backend.synthesize_stream("chinese", ["你好。"])))
     assert frames(wavs[0]) == 10560
-    assert fake.requests[0]["body"]["voice"] == {"languageCode": "bn-IN", "name": "bn-IN-Wavenet-A"}
+    assert fake.requests[0]["body"]["voice"] == {
+        "languageCode": "cmn-CN",
+        "name": "cmn-CN-Wavenet-A",
+    }
     assert fake.requests[0]["body"]["audioConfig"]["audioEncoding"] == "LINEAR16"
 
 

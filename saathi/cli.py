@@ -6,7 +6,8 @@ entry point, for consistency — both are how a person on this machine
 checks the device, not library code anything else here imports.
 `saathi voice` reads or writes the one preference a person is most
 likely to want from a shell (which backend she speaks with), against the
-same database `saathi run` reads.
+same database `saathi run` reads. `saathi meds` is the staff's view of
+the medication records (saathi/medication/cli.py).
 
 `run` is split so the wiring can be tested (2026-09-26): `build_runtime()`
 constructs everything -- the store, the card/hold/media controllers, the
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -79,7 +81,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs="?",
         help="a backend id (google-chirp3-hd, piper, ...) or 'chirp'/'piper'; omit to show",
     )
+    from saathi.medication import cli as meds_cli
+
+    meds_cli.add_parser(subparsers)
+    test_resident = subparsers.add_parser(
+        "test-resident",
+        help="set this device up for the test resident, Lee Kim Tan (bed 6)",
+    )
+    test_resident.add_argument("--by", required=True, help="who is setting it up")
     args = parser.parse_args(argv)
+
+    if args.command == "meds":
+        from saathi.config import Config
+
+        return meds_cli.run(args, Config.load().data_dir)
+
+    if args.command == "test-resident":
+        return _test_resident(args.by)
 
     if args.command == "smoke":
         from saathi.smoke import cli as smoke_cli
@@ -100,6 +118,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run()
 
     return 1
+
+
+def _test_resident(by: str) -> int:
+    """The mock ward (with Lee Kim Tan in it), his companion profile and
+    his son's number on this device's identity file, and this device
+    assigned to his bed. Safe to run again."""
+    from saathi.config import Config
+    from saathi.identity.test_profile import BED, NAME, SON_NAME, SON_PHONE, apply_test_profile
+    from saathi.medication.cli import MOCK_NAME, open_store
+    from saathi.medication.emar import MockEMARAdapter
+    from saathi.medication.seed import RESIDENTS, seed
+
+    config = Config.load()
+    doses = seed(MockEMARAdapter(config.data_dir / MOCK_NAME))
+    resident = next(r for r in RESIDENTS if r.bed == BED)
+    applied = apply_test_profile(config.identity_db_path)
+    store = open_store(config.data_dir)
+    if store.assigned_resident() != resident.id:
+        store.assign(resident.id, by=by)
+    store.audit(by, "test_resident_set_up", resident.id, rules_written=applied.rules_written,
+                son_saved=applied.son_saved)
+    print(f"Mock eMAR: {len(RESIDENTS)} residents, {doses} daily doses.")
+    if applied.rules_written:
+        print(f"Profile: {applied.rules_written} things Kaki now knows about {NAME}.")
+    else:
+        print(f"Profile: already there for {NAME}; nothing rewritten.")
+    saved = "saved" if applied.son_saved else "already saved"
+    print(f"Son: {SON_NAME}, {SON_PHONE} ({saved})")
+    print(f"This device is for bed {BED}, {NAME}.")
+    return 0
 
 
 # The tools `saathi run` offers the model and the permission each one
@@ -147,6 +195,17 @@ class Runtime:
     capture_source_id: str | None = None
     notes: list[str] = field(default_factory=list)
     calling: "CallingRuntime | None" = None
+    # The free family app (call/family_runtime.py), when it is on.
+    family: Any = None
+    # The face's two other seams (2026-10-07): a short-lived emotion
+    # (screen/emotion.py -- `emotions.show("blush")` from any thread)
+    # and the phone panel the call controller reports to.
+    emotions: Any = None
+    call_panel: Any = None
+    # The echo-cancel pair and the detected speaker, kept so `_run` can
+    # route the default sink through the canceller (and back on exit).
+    aec_handles: Any = None
+    speaker_id: str | None = None
     # The /audio seam (audio/remote.py): always built, with or without
     # an engine, so the screen server always has the route to offer a
     # phone; it only does anything once a client connects.
@@ -173,8 +232,10 @@ def build_runtime() -> Runtime:
     from saathi.config import Config
     from saathi.core import Core
     from saathi.identity.store import IdentityStore
+    from saathi.screen.call_panel import CallPanel
     from saathi.screen.cards import CardController, HoldController
-    from saathi.tools.media import MediaController
+    from saathi.screen.emotion import EmotionController
+    from saathi.tools.media import MediaController, choose_result
 
     config = Config.load()
     core = Core()
@@ -197,7 +258,9 @@ def build_runtime() -> Runtime:
     hold = HoldController(cards)
     # The browser target has a taker only while the Android shell's
     # /audio socket is attached -- the one client with a watch page.
-    media = MediaController(cards=cards, browser_available=lambda: remote_audio.attached)
+    media = MediaController(
+        cards=cards, choose=choose_result, browser_available=lambda: remote_audio.attached
+    )
     runtime = Runtime(
         config=config,
         core=core,
@@ -205,6 +268,8 @@ def build_runtime() -> Runtime:
         cards=cards,
         hold=hold,
         media=media,
+        emotions=EmotionController(),
+        call_panel=CallPanel(),
         remote_audio=remote_audio,
     )
 
@@ -237,6 +302,7 @@ def build_runtime() -> Runtime:
     from saathi.tools.media import MEDIA_DESCRIPTION, make_media_tool
     from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
     from saathi.voice.engine.cascade import CascadeSession
+    from saathi.screen.emotion import EMOTIONS
     from saathi.voice.tts.registry import DEFAULT_PREFERRED_BACKEND_ID
 
     # Item G's spoken entry point. "The voice engine never executes
@@ -328,13 +394,28 @@ def build_runtime() -> Runtime:
         language_preference=threadsafe_reader(store, LANGUAGE_KEY),
         identity_store=store,
         tool_schemas=tool_schemas,
+        moods=EMOTIONS if runtime.emotions is not None else None,
+        # Read, not owned: the engine only learns *whether* music plays
+        # (to bias the transcriber and the router), never touches it.
+        media_playing=lambda: media.playing,
         # Every sentence goes through the /audio seam: to the phone when
         # one is attached, to the echo-cancelled sink otherwise.
         player=remote_audio.player,
     )
     session.on_intent(handle_intent)
+    # The reply's mood on the face (screen/emotion.py). Not a registry
+    # tool: the registry is exactly what the model is offered, and the
+    # model is never offered this -- the engine reads the mood from a
+    # tag on the reply (cascade.py's _take_mood), so it costs no tool
+    # call and no round trip. EmotionController.show() is the
+    # validation: it refuses any look the face doesn't draw.
+    on_mood = getattr(session, "on_mood", None)  # outside the VoiceSession Protocol
+    if on_mood is not None and runtime.emotions is not None:
+        on_mood(runtime.emotions.show)
     runtime.session = session
     runtime.capture_source_id = handles.source_id
+    runtime.aec_handles = handles
+    runtime.speaker_id = speaker.id
     return runtime
 
 
@@ -429,16 +510,24 @@ def _build_calling(runtime: Runtime, handles: Any) -> None:
         registry.register(tool)
         runtime.tool_schemas.append(tool_to_openai_schema(tool, CALL_CONTACT_DESCRIPTION))
 
+    # The free family app first (DECISIONS 2026-10-07): anyone paired
+    # is rung through it; Twilio below is only the fallback for people
+    # who aren't, and calling is "off" only when neither is available.
+    family = _build_family(runtime)
+
     creds = TwilioCredentials.from_env()
+    twilio_off: str | None = None
     if creds is None:
-        off("missing " + ", ".join(TwilioCredentials.missing_names()) + ".")
+        twilio_off = "missing " + ", ".join(TwilioCredentials.missing_names()) + "."
+    elif find_cloudflared() is None:
+        twilio_off = "cloudflared is not installed."
+    elif handles is None:
+        twilio_off = "no echo-cancelled microphone and speaker for the call audio."
+    if twilio_off is not None and family is None:
+        off(twilio_off)
         return
-    if find_cloudflared() is None:
-        off("cloudflared is not installed.")
-        return
-    if handles is None:
-        off("no echo-cancelled microphone and speaker for the call audio.")
-        return
+    if twilio_off is not None:
+        runtime.notes.append(f"Phone calls (Twilio) off: {twilio_off} Family app only.")
 
     from saathi.call.audio import CallAudioBridge
     from saathi.call.choosing import ChoiceFlow
@@ -457,7 +546,6 @@ def _build_calling(runtime: Runtime, handles: Any) -> None:
         make_contact_dialer,
         make_save_contact_tool,
     )
-    from saathi.tools.registry import Tool
 
     path = runtime.store.path
 
@@ -471,6 +559,21 @@ def _build_calling(runtime: Runtime, handles: Any) -> None:
         with IdentityStore(path) as own:
             write_preference(own, "country", iso)
 
+    saves = SaveFlow(path, runtime.cards, locale, on_country_confirmed=learn_country)
+    family_route = family.route if family is not None else None
+    if twilio_off is not None:
+        choices = ChoiceFlow(runtime.cards, make_contact_dialer(None, family_route))
+        flows = [saves, choices] + ([family.calls] if family is not None else [])
+        tools = [
+            (make_call_tool(None, path, choices, family=family_route), CALL_CONTACT_DESCRIPTION),
+            (make_save_contact_tool(saves), SAVE_CONTACT_DESCRIPTION),
+            (make_answer_card_tool(runtime.cards, flows), ANSWER_CARD_DESCRIPTION),
+        ]
+        for tool, description in tools:
+            registry.register(tool)
+            runtime.tool_schemas.append(tool_to_openai_schema(tool, description))
+        return
+
     tunnel = CloudflaredQuickTunnel(DEFAULT_PORT, startup_timeout=RELAY_STARTUP_SECONDS)
     controller = CallController(
         creds,
@@ -481,6 +584,8 @@ def _build_calling(runtime: Runtime, handles: Any) -> None:
         runtime.hold,
     )
     controller._server = MediaServer(controller, controller.ws_url, port=DEFAULT_PORT)
+    if runtime.call_panel is not None:
+        controller.on_view_change = runtime.call_panel.update
     calling = CallingRuntime(
         controller=controller,
         ready=threading.Event(),
@@ -504,29 +609,78 @@ def _build_calling(runtime: Runtime, handles: Any) -> None:
 
     threading.Thread(target=bring_up, name="saathi-relay", daemon=True).start()
 
-    saves = SaveFlow(path, runtime.cards, locale, on_country_confirmed=learn_country)
-    choices = ChoiceFlow(runtime.cards, make_contact_dialer(controller))
-    real_call = make_call_tool(controller, path, choices)
+    # Until the relay is up, the phone path answers "still starting
+    # up"; the family path has its own readiness (call/family_runtime.py).
+    def phone_ready() -> str | None:
+        return None if calling.ready.is_set() else (calling.reason or "Calling isn't ready.")
 
-    def _gated_call(**arguments: Any) -> dict[str, Any]:
-        if not calling.ready.is_set():
-            return _unavailable_call_tool(lambda: calling.reason).handler(**arguments)
-        return real_call.handler(**arguments)
-
-    gated_call = Tool(
-        name=real_call.name,
-        schema=real_call.schema,
-        permission=real_call.permission,
-        handler=_gated_call,
+    choices = ChoiceFlow(
+        runtime.cards, make_contact_dialer(controller, family_route, phone_ready)
     )
+    flows = [saves, choices] + ([family.calls] if family is not None else [])
+    call_tool = make_call_tool(
+        controller, path, choices, family=family_route, phone_ready=phone_ready
+    )
+    if family is None:
+        # Twilio only: the whole tool waits for the relay, as before
+        # the family app (DECISIONS 2026-09-26). With the family app on,
+        # readiness is per path instead -- a paired daughter can be rung
+        # while the phone relay is still resolving.
+        call_tool = _gated(call_tool, calling)
     tools = [
-        (gated_call, CALL_CONTACT_DESCRIPTION),
+        (call_tool, CALL_CONTACT_DESCRIPTION),
         (make_save_contact_tool(saves), SAVE_CONTACT_DESCRIPTION),
-        (make_answer_card_tool(runtime.cards, [saves, choices]), ANSWER_CARD_DESCRIPTION),
+        (make_answer_card_tool(runtime.cards, flows), ANSWER_CARD_DESCRIPTION),
     ]
     for tool, description in tools:
         registry.register(tool)
         runtime.tool_schemas.append(tool_to_openai_schema(tool, description))
+
+
+def _gated(tool, calling: CallingRuntime):
+    """`tool`, answering "unavailable" with the relay's reason until the
+    relay is up."""
+    from saathi.tools.registry import Tool
+
+    def handler(**arguments: Any) -> dict[str, Any]:
+        if not calling.ready.is_set():
+            return _unavailable_call_tool(lambda: calling.reason).handler(**arguments)
+        return tool.handler(**arguments)
+
+    return Tool(name=tool.name, schema=tool.schema, permission=tool.permission, handler=handler)
+
+
+def _build_family(runtime: Runtime):
+    """The free family app (call/family_runtime.py), or None when it is
+    not switched on (SAATHI_FAMILY_APP=on) or is misconfigured -- said in the
+    notes, never a crash. Its server and tunnel come up on a background
+    thread; the face doesn't wait."""
+    from saathi.call import family_runtime
+
+    if not family_runtime.enabled():
+        return None
+
+    def twilio_active() -> bool:
+        calling = runtime.calling
+        return calling is not None and calling.controller.active
+
+    panel = runtime.call_panel
+    try:
+        family = family_runtime.FamilyRuntime.build(
+            runtime.config.data_dir,
+            hold=runtime.hold,
+            cards=runtime.cards,
+            panel=panel.update if panel is not None else None,
+            emotions=runtime.emotions,
+            other_active=twilio_active,
+        )
+    except ValueError as exc:
+        runtime.notes.append(f"Family app off: {exc}")
+        return None
+    runtime.family = family
+    runtime.notes.extend(family.notes)
+    family.start_in_background()
+    return family
 
 
 class _NoServer:
@@ -547,6 +701,93 @@ def _twilio_client(creds):
     return RestTwilioClient(creds)
 
 
+def _wake_listener(runtime: Runtime):
+    """The "Saathi" wake word (audio/wake.py), on the same echo-cancelled
+    source the turns use. Off with SAATHI_WAKE_WORD=off, and absent when
+    there is no voice engine -- there would be nothing to wake."""
+    if runtime.session is None or runtime.capture_source_id is None:
+        return None
+    if os.environ.get("SAATHI_WAKE_WORD", "on").lower() == "off":
+        print("Wake word off (SAATHI_WAKE_WORD=off); the spacebar still works.")
+        return None
+    from saathi.audio.wake import WakeWordListener, local_transcriber
+    from saathi.voice.router import sounds_complete
+
+    source_id = runtime.capture_source_id
+    media = runtime.media
+    print('Wake word on: say "Kaki" to start talking (heard on this device only).')
+
+    def playing() -> bool:
+        return bool(media is not None and media.playing)
+
+    # While music plays the on-device transcriber is primed with the
+    # media commands, and "stop"/"louder" count as whole commands, so
+    # "Saathi, stop" ends at its short pause (audio/wake.py, router.py).
+    def prompt() -> str | None:
+        return WAKE_MEDIA_PROMPT if playing() else None
+
+    # sounds_complete: "Saathi, call Udhi" in one breath ends at its
+    # short pause instead of the endpointer's long one (audio/wake.py).
+    return lambda on_wake, should_listen: WakeWordListener(
+        source_id,
+        on_wake,
+        should_listen,
+        transcriber=local_transcriber(prompt=prompt),
+        is_complete=lambda text: sounds_complete(text, media_playing=playing()),
+    )
+
+
+WAKE_MEDIA_PROMPT = "Kaki, stop. Kaki, pause. Kaki, louder. Kaki, softer. Kaki, next."
+# Seconds she has to start a follow-up after a reply before the
+# conversation closes (screen/server.py). 0 or "off" turns it off.
+DEFAULT_FOLLOW_UP_SECONDS = 7.0
+
+
+def follow_up_seconds() -> float | None:
+    """SAATHI_FOLLOW_UP_SECONDS, or the default; None when off."""
+    raw = os.environ.get("SAATHI_FOLLOW_UP_SECONDS", "").strip().lower()
+    if not raw:
+        return DEFAULT_FOLLOW_UP_SECONDS
+    if raw in ("off", "no", "false"):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"SAATHI_FOLLOW_UP_SECONDS={raw!r} isn't a number; using the default.")
+        return DEFAULT_FOLLOW_UP_SECONDS
+    return value if value > 0 else None
+
+
+def open_after_reply() -> bool:
+    """SAATHI_OPEN_CONVERSATION=on keeps the mic open after every reply
+    (a follow-up without her name). Off by default: a video or TV in the
+    room was answered turn after turn (DECISIONS 2026-10-08)."""
+    value = os.environ.get("SAATHI_OPEN_CONVERSATION", "").strip().lower()
+    return value in ("on", "yes", "true", "1")
+
+
+def _route_default_sink(runtime: Runtime):
+    """The default sink through the echo canceller while Saathi runs
+    (audio/aec.py's route_default_through, DECISIONS 2026-10-08), so the
+    browser's music is cancelled from the mic too. Returns restore(), or
+    None. Off with SAATHI_AEC_DEFAULT_SINK=off; a failure is said and
+    the device carries on -- ducking still lowers the song."""
+    if runtime.aec_handles is None or runtime.speaker_id is None:
+        return None
+    if os.environ.get("SAATHI_AEC_DEFAULT_SINK", "on").lower() == "off":
+        return None
+    from saathi.audio.aec import SystemEchoCancel
+
+    try:
+        restore = SystemEchoCancel().route_default_through(runtime.aec_handles, runtime.speaker_id)
+    except Exception as exc:  # pactl missing, timed out
+        print(f"Couldn't route the default speaker through echo cancellation: {exc}")
+        return None
+    if restore is not None:
+        print("Default speaker routed through echo cancellation (restored on exit).")
+    return restore
+
+
 def _run() -> int:
     from saathi.screen.server import run
 
@@ -555,6 +796,11 @@ def _run() -> int:
         print(note)
     if runtime.calling is not None:
         print("Calling: starting the media server and the cloudflared tunnel in the background.")
+    restore_sink = _route_default_sink(runtime)
+    if restore_sink is not None:
+        import atexit
+
+        atexit.register(restore_sink)  # once only; also runs below on a clean exit
     run(
         runtime.core,
         runtime.config.screen_host,
@@ -565,10 +811,23 @@ def _run() -> int:
         media=runtime.media,
         cards=runtime.cards,
         hold=runtime.hold,
+        wake=_wake_listener(runtime),
+        emotions=runtime.emotions,
+        calls=runtime.call_panel,
+        family=runtime.family,
+        follow_up_seconds=follow_up_seconds() if runtime.session is not None else None,
+        open_after_reply=open_after_reply(),
         remote_audio=runtime.remote_audio,
     )
+    if restore_sink is not None:
+        try:
+            restore_sink()
+        except Exception as exc:
+            print(f"Couldn't restore the default speaker: {exc}")
     if runtime.calling is not None:
         runtime.calling.controller.shutdown()
+    if runtime.family is not None:
+        runtime.family.shutdown()
     return 0
 
 

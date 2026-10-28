@@ -31,12 +31,21 @@
 // asked for, gone the moment it's closed, nothing persisted on the
 // face. While it's open, a spacebar press is swallowed here rather than
 // starting a capture underneath it.
+//
+// 2026-10-07: `emotion` messages go to the face's optional onEmotion
+// (face.js), and the phone panel (call-panel.js) draws a call on the
+// right with an End call button whose tap goes back to the server —
+// the server, not this page, decides whether it hangs anything up.
 
 import { FACE_MODULES, DEFAULT_FACE } from "./face.js";
 import { createSettingsPanel } from "./settings-panel.js";
 import { createMediaPanel } from "./media-panel.js";
 import { createCards } from "./cards.js";
 import { createCaptions } from "./captions.js";
+import { createCallPanel } from "./call-panel.js";
+// Family-app calls (call/webrtc.py): this page is the device's WebRTC
+// end; Ctrl+P shows the pairing QR. See family-call.js.
+import { createFamilyCall } from "./family-call.js";
 
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 30000;
@@ -67,6 +76,8 @@ function connectWithReconnect(face, onMessage, isInputBlocked, onOpen) {
       const message = JSON.parse(event.data);
       if (message.type === "state") {
         face.onState(message.state);
+      } else if (message.type === "emotion" && typeof face.onEmotion === "function") {
+        face.onEmotion(message.emotion, message.seconds);
       }
       onMessage(message);
     });
@@ -105,6 +116,18 @@ function connectWithReconnect(face, onMessage, isInputBlocked, onOpen) {
     }
   }
 
+  // The cursor shows while the mouse moves and hides after it rests
+  // (style.css, html.pointer-active), so buttons stay clickable.
+  let pointerTimer = null;
+  window.addEventListener("pointermove", () => {
+    document.documentElement.classList.add("pointer-active");
+    clearTimeout(pointerTimer);
+    pointerTimer = setTimeout(
+      () => document.documentElement.classList.remove("pointer-active"),
+      3000,
+    );
+  });
+
   window.addEventListener("keydown", (event) => {
     if (event.code !== "Space" || event.repeat || holding || isInputBlocked()) return;
     event.preventDefault();
@@ -139,6 +162,24 @@ async function main() {
   // Cards (cards.js): `?demo=cards-choice|cards-confirm|cards-readback|
   // cards-holding` draws one locally, same dev-only rule as media.
   const cards = createCards(sendLater, { demo });
+  // `?demo=call-calling|call-connected` draws the phone panel locally.
+  const callPanel = createCallPanel(sendLater, { demo });
+  const familyCall = createFamilyCall(sendLater);
+  // `?demo=emotion-blush` (any EMOTION_NAMES entry) or `?demo=sleeping`
+  // shows that look, re-applied after the connect's own state message.
+  // Dev only, like the others.
+  if (demo && (demo.startsWith("emotion-") || demo === "sleeping")) {
+    const show = () => {
+      if (demo === "sleeping") {
+        face.onState("sleeping");
+      } else if (typeof face.onEmotion === "function") {
+        face.onState("idle");
+        face.onEmotion(demo.slice("emotion-".length), 15);
+      }
+    };
+    setTimeout(show, 600);
+    setInterval(show, 14000);
+  }
   transport = connectWithReconnect(
     face,
     (message) => {
@@ -146,11 +187,13 @@ async function main() {
       mediaPanel.onMessage(message);
       cards.onMessage(message);
       captions.onMessage(message);
+      callPanel.onMessage(message);
+      familyCall.onMessage(message);
     },
     // Not the media panel, and not cards: space must keep working
     // during playback (a press ducks the video) and while a card is up
     // (she can answer it by voice -- a card is never the only way).
-    () => settingsPanel.isOpen(),
+    () => settingsPanel.isOpen() || familyCall.isOpen(),
     () => mediaPanel.onConnected()
   );
 }

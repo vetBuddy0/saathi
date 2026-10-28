@@ -14,10 +14,9 @@ within budget on real hardware. None of the three run in CI; all need
 hardware CI doesn't have. They gate a deploy the way `main`'s device check
 does, just less often — before checkpoint 2 ships, not on every push.
 
-Requires the `hardware` dependency group (`uv sync --group hardware`) for
-`faster-whisper` — not a default install dependency, because nothing else
-in this file needs it and it should not slow down the check that *does*
-run everywhere.
+Uses `faster-whisper`, once a `hardware`-group extra for this check alone
+and now a default dependency because the wake word (audio/wake.py) needs
+it in every run.
 
 Only the `SystemEchoCancel` path is exercised here, not `WebrtcAec` — this
 machine has a working system echo-cancel, and building a real-time

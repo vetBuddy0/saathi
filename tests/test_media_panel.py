@@ -276,15 +276,15 @@ def test_the_first_video_does_not_start_before_its_volume_is_set(scenario):
     assert all(c[0] == "new" for c in scenario["calls_before_ready"])
     # ...then volume first (ducked: core was SPEAKING), then play.
     after = [c for c in scenario["calls_after_ready"] if c[0] != "new"]
-    assert after == [["setVolume", 14], ["playVideo"]]
+    assert after == [["setVolume", 7], ["playVideo"]]
     assert scenario["player_classes"] == ["media--panel"]
     assert scenario["title_text"] == "A"
 
 
 def test_ducking_follows_core_state_and_a_volume_change_stays_ducked(scenario):
     assert scenario["restored"] == ["setVolume", 70]
-    assert scenario["ducked"] == ["setVolume", 14]
-    assert scenario["quieter_while_listening"] == ["setVolume", 8]
+    assert scenario["ducked"] == ["setVolume", 7]
+    assert scenario["quieter_while_listening"] == ["setVolume", 4]
 
 
 def test_a_new_search_stops_the_video_and_keeps_the_results_on_screen(scenario, ended):

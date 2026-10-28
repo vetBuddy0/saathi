@@ -9,15 +9,12 @@ pipeline once, 3.6s to first audio after that. Both numbers are
 one-laptop, one-run measurements, not a benchmark; see the C comparison
 report for the real cross-backend numbers and whatever the Pi produces.
 
-Language support does not line up with `voice/language.py`'s four
-languages: Kokoro-82M ships voices for English, Spanish, French, Hindi,
-Italian, Japanese, Brazilian Portuguese, and Mandarin -- Bengali is not
-among them. `synthesize_stream()` raises a plain `ValueError` naming the
-gap rather than silently degrading to English, on the same "unavailable
-and visibly so beats silently broken" principle as `voice/language.py`
-itself. Whatever selects a backend (the Ctrl+L panel, in item C/G) needs
-to know this before offering Kokoro for Bengali, not discover it from a
-stack trace mid-turn.
+Kokoro-82M ships voices for both of `voice/language.py`'s languages
+(English and Mandarin). When that list had Bengali, which Kokoro lacks,
+`synthesize_stream()` raised a plain `ValueError` naming the gap rather
+than silently degrading to English, on the same "unavailable and
+visibly so beats silently broken" principle as `voice/language.py`
+itself; it still does for any language outside its table.
 
 Optional dependency group: `kokoro` in pyproject.toml. Not installed by
 default or in CI -- 454MB of torch is not something every contributor or
@@ -39,11 +36,9 @@ from saathi.voice.tts import TTSBackend
 _SAMPLE_RATE = 24000  # Kokoro's fixed output rate
 
 # voice/language.py's keys -> Kokoro's lang_code + a default voice id.
-# Bengali is deliberately absent -- see module docstring.
 _LANGUAGE_TO_KOKORO = {
     "english": ("a", "af_heart"),  # American English
     "chinese": ("z", "zf_xiaobei"),  # Mandarin
-    "hindi": ("h", "hf_alpha"),
 }
 
 

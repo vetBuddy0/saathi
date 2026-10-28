@@ -211,9 +211,11 @@ other entry point assumes she spoke first.
 
 ## Triggers
 
-**Spacebar** is primary in v1 (stands in for the wearable button). Once a
-conversation is open, follow-ups need no trigger — AEC is what makes an open
-mic safe. **openWakeWord** is the across-the-room fallback.
+**Spacebar** is primary in v1 (stands in for the wearable button). Her name
+starts every turn (owner, 2026-10-08): live, an open mic after each reply
+answered a video playing in the room. The only no-trigger follow-up is after
+her name alone ("Saathi" ... "Yes?"). **openWakeWord** is the across-the-room
+fallback.
 
 Local wake word is the privacy architecture, not an optimisation: nothing
 leaves the device until she asks for it. That sentence is what a care facility

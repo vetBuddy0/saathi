@@ -37,6 +37,12 @@ not `"calls"` — saving a number has no external consequence; placing a
 call does. `answer_card` inherits `"calls"`: it can complete a save or,
 in Stage 3, pick who to ring.
 
+Routing (2026-10-07): anyone paired with the free family app is rung
+through it (`call/routing.py`, `call/webrtc.py`); the phone network is
+the fallback, only when Twilio is configured and the person isn't
+paired. Paired members with no saved number are matchable by name and
+relation like any contact. The resolution order above is unchanged.
+
 Nothing in any result dict is a phone number or a SID: results are
 serialised into the model's context and logged. The read-back note is
 the one exception by design — it carries the digits *as words*, because
@@ -48,7 +54,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from saathi.call import contacts
 from saathi.call.cards import CardController
@@ -58,6 +64,7 @@ from saathi.call.match import similarity
 from saathi.call.controller import CallController
 from saathi.call.saving import SaveFlow
 from saathi.call.relay import RelayError
+from saathi.call.routing import FamilyRoute, no_phone_route
 from saathi.call.twilio import TwilioError
 from saathi.tools.registry import Tool
 
@@ -101,7 +108,7 @@ def _dial(controller: CallController, number: str, who: str) -> dict[str, Any]:
             "note": "A call is already in progress. Say so in one short sentence.",
         }
     try:
-        controller.dial(number)
+        controller.dial(number, who=who)
     except (TwilioError, RelayError) as exc:
         # RelayError too (TODO M5): a tunnel that died is a plain "not
         # just now", never a turn lost to an untranslated exception.
@@ -122,31 +129,83 @@ def _dial(controller: CallController, number: str, who: str) -> dict[str, Any]:
     }
 
 
-def make_contact_dialer(controller: CallController):
+def route_call(
+    controller: CallController | None,
+    family: FamilyRoute | None,
+    contact: contacts.Contact,
+    phone_ready: Callable[[], str | None] | None = None,
+) -> dict[str, Any]:
+    """The family app if `contact` is paired, else the phone network if
+    it is configured and ready (DECISIONS 2026-10-07, `call/routing.py`).
+    `phone_ready()` is None when Twilio can dial, else why not."""
+    if family is not None:
+        result = family.dial(contact.name)
+        if result is not None:
+            return result
+    if controller is None or not contact.phone:
+        return no_phone_route(contact.name)
+    if family is not None and family.active:
+        return {
+            "status": "busy",
+            "note": "A call is already in progress. Say so in one short sentence.",
+        }
+    reason = phone_ready() if phone_ready is not None else None
+    if reason:
+        return {
+            "status": "unavailable",
+            "note": f"{reason} Say so plainly in one short sentence; don't offer to try.",
+        }
+    return _dial(controller, contact.phone, contact.name)
+
+
+def make_contact_dialer(
+    controller: CallController | None,
+    family: FamilyRoute | None = None,
+    phone_ready: Callable[[], str | None] | None = None,
+):
     """What `ChoiceFlow` calls once she has picked someone — the same
-    `_dial` path as a confident match, so the note and the busy/error
-    handling can't drift apart."""
+    `route_call` path as a confident match, so the note and the
+    busy/error handling can't drift apart."""
 
     def dial(contact: contacts.Contact) -> dict[str, Any]:
-        return _dial(controller, contact.phone, contact.name)
+        return route_call(controller, family, contact, phone_ready)
 
     return dial
 
 
 def make_call_tool(
-    controller: CallController,
+    controller: CallController | None,
     store_path: Path | None = None,
     choices: ChoiceFlow | None = None,
+    family: FamilyRoute | None = None,
+    phone_ready: Callable[[], str | None] | None = None,
 ) -> Tool:
     """`store_path=None` is Stage 1 behaviour: only the test number.
     Without `choices`, an unsure match is answered as no match — never
-    dialled."""
+    dialled. `controller=None`: no phone network (Twilio isn't set up),
+    so only paired family members can be rung. `family`: the free
+    family app, tried first for anyone paired (`call/routing.py`)."""
+
+    def _route(contact: contacts.Contact) -> dict[str, Any]:
+        return route_call(controller, family, contact, phone_ready)
+
+    def _candidates() -> list[contacts.Contact]:
+        saved = contacts.list_contacts(store_path)
+        return family.contacts(saved) if family is not None else saved
 
     def _call_contact(contact: str) -> dict[str, Any]:
         contact = (contact or "").strip()
         # Her words, never a number: what a mis-dial is debugged from.
         logger.info("call_contact asked for %r", contact)
         if _TEST_NUMBER_RE.search(contact):
+            if controller is None:
+                return no_phone_route("The test number")
+            reason = phone_ready() if phone_ready is not None else None
+            if reason:
+                return {
+                    "status": "unavailable",
+                    "note": f"{reason} Say so plainly in one short sentence; don't offer to try.",
+                }
             if controller.active:
                 return _dial(controller, "", "the test number")
             try:
@@ -176,13 +235,17 @@ def make_call_tool(
                     "number can be called. Say so in one short, warm sentence."
                 ),
             }
+        candidates = _candidates()
         if contacts.is_known_relation(contact):
             related = contacts.find_by_relation(store_path, contact)
+            if related is None and family is not None:
+                wanted = contacts.normalise_relation(contact)
+                related = next((c for c in candidates if wanted in c.relations), None)
             if related is not None:
-                return _dial(controller, related.phone, related.name)
-        result = match_name(contact, contacts.list_contacts(store_path), lambda c: c.name)
+                return _route(related)
+        result = match_name(contact, candidates, lambda c: c.name)
         if result.band == "confident":
-            return _dial(controller, result.best.phone, result.best.name)
+            return _route(result.best)
         if result.band == "unsure" and choices is not None:
             return choices.offer(contact, result.choices())
         # Nothing matched, but she has saved contacts: ask from them rather
@@ -194,7 +257,7 @@ def make_call_tool(
         # otherwise never on the card (live, 2026-10-05). Ties keep
         # saved order.
         saved = sorted(
-            contacts.list_contacts(store_path),
+            candidates,
             key=lambda c: similarity(contact, c.name),
             reverse=True,
         )

@@ -36,6 +36,14 @@ server's executor thread (tool handlers do); `stream_started`/
 `inbound_audio`/`stream_stopped` run on the media server's loop thread;
 `hangup()` runs on whichever thread the hold seam fires from. One lock
 around state; audio callbacks never take it.
+
+The screen (2026-10-07): `on_view_change` reports what the phone panel
+beside the face shows -- who, their number, calling/ringing/connected
+and when it was answered -- as a `screen/call_panel.py` `CallView`, or
+None when the call is over. Fired under the lock, so the receiver must
+not block or call back in (the panel only queues a broadcast). Ringing
+comes from the same ring watcher that already polls Twilio; no extra
+request is made for it.
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ from saathi.call.audio import CallAudio
 from saathi.call.hangup import HANGUP_HOLD_SECONDS, HANGUP_LABEL, HoldSeam
 from saathi.call.relay import Relay
 from saathi.call.twilio import TwilioClient, TwilioCredentials, TwilioError, sanitize
+from saathi.screen.call_panel import CallView
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +110,11 @@ class CallController:
         self._audio: CallAudio | None = None
         self._prepared = False
         self.on_state_change: Callable[[CallState], None] | None = None
+        self.on_view_change: Callable[[CallView | None], None] | None = None
+        self._who: str = ""
+        self._number: str = ""
+        self._ringing = False
+        self._connected_at: float | None = None
         self._ring_timeout = float(ring_timeout_seconds)
         self._poll_interval = float(poll_interval_seconds)
         self._clock = clock
@@ -128,10 +142,39 @@ class CallController:
     def audio(self) -> CallAudio | None:
         return self._audio
 
+    def view(self) -> CallView | None:
+        """What the phone panel shows now; None when there is no call."""
+        if self._state is CallState.IDLE:
+            return None
+        if self._state is CallState.IN_CALL:
+            status = "connected"
+        else:
+            status = "ringing" if self._ringing else "calling"
+        return CallView(
+            name=self._who,
+            number=self._number,
+            status=status,
+            connected_at=self._connected_at,
+        )
+
+    def _notify_view(self) -> None:
+        if self.on_view_change is None:
+            return
+        try:
+            self.on_view_change(self.view())
+        except Exception:
+            # The screen is a mirror; a failure drawing it must never
+            # take down a call or leave the lock state half-changed.
+            logger.exception("call panel update failed")
+
     def _set_state(self, state: CallState) -> None:
         self._state = state
+        if state is CallState.IDLE:
+            self._ringing = False
+            self._connected_at = None
         if self.on_state_change is not None:
             self.on_state_change(state)
+        self._notify_view()
 
     # -- URLs --------------------------------------------------------------
 
@@ -166,10 +209,11 @@ class CallController:
 
     # -- dialling ----------------------------------------------------------
 
-    def dial(self, to_number: str) -> str:
+    def dial(self, to_number: str, who: str | None = None) -> str:
         """Places the call; returns the CallSid. Raises `TwilioError`
         (sanitized) on any failure, including from an injected client
-        that puts a URL or a number in its message."""
+        that puts a URL or a number in its message. `who` is the name
+        the phone panel shows (the number alone when not given)."""
         with self._lock:
             if self._state is not CallState.IDLE:
                 raise TwilioError("a call is already in progress")
@@ -181,6 +225,10 @@ class CallController:
             except BaseException as exc:
                 raise sanitize("create call", exc) from None
             self._call_sid = sid
+            self._who = (who or "").strip()
+            self._number = to_number
+            self._ringing = False
+            self._connected_at = None
             self._set_state(CallState.DIALLING)
             self._start_watch_locked(sid)
         self._hold.set_handler(self.hangup, seconds=HANGUP_HOLD_SECONDS, label=HANGUP_LABEL)
@@ -217,6 +265,12 @@ class CallController:
             except BaseException as exc:
                 logger.warning("%s", sanitize("fetch call", exc))
                 status = ""
+            if status == "ringing":
+                with self._lock:
+                    if self._state is CallState.DIALLING and self._call_sid == sid:
+                        if not self._ringing:
+                            self._ringing = True
+                            self._notify_view()
             if status in TERMINAL_STATUSES:
                 reason = status
             elif self._clock() - started_at >= self._ring_timeout:
@@ -233,7 +287,7 @@ class CallController:
             return
 
     def dial_test_number(self) -> str:
-        return self.dial(self._credentials.test_number)
+        return self.dial(self._credentials.test_number, who="Test call")
 
     # -- StreamHandler (media server's loop thread) --------------------------
 
@@ -252,6 +306,8 @@ class CallController:
             self._audio = self._audio_factory()
             self._audio.start(send_outbound)
             self._stop_watch_locked()  # answered: the stream owns the call's end now
+            if self._connected_at is None:
+                self._connected_at = self._clock()
             self._set_state(CallState.IN_CALL)
         logger.info("call stream open")
 

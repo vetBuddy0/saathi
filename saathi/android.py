@@ -368,6 +368,10 @@ async def _serve_until_stopped(engine: _Engine) -> None:
             cards=runtime.cards,
             hold=runtime.hold,
             remote_audio=runtime.remote_audio,
+            # The face's moods (screen/emotion.py): the session already
+            # asks the model for them, so without this seam the phone's
+            # eyes would never show what the laptop's do.
+            emotions=runtime.emotions,
         )
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_SECONDS)
         await runner.setup()

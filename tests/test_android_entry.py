@@ -351,6 +351,24 @@ def test_a_server_that_dies_on_its_own_thread_is_reported_with_its_reason(entry,
     assert "SAATHI_AUDIO" not in os.environ
 
 
+def test_the_phones_face_gets_the_same_moods_as_the_laptops(entry, monkeypatch):
+    import saathi.screen.server as server_module
+
+    seen = {}
+    real = server_module.build_app
+
+    def spy(core, **kwargs):
+        seen.update(kwargs)
+        return real(core, **kwargs)
+
+    monkeypatch.setattr(server_module, "build_app", spy)
+    android.start({"data_dir": str(entry), "port": 0, "keys": FAKE_KEYS})
+    try:
+        assert seen["emotions"] is android._running.runtime.emotions is not None
+    finally:
+        android.stop()
+
+
 # -- stop --------------------------------------------------------------------------
 
 

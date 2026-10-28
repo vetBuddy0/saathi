@@ -24,7 +24,7 @@ from saathi.voice.tts.google_backend import (
     pcm_to_wav,
 )
 
-LANGUAGES = ("english", "chinese", "hindi", "bengali")
+LANGUAGES = ("english", "chinese")
 
 
 def test_google_backends_report_unavailable_when_the_client_library_is_missing(monkeypatch):
@@ -89,12 +89,11 @@ def test_neural2_backend_voice_matches_the_language_code_it_sends():
 
 
 def test_neural2_backend_uses_wavenet_where_google_has_no_neural2_voice():
-    # cmn-CN and bn-IN have no Neural2 voices at all (list_voices(),
+    # cmn-CN has no Neural2 voices at all (list_voices(),
     # Singapore endpoint, 2026-09-25) -- WaveNet is the honest fallback
     # within the same class, not a fabricated voice name.
     backend = GoogleNeural2WaveNetBackend()
     assert "Wavenet" in backend.voice_for("chinese")[0]
-    assert "Wavenet" in backend.voice_for("bengali")[0]
     assert "Neural2" in backend.voice_for("english")[0]
 
 

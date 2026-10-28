@@ -7,6 +7,20 @@ later): everything downstream gets exactly `chunk_bytes` bytes at a time,
 16kHz mono 16-bit PCM, so it never needs to know or care that this is
 PulseAudio underneath. Runs via `parec` (the raw streaming client), not
 `parecord` (which writes a WAV file) — there is no file, only a live pipe.
+
+Contested — `parec` is always started with a short latency
+(`--latency-msec`). Without one, PulseAudio (and PipeWire's pulse
+server, `pulse.default.frag` = 2 s) picks its default fragment size and
+delivers audio in **2-second bursts**: measured on the 800-series laptop
+(2026-10-07), a bare `parec` handed over 64,000 bytes at 2.0 s, 4.0 s and
+6.0 s; with `--latency-msec=20`, 640 bytes every ~20 ms. The bursts were
+the hidden cost behind three complaints at once: the wake word could not
+see that "Saathi" had ended until the next burst (0-2 s late), a
+hands-free turn's endpointer could only end on a burst boundary (the
+`turns.eou_ms` values clustered at 2,000/4,000/8,000 ms), and releasing
+the spacebar killed `parec` with up to 2 s of her last words still
+undelivered. The option that lost was a larger chunk read on our side:
+the delay is in the server's fragment, not in how we read the pipe.
 """
 
 from __future__ import annotations
@@ -16,6 +30,21 @@ import threading
 from typing import BinaryIO, Callable, Iterator
 
 SAMPLE_RATE = 16000
+# Fragment size asked of the sound server. Under the 32 ms VAD frame, so
+# a frame is never waiting on the server; small enough that stopping a
+# capture loses at most a few tens of ms. See the module docstring.
+LATENCY_MSEC = 20
+
+
+def parec_command(source_id: str) -> list[str]:
+    return [
+        "parec",
+        f"--device={source_id}",
+        f"--rate={SAMPLE_RATE}",
+        "--channels=1",
+        "--format=s16le",
+        f"--latency-msec={LATENCY_MSEC}",
+    ]
 
 
 def read_fixed_chunks(stream: BinaryIO, chunk_bytes: int) -> Iterator[bytes]:
@@ -49,13 +78,7 @@ class Capture:
 
     def start(self) -> None:
         self._proc = subprocess.Popen(
-            [
-                "parec",
-                f"--device={self._source_id}",
-                f"--rate={SAMPLE_RATE}",
-                "--channels=1",
-                "--format=s16le",
-            ],
+            parec_command(self._source_id),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
