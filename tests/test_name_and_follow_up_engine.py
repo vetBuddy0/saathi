@@ -10,7 +10,6 @@ import pytest
 
 import saathi.voice.engine.cascade as cascade_module
 from saathi.voice.engine.cascade import (
-    MEDIA_STT_PROMPT,
     NAME_PROMPTS,
     CascadeSession,
 )
@@ -103,15 +102,13 @@ def test_the_name_prompt_varies_and_speaks_her_language():
     assert session.name_prompt() in NAME_PROMPTS["chinese"]
 
 
-def test_while_music_plays_the_transcriber_is_primed_with_media_commands():
-    playing = {"value": True}
+def test_the_transcriber_is_never_primed_even_while_music_plays():
+    # The media-command prompt was reverted (2026-10-29): Whisper echoes
+    # a prompt's words back on unclear audio.
     client = FakeClient(heard="what's this song", reply="Shape of You.")
-    session = _session(client, media_playing=lambda: playing["value"])
+    session = _session(client, media_playing=lambda: True)
     _turn(session)
-    assert client.audio.transcriptions.calls[0]["prompt"] == MEDIA_STT_PROMPT
-    playing["value"] = False
-    _turn(session)
-    assert "prompt" not in client.audio.transcriptions.calls[1]
+    assert "prompt" not in client.audio.transcriptions.calls[0]
 
 
 def test_kaki_stop_mid_song_is_routed_without_the_model():

@@ -190,15 +190,6 @@ NAME_PROMPTS: dict[str, tuple[str, ...]] = {
     "chinese": ("嗯？", "我在呢。", "我在听。"),
 }
 
-# The cloud transcriber's bias while music is playing: the words she is
-# most likely to say over it, spelled the way the router matches them.
-# Only while something plays -- a prompt nudges every transcript toward
-# its words, and "stop" is not what she usually means.
-MEDIA_STT_PROMPT = (
-    "Kaki, stop. Kaki, pause. Resume. Volume up. Volume down. "
-    "Louder. Softer. Next song."
-)
-
 # A reply's leading mood tag; see CascadeSession._take_mood().
 _MOOD_TAG = re.compile(r"^\s*\[\s*([A-Za-z]+)\s*\]\s*")
 
@@ -718,9 +709,11 @@ class CascadeSession:
         hears her, OpenAI covers for it). Returns the transcription and
         whether it carries a detected language."""
         provider = self._provider
-        # Only passed when there is one: an absent prompt is the
-        # transcriber's own default, exactly as before.
-        bias = {"prompt": MEDIA_STT_PROMPT} if self._media_playing_now() else {}
+        # No prompt, ever (2026-10-29, owner): the media-command prompt
+        # passed while music played was reverted with the rest of the
+        # udhibranch YouTube changes -- Whisper answers unclear audio with
+        # its prompt's own words (the "Kaki." hint, below, did the same).
+        bias: dict[str, str] = {}
         # Never a hint with her name in it on a wake turn: tried
         # 2026-10-09, and Whisper answered unclear speech with the hint
         # itself ("Kaki."), which read as her calling and opened the
@@ -856,6 +849,18 @@ class CascadeSession:
             return ""
         heard = strip_wake_word(heard, loose=self._started_by_name) or heard
         self.last_heard = heard
+        # Her words with the audio they came from, every turn: a reply that
+        # makes no sense is traced to a mishearing (a quiet or noisy clip),
+        # or to the model, only from this line (2026-10-29, tablet replies
+        # "unrelated to what I'm doing"). Same rule as tools/calling.py's
+        # log of her words: on this device's own log, never sent anywhere.
+        logger.info(
+            "heard %r (%.1fs of audio, rms %d, stt %d ms)",
+            heard[:200],
+            len(pcm) / 32000,
+            _rms(pcm),
+            self._pending_stt_ms or 0,
+        )
         # No per-turn detection (2026-10-09, owner): the transcriber was
         # told her language, so the transcript can't name another one.
         # Her language changes only when she or the panel says so.

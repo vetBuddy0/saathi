@@ -407,14 +407,6 @@ def test_without_an_echo_cancelled_pair_calling_is_unavailable(calling_seams):
     assert reply["status"] == "unavailable" and "echo-cancel" in reply["note"]
 
 
-def test_the_media_controller_plays_the_most_relevant_result_directly(wired):
-    # 2026-10-08: the owner's rule is what `saathi run` wires, not the
-    # controller's ask-every-time default.
-    from saathi.tools.media import choose_result
-
-    assert wired.media._choose is choose_result
-
-
 def test_the_session_learns_whether_music_is_playing(wired):
     session = FakeCascadeSession.instances[-1]
     assert session.kwargs["media_playing"]() is False

@@ -238,7 +238,7 @@ def build_runtime() -> Runtime:
     from saathi.screen.call_panel import CallPanel
     from saathi.screen.cards import CardController, HoldController
     from saathi.screen.emotion import EmotionController
-    from saathi.tools.media import MediaController, choose_result
+    from saathi.tools.media import MediaController
 
     config = Config.load()
     core = Core()
@@ -261,9 +261,9 @@ def build_runtime() -> Runtime:
     hold = HoldController(cards)
     # The browser target has a taker only while the Android shell's
     # /audio socket is attached -- the one client with a watch page.
-    media = MediaController(
-        cards=cards, choose=choose_result, browser_available=lambda: remote_audio.attached
-    )
+    # Every search offers its results to choose from: the pre-udhibranch
+    # behaviour, restored by the owner on 2026-10-29 (DECISIONS.md).
+    media = MediaController(cards=cards, browser_available=lambda: remote_audio.attached)
     runtime = Runtime(
         config=config,
         core=core,

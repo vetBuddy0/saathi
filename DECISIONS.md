@@ -3783,3 +3783,19 @@ WebView cached them heuristically for years. `screen/server.py` now sends
 left behind. Lost: `no-cache` with revalidation (the ETag from a frozen
 mtime misses a same-size edit) and versioned file names (every import in
 the face would change).
+
+**2026-10-29 — The udhibranch YouTube changes are reverted; the rest of
+the merge stays.** The owner: YouTube on the tablet "is not functioning
+properly", go back to the previous commit for that part only.
+`tools/media.py` and `static/js/media-policy.js` (and their tests) are
+d9a00e1's again: a search offers up to three results to choose from
+instead of `choose_result` playing the top one, and the duck is back to a
+fifth in listening/thinking/speaking, not a tenth from `attentive`.
+`test_media_choosing.py` went with `choose_result`. The transcriber's
+media-command prompt while music plays (`MEDIA_STT_PROMPT`) is gone too:
+Whisper answers unclear audio with a prompt's own words, a suspect for the
+"gibberish" replies. Kept: the router's extra media phrases and mid-song
+"Kaki, stop" (tangled with the Kaki rename; additive), the server's
+media-aware follow-up window (inactive in remote mode). Also: every turn
+now logs what was heard with the clip's length and loudness, so a reply
+that makes no sense can be traced to a mishearing or to the model.
