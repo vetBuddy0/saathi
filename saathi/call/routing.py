@@ -21,11 +21,16 @@ only through the registry's permission check, calls `dial()`.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from saathi.call.contacts import Contact, normalise_name
-from saathi.call.family import FamilyRegistry
-from saathi.call.webrtc import FamilyCalls
+
+if TYPE_CHECKING:
+    # Annotations only. Importing them for real pulls in call/push.py's
+    # Cryptodome, which the APK does not carry -- and `tools/calling.py`
+    # imports this module on every device, the phone included.
+    from saathi.call.family import FamilyRegistry
+    from saathi.call.webrtc import FamilyCalls
 
 # Synthetic ids for paired-only members, below any real entity id, so a
 # Contact built here can never be mistaken for a row in her memory.

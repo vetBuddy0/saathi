@@ -46,6 +46,10 @@ ABSENT_ON_ANDROID = (
     "faster_whisper",
     "kokoro",
     "torch",
+    # udhibranch's family app: Web Push crypto and the pairing QR code.
+    # Neither is in the APK's pip list (DECISIONS 2026-10-12).
+    "Cryptodome",
+    "segno",
 )
 
 

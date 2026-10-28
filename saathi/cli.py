@@ -655,7 +655,13 @@ def _build_family(runtime: Runtime):
     not switched on (SAATHI_FAMILY_APP=on) or is misconfigured -- said in the
     notes, never a crash. Its server and tunnel come up on a background
     thread; the face doesn't wait."""
-    from saathi.call import family_runtime
+    try:
+        from saathi.call import family_runtime
+    except ImportError as exc:
+        # The APK carries neither Cryptodome (push) nor segno (the QR);
+        # the phone then has no family app, and says why.
+        runtime.notes.append(f"Family app off: {exc}")
+        return None
 
     if not family_runtime.enabled():
         return None
