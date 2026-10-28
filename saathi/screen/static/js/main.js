@@ -46,6 +46,9 @@ import { createCallPanel } from "./call-panel.js";
 // Family-app calls (call/webrtc.py): this page is the device's WebRTC
 // end; Ctrl+P shows the pairing QR. See family-call.js.
 import { createFamilyCall } from "./family-call.js";
+// Twilio calls from this page when the engine runs in the Android app
+// (call/web_phone.py). Does nothing unless the engine hands out a token.
+import { createTwilioPhone } from "./twilio-phone.js";
 
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 30000;
@@ -165,6 +168,7 @@ async function main() {
   // `?demo=call-calling|call-connected` draws the phone panel locally.
   const callPanel = createCallPanel(sendLater, { demo });
   const familyCall = createFamilyCall(sendLater);
+  const twilioPhone = createTwilioPhone(sendLater);
   // `?demo=emotion-blush` (any EMOTION_NAMES entry) or `?demo=sleeping`
   // shows that look, re-applied after the connect's own state message.
   // Dev only, like the others.
@@ -189,12 +193,16 @@ async function main() {
       captions.onMessage(message);
       callPanel.onMessage(message);
       familyCall.onMessage(message);
+      twilioPhone.onMessage(message);
     },
     // Not the media panel, and not cards: space must keep working
     // during playback (a press ducks the video) and while a card is up
     // (she can answer it by voice -- a card is never the only way).
     () => settingsPanel.isOpen() || familyCall.isOpen(),
-    () => mediaPanel.onConnected()
+    () => {
+      mediaPanel.onConnected();
+      twilioPhone.onConnected();
+    }
   );
 }
 

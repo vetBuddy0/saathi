@@ -162,7 +162,7 @@ class KeysTest {
     }
 
     @Test
-    fun theNamesAreTheNineTheEngineReadsInTheDialogsOrder() {
+    fun theNamesAreTheTenTheEngineReadsInTheDialogsOrder() {
         assertEquals(
             listOf(
                 "OPENAI_API_KEY",
@@ -174,6 +174,7 @@ class KeysTest {
                 "TWILIO_API_SECRET",
                 "TWILIO_FROM_NUMBER",
                 "TWILIO_TEST_NUMBER",
+                "TWILIO_TWIML_APP_SID",
             ),
             Keys.NAMES,
         )

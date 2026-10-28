@@ -343,14 +343,13 @@ def build_runtime() -> Runtime:
         # RemoteAudio, and a press with no client attached starts
         # nothing and ends as a silent turn. No Twilio here: no
         # cloudflared on a phone, no echo-cancelled pair for its audio.
-        # Calls go over the device's own SIM instead, placed by the shell.
-        from saathi.call.device_phone import DevicePhone
-
+        # Calls go through Twilio from the face page when a TwiML App is
+        # set (call/web_phone.py), else over the device's own SIM.
         runtime.notes.append(
             "Audio is remote (SAATHI_AUDIO=remote): the /audio client is the microphone "
             "and the speaker; no local device is probed."
         )
-        runtime.device_phone = DevicePhone()
+        runtime.device_phone = _remote_phone(runtime)
         _build_calling(runtime, None, runtime.device_phone)
         session = CascadeSession(
             REMOTE_SINK_ID,
@@ -537,7 +536,7 @@ def _build_calling(runtime: Runtime, handles: Any, device_phone: Any = None) -> 
         return
     if twilio_off is not None:
         fallback = (
-            "Calls use this device's SIM." if device_phone is not None else "Family app only."
+            f"Calls use {device_phone.route}." if device_phone is not None else "Family app only."
         )
         runtime.notes.append(f"Phone calls (Twilio) off: {twilio_off} {fallback}")
 
@@ -655,6 +654,30 @@ def _build_calling(runtime: Runtime, handles: Any, device_phone: Any = None) -> 
     for tool, description in tools:
         registry.register(tool)
         runtime.tool_schemas.append(tool_to_openai_schema(tool, description))
+
+
+def _remote_phone(runtime: Runtime):
+    """Remote mode's calling route: Twilio from the face page when the
+    Twilio keys and a TwiML App are set (call/web_phone.py, the owner's
+    choice for the demo, 2026-10-28), else the device's SIM
+    (call/device_phone.py)."""
+    from saathi.call.device_phone import DevicePhone
+    from saathi.call.twilio import TwilioCredentials
+    from saathi.call.web_phone import APP_SID_VAR, WebPhone, app_sid_from_env
+
+    creds = TwilioCredentials.from_env()
+    app_sid = app_sid_from_env()
+    if creds is not None and app_sid is not None:
+        panel = runtime.call_panel
+        return WebPhone(
+            creds,
+            app_sid,
+            panel=panel.update if panel is not None else None,
+            hold=runtime.hold,
+        )
+    if creds is not None:
+        runtime.notes.append(f"Twilio calls need {APP_SID_VAR} too; using the SIM.")
+    return DevicePhone()
 
 
 def _gated(tool, calling: CallingRuntime):

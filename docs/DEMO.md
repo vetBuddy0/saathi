@@ -126,6 +126,36 @@ Hold nothing — tap space, speak, and it answers.
   unanswered call clears itself after 45 s.
 - Keep the phone away from the laptop, or it howls.
 
+**Calling on the Android app through Twilio (2026-10-28).** The face
+page places the call itself (Twilio's Voice JS SDK, bundled), so no SIM,
+no laptop and no tunnel. Twilio dials her son from your Twilio number.
+Set up once in the Twilio console:
+1. **TwiML Bin** (Develop -> TwiML Bins -> Create), friendly name
+   `saathi-dial`, with your Twilio number as the caller ID:
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <Response>
+     <Dial answerOnBridge="true" callerId="+1XXXXXXXXXX">
+       <Number>{{To}}</Number>
+     </Dial>
+   </Response>
+   ```
+   Save, and copy its URL (`https://handler.twilio.com/twiml/EH...`).
+   `answerOnBridge` is what makes the panel say Connected only when he
+   actually picks up.
+2. **TwiML App** (Voice -> TwiML Apps -> Create): Voice Request URL =
+   the Bin's URL, method POST. Copy its SID (`AP...`).
+3. On the tablet's keys page (long-press the face): the five `TWILIO_*`
+   keys as for the laptop (an **API key** SID/secret, not the auth
+   token), plus `TWILIO_TWIML_APP_SID` = the `AP...` SID. Save.
+4. A **trial** Twilio account can only call numbers verified in the
+   console (Phone Numbers -> Verified Caller IDs): verify the son's.
+5. Allow the microphone when the app asks.
+"Call my son" then: she hears "Calling Udhi.", the phone panel shows
+Calling -> Ringing -> Connected with a timer, and the red End call button
+(or holding the talk button 2 s) hangs up. Without `TWILIO_TWIML_APP_SID`
+the app falls back to the SIM route below.
+
 **Calling on the Android app (2026-10-28): the device's own SIM.**
 With the engine inside the app, "call my son" rings a normal phone call
 from the tablet's SIM, on speaker, after she hears "Calling Udhi.".

@@ -190,6 +190,9 @@ class Keys internal constructor(
         const val TWILIO_FROM_NUMBER = "TWILIO_FROM_NUMBER"
         const val TWILIO_TEST_NUMBER = "TWILIO_TEST_NUMBER"
 
+        /** The TwiML App the face page's Twilio calls dial through (`call/web_phone.py`). */
+        const val TWILIO_TWIML_APP_SID = "TWILIO_TWIML_APP_SID"
+
         /** The names the engine reads (`saathi/android.py` refuses any other), in the order the dialog lists them. */
         val NAMES: List<String> = listOf(
             OPENAI_API_KEY,
@@ -201,6 +204,7 @@ class Keys internal constructor(
             TWILIO_API_SECRET,
             TWILIO_FROM_NUMBER,
             TWILIO_TEST_NUMBER,
+            TWILIO_TWIML_APP_SID,
         )
 
         /** One of these is needed for the engine to think at all: OpenAI if set, else Groq (`provider.py`). */

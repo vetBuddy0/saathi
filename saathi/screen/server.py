@@ -151,6 +151,11 @@ screen; the face page ignores it, the Android shell places the call)
 rides the broadcast seam too. `{"type": "phone_status", "can_call":
 bool}` (shell -> server, on every open) is the shell saying whether it
 can; a closed socket takes its yes with it. The server only carries both.
+With Twilio from the face page (`call/web_phone.py`) the same frames carry
+`"via": "twilio"`, the page reports `{"type": "phone_event", ...}`, and
+`GET /phone/token` hands it a Twilio access token -- to loopback callers
+only: the token can place calls, and the page that may use it is the one
+on this device (a LAN address isn't a secure context, so no microphone).
 
 The open conversation (2026-10-08, `follow_up_seconds`): after a spoken
 reply the turn ends in ATTENTIVE, not IDLE, with a hands-free
@@ -1154,8 +1159,18 @@ def build_app(
                     continue
                 if payload.get("type") == "phone_status":
                     can_call = payload.get("can_call")
-                    if phone is not None and isinstance(can_call, bool):
-                        phone.on_status(ws, can_call)
+                    via = payload.get("via")
+                    if (
+                        phone is not None
+                        and isinstance(can_call, bool)
+                        and (via is None or isinstance(via, str))
+                    ):
+                        phone.on_status(ws, can_call, via)
+                    continue
+                if payload.get("type") == "phone_event":
+                    # The face page's Twilio call reporting (web_phone.py).
+                    if phone is not None and hasattr(phone, "on_event"):
+                        phone.on_event(payload)
                     continue
                 if payload.get("type") == "rtc":
                     # The kiosk's half of a family-app call (offer, ICE,
@@ -1261,6 +1276,16 @@ def build_app(
 
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
+    if phone is not None and hasattr(phone, "token"):
+
+        async def phone_token(request: web.Request) -> web.Response:
+            # Loopback only (module docstring): the token places calls.
+            if request.remote not in ("127.0.0.1", "::1"):
+                raise web.HTTPForbidden()
+            token = await asyncio.get_running_loop().run_in_executor(None, phone.token)
+            return web.json_response({"token": token}, headers={"Cache-Control": "no-store"})
+
+        app.router.add_get("/phone/token", phone_token)
     if family is not None:
         # Ctrl+P's pairing QR: loopback-only, never on the tunnelled app.
         family.install_local_routes(app)

@@ -54,7 +54,7 @@ class PhoneCalls(
     }
 
     fun onPhone(message: PhoneMessage) {
-        if (message.action != Protocol.PHONE_DIAL) return
+        if (message.action != Protocol.PHONE_DIAL || !message.isForSim) return
         val number = message.number?.trim().orEmpty()
         if (number.isEmpty()) return
         pending = number

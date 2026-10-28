@@ -96,6 +96,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -312,7 +313,7 @@ class MainActivity : AppCompatActivity() {
         web.isLongClickable = false
         web.isHapticFeedbackEnabled = false
         web.webViewClient = FacePages()
-        web.webChromeClient = WebChromeClient()
+        web.webChromeClient = FaceChrome()
     }
 
     /** The face from the engine in use with a fresh retry clock: when an engine is chosen, and after the setup dialog saves. */
@@ -436,6 +437,26 @@ class MainActivity : AppCompatActivity() {
         override fun onDisconnected() {
             media.onDisconnected()
             pushToTalk.cancel()
+        }
+    }
+
+    /**
+     * The microphone for the face page's Twilio calls (`twilio-phone.js`):
+     * granted only to the engine's own page, only for audio, and only
+     * when the app holds RECORD_AUDIO. Anything else is denied, as the
+     * YouTube pane denies everything.
+     */
+    private inner class FaceChrome : WebChromeClient() {
+        override fun onPermissionRequest(request: PermissionRequest) {
+            val engine = engineUrl
+            val fromEngine = engine != null && request.origin.toString().trimEnd('/') == engine.trimEnd('/')
+            val audioOnly = request.resources.all { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+            if (fromEngine && audioOnly && hasPermission(Manifest.permission.RECORD_AUDIO)) {
+                request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            } else {
+                Log.w(TAG, "face page permission denied: ${request.resources.joinToString()}")
+                request.deny()
+            }
         }
     }
 

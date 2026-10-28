@@ -90,6 +90,16 @@ class PhoneCallsTest {
     }
 
     @Test
+    fun aTwilioDialIsTheFacePagesAndNeverRingsTheSim() {
+        calls.onPhone(PhoneMessage(Protocol.PHONE_DIAL, "+6589614304", via = "twilio"))
+        scheduler.run()
+        assertEquals(emptyList<String>(), dialer.placed)
+        calls.onPhone(PhoneMessage(Protocol.PHONE_DIAL, "+6589614304", via = "sim"))
+        scheduler.run()
+        assertEquals(listOf("+6589614304"), dialer.placed)
+    }
+
+    @Test
     fun attentiveAndSleepingAreFreeListeningIsNot() {
         assertEquals(true, PhoneCalls.isFree(Protocol.STATE_ATTENTIVE))
         assertEquals(true, PhoneCalls.isFree(Protocol.STATE_SLEEPING))

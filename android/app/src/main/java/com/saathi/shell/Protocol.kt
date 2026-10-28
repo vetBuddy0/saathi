@@ -67,7 +67,11 @@ data class CaptionMessage(val who: String?, val text: String, val raw: JSONObjec
 data class SettingsMessage(val raw: JSONObject) : WsMessage
 
 /** `{"type":"phone","action":"dial","number":...}`: place this call over the SIM (`call/device_phone.py`). */
-data class PhoneMessage(val action: String, val number: String?) : WsMessage
+data class PhoneMessage(val action: String, val number: String?, val via: String? = null) : WsMessage {
+    /** A call for the SIM: no `via`, or `"sim"`. `"twilio"` frames are the face page's (`twilio-phone.js`). */
+    val isForSim: Boolean
+        get() = via == null || via == "sim"
+}
 
 /** A `type` this build does not know. Kept so it can be logged, never acted on. */
 data class UnknownMessage(val type: String, val raw: JSONObject) : WsMessage
@@ -173,7 +177,7 @@ object Protocol {
             TYPE_CARD -> CardMessage(obj.obj("card"), obj)
             TYPE_CAPTION -> obj.str("text")?.let { CaptionMessage(obj.str("who"), it, obj) }
             TYPE_SETTINGS -> SettingsMessage(obj)
-            TYPE_PHONE -> obj.str("action")?.let { PhoneMessage(it, obj.str("number")) }
+            TYPE_PHONE -> obj.str("action")?.let { PhoneMessage(it, obj.str("number"), obj.str("via")) }
             else -> UnknownMessage(type, obj)
         }
     }

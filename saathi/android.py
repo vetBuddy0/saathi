@@ -372,8 +372,11 @@ async def _serve_until_stopped(engine: _Engine) -> None:
             # asks the model for them, so without this seam the phone's
             # eyes would never show what the laptop's do.
             emotions=runtime.emotions,
-            # "Call my son" over the device's SIM (call/device_phone.py).
+            # "Call my son": Twilio from the face page or the device's SIM
+            # (call/web_phone.py, call/device_phone.py), and the phone
+            # panel those calls show, with its End button.
             phone=runtime.device_phone,
+            calls=runtime.call_panel,
         )
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_SECONDS)
         await runner.setup()

@@ -51,6 +51,8 @@ DIAL_DEBOUNCE_SECONDS = 20.0
 TEST_NUMBER_VAR = "TWILIO_TEST_NUMBER"
 
 NOT_CONNECTED = "This device can't place phone calls right now."
+# What runtime notes call this route (cli.py).
+ROUTE = "this device's SIM"
 
 
 class DevicePhoneError(RuntimeError):
@@ -58,6 +60,8 @@ class DevicePhoneError(RuntimeError):
 
 
 class DevicePhone:
+    route = ROUTE
+
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._lock = threading.Lock()
@@ -69,9 +73,12 @@ class DevicePhone:
         with self._lock:
             self._broadcast = fn
 
-    def on_status(self, client: Any, can_call: bool) -> None:
+    def on_status(self, client: Any, can_call: bool, via: str | None = None) -> None:
         """A `/ws` client's word on whether it can place calls; `False`
-        also when that client disconnects."""
+        also when that client disconnects. A status for another route
+        (`via`, e.g. the face page's Twilio client) is not ours."""
+        if can_call and via not in (None, "sim"):
+            return
         with self._lock:
             if can_call:
                 self._capable.add(client)

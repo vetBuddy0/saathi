@@ -3711,3 +3711,27 @@ and `webrtc.py` for annotations, which import `call/push.py`'s
 Cryptodome, which the APK does not carry. Imports are now type-only and
 `_build_family` notes an ImportError. `test_android_phone.py` now lists
 Cryptodome and segno as absent, which is what caught it.
+
+**2026-10-28 — On the Android app, calls go through Twilio from the face
+page.** The owner chose Twilio over the SIM for the demo. The laptop's
+Twilio path (`call/controller.py`) can't run in the APK: its audio rides a
+Media Streams websocket that needs a public tunnel and the laptop's
+echo-cancelled pair. Twilio's Voice JavaScript SDK (2.18.5, Apache-2.0,
+vendored in `static/vendor/`) needs neither: the face page on
+`http://127.0.0.1` is a secure context, so it gets the microphone, and the
+call's media is WebRTC to Twilio with the browser's echo cancelling.
+Twilio dials through a TwiML App whose Voice URL is a TwiML Bin
+(`<Dial answerOnBridge="true"><Number>{{To}}</Number></Dial>`), so nothing
+of ours is ever public. `call/web_phone.py`'s `WebPhone` stands where
+`CallController`/`DevicePhone` stand for `tools/calling.py`, owns the
+call's state, drives udhi's phone panel and the hold seam (End button and
+2 s hold reach the same `hangup()`), and mints the access token itself
+(HS256 JWT with the API key secret, an hour, outgoing only) at
+`GET /phone/token`, loopback only. Same vendor, no new one; one new key,
+`TWILIO_TWIML_APP_SID`. Chosen when that key and the Twilio keys are set;
+else the SIM route. Frames carry `"via": "twilio"` so the shell's SIM
+dialer never acts on them. Lost: a token server (one more public thing to
+run); twilio-python for the token (not in the APK, twenty lines);
+creating the Bin/App from the engine through the REST API (Bins aren't in
+the API, and writing to her Twilio account at boot is a side effect
+nobody asked for). Not yet run against real Twilio or on the tablet.

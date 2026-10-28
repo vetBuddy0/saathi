@@ -562,6 +562,42 @@ def test_remote_mode_calls_over_the_sim_only_once_a_shell_says_it_can(remote_sea
     assert sent == [{"type": "phone", "action": "dial", "number": "+6590000000"}]
 
 
+def test_remote_mode_calls_through_twilio_from_the_page_when_a_twiml_app_is_set(
+    remote_seams, monkeypatch
+):
+    from saathi.call.web_phone import WebPhone
+
+    for name, value in TWILIO_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("TWILIO_TWIML_APP_SID", "AP" + "2" * 32)
+    runtime = cli.build_runtime()
+    assert isinstance(runtime.device_phone, WebPhone)
+    assert runtime.calling is None  # still no relay
+    assert any("Calls use Twilio, from the face page" in note for note in runtime.notes)
+    sent = []
+    runtime.device_phone.set_broadcast(sent.append)
+    runtime.device_phone.on_status("page", True, "twilio")
+    reply = runtime.handle_intent("call_contact", {"contact": "the test number"})
+    assert reply["status"] == "calling"
+    assert sent[-1]["via"] == "twilio" and sent[-1]["number"] == TWILIO_ENV["TWILIO_TEST_NUMBER"]
+    # The panel and the hold seam are the runtime's own (the End button's path).
+    assert runtime.call_panel.message()["call"]["status"] == "calling"
+    assert runtime.hold.active
+
+
+def test_remote_mode_without_a_twiml_app_falls_back_to_the_sim_and_says_why(
+    remote_seams, monkeypatch
+):
+    from saathi.call.device_phone import DevicePhone
+
+    for name, value in TWILIO_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("TWILIO_TWIML_APP_SID", raising=False)
+    runtime = cli.build_runtime()
+    assert isinstance(runtime.device_phone, DevicePhone)
+    assert any("TWILIO_TWIML_APP_SID" in note for note in runtime.notes)
+
+
 def test_remote_mode_never_starts_the_twilio_relay_even_with_twilio_and_cloudflared(
     remote_seams, calling_seams, monkeypatch
 ):
