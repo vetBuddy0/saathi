@@ -114,9 +114,10 @@ GCP_CREDENTIALS_FILE = "gcp.json"
 
 # The env var names the shell may hand over, and nothing else: the ones
 # the engine reads. `TWILIO_*` is a prefix because `call/twilio.py` owns
-# that list (`TwilioCredentials`), not this module.
+# that list (`TwilioCredentials`), not this module; `AWS_*` likewise
+# (`cloud/s3.py`'s ENV_NAMES).
 KEY_NAMES = frozenset({"OPENAI_API_KEY", "GROQ_API_KEY", "YOUTUBE_API_KEY", GOOGLE_JSON_KEY})
-KEY_PREFIXES = ("TWILIO_",)
+KEY_PREFIXES = ("TWILIO_", "AWS_")
 
 _lock = threading.Lock()
 _running: "_Engine | None" = None
@@ -378,6 +379,7 @@ async def _serve_until_stopped(engine: _Engine) -> None:
             phone=runtime.device_phone,
             calls=runtime.call_panel,
             admin_info=lambda: cli.console_info(runtime),
+            cloud=runtime.cloud,
         )
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_SECONDS)
         await runner.setup()
@@ -474,5 +476,7 @@ def _stop_runtime(runtime: Any) -> None:
     try:
         if runtime.calling is not None:
             runtime.calling.controller.shutdown()
+        if getattr(runtime, "cloud", None) is not None:
+            runtime.cloud.stop()
     finally:
         runtime.store.close()

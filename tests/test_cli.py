@@ -618,3 +618,27 @@ def test_an_unknown_audio_mode_is_refused_not_guessed(seams, monkeypatch):
     monkeypatch.setenv("SAATHI_AUDIO", "phone")
     with pytest.raises(ValueError, match="SAATHI_AUDIO='phone'; expected one of local, remote"):
         cli.build_runtime()
+
+
+def test_cloud_backup_needs_all_four_aws_names_and_says_which_are_missing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from saathi.cloud.sync import CloudSync
+
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_S3_BUCKET"):
+        monkeypatch.delenv(name, raising=False)
+    runtime = SimpleNamespace(
+        notes=[],
+        config=SimpleNamespace(data_dir=tmp_path),
+        store=SimpleNamespace(path=tmp_path / "identity.sqlite3"),
+    )
+    assert cli._cloud(runtime) is None and runtime.notes == []  # none set: no cloud, no fault
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA1")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    assert cli._cloud(runtime) is None
+    assert runtime.notes == ["Cloud backup off: needs AWS_REGION, AWS_S3_BUCKET."]
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "saathi-data")
+    monkeypatch.setattr(CloudSync, "start", lambda self: None)
+    cloud = cli._cloud(runtime)
+    assert cloud.target.bucket == "saathi-data" and "saathi-data" in cloud.status()

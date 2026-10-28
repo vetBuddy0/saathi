@@ -464,6 +464,8 @@ class CascadeSession:
         # What STT heard on the last turn, for on-screen captions
         # (screen/server.py). None after a silent turn.
         self.last_heard: str | None = None
+        # The clip the transcriber was given, for the cloud copy (cloud/sync.py).
+        self.last_audio: bytes | None = None
         self._backends = backends if backends is not None else default_backends()
         self._backend_preference = backend_preference
         self._language_preference = language_preference
@@ -782,6 +784,7 @@ class CascadeSession:
 
     def end_turn(self) -> str:
         self.last_heard = None  # a silent turn must not re-caption the last one
+        self.last_audio = None  # nor carry the last one's clip to the cloud copy
         self.heard_only_name = False
         pcm = b"".join(self._chunks)
         self._chunks = []
@@ -806,6 +809,7 @@ class CascadeSession:
             # Called by name and then silence: still a call, not nothing.
             self.heard_only_name = self._started_by_name
             return ""
+        self.last_audio = pcm
         keep_in = _turn_audio_dir()
         if keep_in is not None:
             # Off the hot path: the transcriber doesn't wait on the disk.

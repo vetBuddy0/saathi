@@ -2726,3 +2726,64 @@ async def test_a_synthesized_error_is_routed_and_a_bad_one_is_dropped(monkeypatc
         f"the client could not synthesize {request['id']}: no voice for english"
     ]
     assert "dropped unknown audio message" not in caplog.text  # it was a known type
+
+
+# -- the cloud copy: every exchange, with its clip, queued (cloud/sync.py) ----
+
+
+class RecordingCloud:
+    def __init__(self):
+        self.turns = []
+
+    def record_turn(self, heard, reply, audio=None):
+        self.turns.append((heard, reply, audio))
+
+
+class ClipSession(HeardSession):
+    def end_turn(self) -> str:
+        self.last_audio = b"\x01\x00" * 4
+        return super().end_turn()
+
+
+class SilentSession(FakeSession):
+    def end_turn(self) -> str:
+        self.last_heard = None
+        self.last_audio = None
+        return ""
+
+
+async def test_each_exchange_goes_to_the_cloud_copy_with_its_clip(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    cloud = RecordingCloud()
+    app = build_app(Core(), session=ClipSession(), capture_source_id="src", cloud=cloud)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_messages(ws)
+    assert cloud.turns == [("play a song by Ed Sheeran", "Here are three songs.", b"\x01\x00" * 4)]
+
+
+async def test_a_turn_where_nothing_was_said_is_not_an_exchange(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    cloud = RecordingCloud()
+    app = build_app(Core(), session=SilentSession(), capture_source_id="src", cloud=cloud)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await ws.send_json({"type": "input", "event": "press"})
+            await ws.receive_json()
+            await ws.send_json({"type": "input", "event": "release"})
+            while (await ws.receive_json()) != {"type": "state", "state": "idle"}:
+                pass
+    assert cloud.turns == []
+
+
+def test_run_hands_the_console_info_and_the_cloud_copy_to_the_app(monkeypatch):
+    # cli._run passes both; run() once took neither, and `saathi run`
+    # stopped with a TypeError before the face came up.
+    seen = {}
+    monkeypatch.setattr(server_module, "build_app", lambda core, **kw: seen.update(kw) or "app")
+    monkeypatch.setattr(server_module.web, "run_app", lambda app, **kw: seen.update(app=app))
+    info, cloud = (lambda: {}), object()
+    server_module.run(Core(), "127.0.0.1", 0, admin_info=info, cloud=cloud)
+    assert seen["admin_info"] is info and seen["cloud"] is cloud and seen["app"] == "app"

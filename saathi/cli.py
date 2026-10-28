@@ -213,6 +213,9 @@ class Runtime:
     # an engine, so the screen server always has the route to offer a
     # phone; it only does anything once a client connects.
     remote_audio: Any = None
+    # The AWS copy of every exchange, her clips and the memory file
+    # (cloud/sync.py), when the AWS_* keys are all set.
+    cloud: Any = None
 
 
 @dataclass
@@ -275,6 +278,7 @@ def build_runtime() -> Runtime:
         call_panel=CallPanel(),
         remote_audio=remote_audio,
     )
+    runtime.cloud = _cloud(runtime)
 
     # The voice engine needs a speech-to-text + chat provider: OpenAI if
     # OPENAI_API_KEY is set (the demo choice), else Groq. See
@@ -671,8 +675,31 @@ def console_info(runtime: Runtime) -> dict[str, Any]:
         "audio": runtime.config.audio_mode,
         "data_dir": str(runtime.config.data_dir),
         "calls": calls,
+        "cloud": runtime.cloud.status() if runtime.cloud is not None else "off",
         "notes": list(runtime.notes),
     }
+
+
+def _cloud(runtime: Runtime):
+    """The AWS copy (cloud/sync.py) when every AWS_* key is set; a note
+    naming what is missing when only some are; nothing when none are
+    (a device with no cloud is the default, not a fault)."""
+    from saathi.cloud import s3
+    from saathi.cloud.sync import CloudSync
+
+    target = s3.S3Target.from_env(os.environ)
+    if target is None:
+        missing = s3.missing(os.environ)
+        if len(missing) < len(s3.ENV_NAMES):
+            runtime.notes.append(f"Cloud backup off: needs {', '.join(missing)}.")
+        return None
+    try:
+        cloud = CloudSync(runtime.config.data_dir, target, runtime.store.path)
+    except OSError as exc:
+        runtime.notes.append(f"Cloud backup off: {exc}")
+        return None
+    cloud.start()
+    return cloud
 
 
 def _remote_phone(runtime: Runtime):
@@ -889,7 +916,10 @@ def _run() -> int:
         follow_up_seconds=follow_up_seconds() if runtime.session is not None else None,
         open_after_reply=open_after_reply(),
         remote_audio=runtime.remote_audio,
+        cloud=runtime.cloud,
     )
+    if runtime.cloud is not None:
+        runtime.cloud.stop()
     if restore_sink is not None:
         try:
             restore_sink()

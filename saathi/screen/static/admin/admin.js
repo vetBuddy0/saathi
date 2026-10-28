@@ -124,6 +124,7 @@ function drawOverview(data) {
     ["Hearing", engine.stt_model || "–"],
     ["Voice", engine.voice || "–"],
     ["Calls go via", run.calls || "–"],
+    ["Cloud backup", run.cloud || "off"],
     ["Audio", run.audio === "remote" ? "this tablet's mic and speaker" : run.audio || "–"],
     ["Personality", data.persona_source === "edited" ? "edited in this console" : "shipped default"],
     ["Data folder", run.data_dir || "–"],

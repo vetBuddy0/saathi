@@ -434,3 +434,10 @@ def test_importing_the_module_has_no_side_effects(tmp_path):
     report = json.loads(result.stdout)
     assert report == {"env_changed": [], "threads": 1, "engine": [], "running": None}
     assert list(home.iterdir()) == []  # nothing written anywhere
+
+
+def test_the_aws_keys_for_the_cloud_copy_are_ones_the_engine_reads(tmp_path):
+    names = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_S3_BUCKET")
+    config = {"data_dir": str(tmp_path), "port": 0, "keys": {name: "x" for name in names}}
+    _host, _port, _dir, keys = android._read_config(config)
+    assert sorted(keys) == sorted(names)

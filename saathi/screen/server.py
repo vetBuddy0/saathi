@@ -317,6 +317,7 @@ async def _run_turn(
     caption=None,
     on_done=None,
     on_name_only=None,
+    record=None,
 ) -> None:
     """THINKING -> SPEAKING -> IDLE for one real turn. Runs the blocking
     STT/LLM/TTS work in an executor thread; every `core.handle()` call
@@ -333,6 +334,7 @@ async def _run_turn(
     only her name -- see `build_app`."""
     loop = asyncio.get_running_loop()
     caption = caption or (lambda who, text: None)
+    record = record or (lambda heard, reply: None)
     try:
         reply_text = await loop.run_in_executor(None, session.end_turn)
     except Exception:
@@ -340,6 +342,7 @@ async def _run_turn(
         heard = getattr(session, "last_heard", None)
         if heard:
             caption("her", heard)
+            record(heard, _FALLBACK_REPLY_TEXT)
         caption("saathi", _FALLBACK_REPLY_TEXT)
         await _speak_and_finish(
             session,
@@ -357,6 +360,8 @@ async def _run_turn(
         caption("her", heard)
     if reply_text.strip():
         caption("saathi", reply_text)
+        if heard:
+            record(heard, reply_text)
     if not reply_text.strip():
         # Nothing was said (the session's speech gate, or an empty
         # transcript -- see cascade.py's end_turn()). THINKING -> IDLE
@@ -472,6 +477,7 @@ def build_app(
     listen_window=None,
     name_prompt_seconds: float = _NAME_PROMPT_SECONDS,
     remote_audio=None,
+    cloud=None,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -493,6 +499,13 @@ def build_app(
         if store is None or read_preference(store, CAPTIONS_KEY, "off") != "on":
             return
         _send_all(json.dumps({"type": "caption", "who": who, "text": text}))
+
+    def record(heard: str, reply: str) -> None:
+        """One exchange to the cloud copy (cloud/sync.py), with the clip
+        the transcriber heard. Only queues: the upload never delays her
+        reply."""
+        if cloud is not None:
+            cloud.record_turn(heard, reply, audio=getattr(session, "last_audio", None))
 
     async def run_preview() -> None:
         """Her words so far, captioned while she is still holding the
@@ -770,6 +783,7 @@ def build_app(
                 caption=caption,
                 on_done=open_conversation,
                 on_name_only=heard_only_name,
+                record=record,
             )
         )
 
@@ -1341,9 +1355,11 @@ def run(
     calls=None,
     family=None,
     phone=None,
+    admin_info=None,
     follow_up_seconds: float | None = None,
     open_after_reply: bool = True,
     remote_audio=None,
+    cloud=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
@@ -1360,9 +1376,11 @@ def run(
             calls=calls,
             family=family,
             phone=phone,
+            admin_info=admin_info,
             follow_up_seconds=follow_up_seconds,
             open_after_reply=open_after_reply,
             remote_audio=remote_audio,
+            cloud=cloud,
         ),
         host=host,
         port=port,

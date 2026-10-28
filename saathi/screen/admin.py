@@ -82,6 +82,10 @@ KEYS: list[tuple[str, str]] = [
     ("TWILIO_FROM_NUMBER", "The Twilio number calls come from."),
     ("TWILIO_TEST_NUMBER", "What “call the test number” rings."),
     ("TWILIO_TWIML_APP_SID", "TwiML App (AP...) the tablet's calls dial through."),
+    ("AWS_ACCESS_KEY_ID", "AWS access key (AKIA...): copies conversations, clips and memory to S3."),
+    ("AWS_SECRET_ACCESS_KEY", "AWS secret access key."),
+    ("AWS_REGION", "The bucket's region, e.g. ap-southeast-1."),
+    ("AWS_S3_BUCKET", "The S3 bucket name."),
 ]
 PREFERENCE_KEYS = (LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY)
 

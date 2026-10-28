@@ -3866,3 +3866,30 @@ broadcast a change, and the tablet has no keyboard; the console's Captions
 setting was written but the face learned it only on its next reconnect.
 The console now takes a `settings_changed` callback, and the server passes
 one that resends the settings message to every open face.
+
+**2026-10-29 — Every exchange, her clip and the memory file are copied to
+AWS S3 (owner's call); turbo Whisper stays.** The owner asked for all
+conversations and data to be kept in the cloud, readable later by a
+caregiver/family portal, and chose AWS, uploads after every turn, and
+transcripts + memory + voice clips. `cloud/sync.py` queues each exchange
+(never on the turn's path), writes it to `<data dir>/cloud/outbox`, and a
+worker thread PUTs it to `devices/<device-id>/{transcripts,audio,memory}/...`
+(layout in that module and docs/CLOUD.md); offline, the outbox waits and
+goes up in order, across restarts. The memory file goes up as a
+consistent sqlite backup, 20 s after the turn (so its episode is in) and
+at most every 5 minutes, as `identity-latest` plus one per day. Each
+exchange is also appended to `<data dir>/transcripts/<day>.jsonl` on the
+device. Only S3, and only PUT: no boto3 (tens of MB on a 62 MB APK for one
+request; `cloud/s3.py` signs SigV4 itself, matched against botocore on 200
+random requests and pinned by AWS's published example). Off unless all
+four `AWS_*` keys are set. The device stays the source of truth; SPEC.md's
+"lives where the device is" needs a line for the copy -- proposed to the
+owner, not applied. The mishearings that prompted the look were Punjabi
+song names forced through English-only turbo Whisper ("Ve Kangna tera ni"
+-> "I don't care about your money."); full whisper-large-v3 spelled them
+out, but at ~+250 ms a turn and ~2.8x the price, and the owner kept turbo.
+Also fixed: `screen/server.py`'s `run()` took no `admin_info`, which
+`cli._run` passes since the console landed, so `saathi run` stopped with
+a TypeError before the face came up. KeysTest's pinned list of the names
+the tablet stores was extended by the four AWS names: the owner changed
+what the device holds, so the test changed with it.
