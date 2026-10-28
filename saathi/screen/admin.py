@@ -85,6 +85,59 @@ KEYS: list[tuple[str, str]] = [
 ]
 PREFERENCE_KEYS = (LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY)
 
+# What each table in identity.sqlite3 is for, who writes it, and whether
+# any of it reaches the model -- the "Under the hood" tab. The columns
+# are not repeated here: they are read from the store's own schema, so
+# the page cannot drift from the database.
+TABLES: dict[str, tuple[str, str, str]] = {
+    "episodes": (
+        "Things that happened, one sentence each, with an importance score (1-10) and a "
+        "vector for relevance. Append-only: the record everything else cites.",
+        "Written after every exchange, between turns (identity/digest.py); also this console.",
+        "The 5 best-scoring are sent each turn, as sentences.",
+    ),
+    "rules": (
+        "What Saathi has learned about her, one sentence each, with a confidence and the "
+        "episode it came from. active=0 means retired (corrected), kept for history.",
+        "This console, and her own corrections (the correct_memory tool retires one). "
+        "Automatic learning (identity/reflect.py) exists but is not run by the app yet.",
+        "Every active rule is sent every turn, as [memory N] sentences; the confidence never is.",
+    ),
+    "entities": (
+        "People (and other things) she mentions: her contacts live here, with the phone "
+        "number in notes as JSON.",
+        "Saving a contact (her voice or this console).",
+        "Not sent; looked up when she asks to call someone.",
+    ),
+    "edges": (
+        "How people relate to her: \"son\", \"daughter\"... with since/until, so a "
+        "relation can end without being deleted.",
+        "Saving a contact with a relation.",
+        "Not sent; it is how \"call my son\" finds a number.",
+    ),
+    "preferences": (
+        "Settings as key/value rows; the latest row for a key wins (language, voice, captions).",
+        "Her voice (\"speak Mandarin\"), the Ctrl+L panel, this console.",
+        "Language becomes one instruction (\"Reply in english.\"); the rest steer the device.",
+    ),
+    "reminders": (
+        "Things due at a time, optionally repeating.",
+        "Not written by the app yet.",
+        "Not sent.",
+    ),
+    "turns": (
+        "One row per reply: how long each stage took, tokens, cost, which voice spoke. "
+        "No words: what she said is not kept here.",
+        "Every turn, after the reply.",
+        "Never sent; it is the latency and cost record.",
+    ),
+    "initiatives": (
+        "Times Saathi considered speaking first, and why it did or didn't.",
+        "Not written by the app yet.",
+        "Not sent.",
+    ),
+}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -201,6 +254,60 @@ class Console:
                 for t in sorted(turns, key=lambda t: t["id"], reverse=True)[:MAX_TURNS]
             ],
             "short_term": snapshot() if callable(snapshot) else None,
+        }
+
+    def layout(self) -> dict[str, Any]:
+        """Where memory lives and how a turn's context is put together,
+        with the numbers the code actually uses (the "Under the hood"
+        tab). Read from the modules themselves, never restated."""
+        import importlib.util
+        import re
+
+        from saathi.identity import embed
+        from saathi.identity.store import _SCHEMA
+        from saathi.screen.emotion import EMOTIONS
+        from saathi.voice import conversation
+
+        with IdentityStore(self.store_path) as store:
+            store.create()
+            counts = {name: len(store.read(name)) for name in _SCHEMA}
+        tables = []
+        for name, ddl in _SCHEMA.items():
+            purpose, written_by, sent = TABLES.get(name, ("", "", ""))
+            columns = [c for c in re.findall(r"^\s+(\w+) [A-Z]", ddl, re.M) if c != "CREATE"]
+            tables.append({
+                "name": name, "columns": columns, "rows": counts[name],
+                "purpose": purpose, "written_by": written_by, "sent": sent,
+            })
+        override = compile_mod.persona_override_path()
+        relevance = embed.model_files_present() and (
+            importlib.util.find_spec("onnxruntime") is not None
+        )
+        return {
+            "files": {
+                "data_dir": str(override.parent),
+                "database": str(self.store_path),
+                "database_bytes": (
+                    self.store_path.stat().st_size if self.store_path.is_file() else 0
+                ),
+                "persona_edited": str(override) if override.is_file() else None,
+                "persona_shipped": str(compile_mod._BASE_PERSONA_PATH),
+            },
+            "tables": tables,
+            "retrieval": {
+                "top_k": compile_mod._TOP_K_EPISODES,
+                "recency_decay_per_hour": compile_mod._RECENCY_DECAY_PER_HOUR,
+                "relevance_on": relevance,
+            },
+            "window": {
+                "exchanges": conversation.MAX_EXCHANGES,
+                "tokens": conversation.MAX_TOKENS,
+            },
+            "code_sentences": {
+                "memory_numbers": compile_mod._MEMORY_NUMBERS_SENTENCE,
+                "length_cap": compile_mod._LENGTH_CAP_SENTENCE,
+            },
+            "moods": sorted(EMOTIONS),
         }
 
     def prompt(self) -> dict[str, Any]:
@@ -443,6 +550,7 @@ def add_routes(app: web.Application, console: Console) -> None:
     app.router.add_get("/admin/api/prompt", getter(console.prompt))
     app.router.add_get("/admin/api/contacts", getter(console.contact_list))
     app.router.add_get("/admin/api/keys", getter(console.keys))
+    app.router.add_get("/admin/api/layout", getter(console.layout))
     app.router.add_post("/admin/api/rules", add_rule)
     app.router.add_post("/admin/api/rules/{rule_id}", edit_rule)
     app.router.add_post("/admin/api/rules/{rule_id}/retire", retire_rule)

@@ -24,6 +24,7 @@
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="how" aria-selected="true">How it works</button>
     <button role="tab" data-tab="memory">Memory</button>
+    <button role="tab" data-tab="hood">Under the hood</button>
     <button role="tab" data-tab="persona">Personality</button>
     <button role="tab" data-tab="contacts">Contacts</button>
     <button role="tab" data-tab="keys">Keys &amp; settings</button>
@@ -94,6 +95,29 @@
 
       <h2>Recent turns <small class="muted">speed and cost of each reply</small></h2>
       <div class="table-wrap"><table class="table" id="turns"></table></div>
+    </section>
+
+    <!-- Under the hood: where memory lives and how a turn's context is built -->
+    <section class="panel" id="tab-hood" hidden>
+      <h2>What makes up her personality</h2>
+      <p class="lead">Nothing about Saathi's character is a hidden setting. Every turn the model is
+        given these layers, top to bottom, as plain sentences, and nothing else. Numbers (confidence,
+        importance, scores) are stored to decide <em>what</em> to send; the model never sees them.</p>
+      <ol class="stack" id="stack"></ol>
+
+      <h2>How episodes are picked</h2>
+      <p class="lead" id="retrieval"></p>
+      <div class="formula" aria-label="score formula">score = recency + importance + relevance
+        <span class="muted small">each scaled 0–1 across all episodes, then added; the top ones are sent</span></div>
+      <dl class="facts" id="retrieval-facts"></dl>
+
+      <h2>Where it is stored</h2>
+      <dl class="facts" id="files"></dl>
+
+      <h2>The database, table by table</h2>
+      <p class="lead">One SQLite file. Memory is only ever <b>added</b> or <b>retired</b>, never
+        rewritten in place, so every belief keeps its history and its source.</p>
+      <div class="tables" id="tables"></div>
     </section>
 
     <!-- Personality -->

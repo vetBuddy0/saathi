@@ -186,7 +186,7 @@ function drawMemory(data) {
 
   const active = data.rules.filter((r) => r.active);
   const retired = data.rules.filter((r) => !r.active);
-  $("rules").replaceChildren(...(active.length ? active.map(ruleRow) : [empty("No rules yet. She learns them from conversations, or add one above.")]));
+  $("rules").replaceChildren(...(active.length ? active.map(ruleRow) : [empty("No rules yet. Add one above: automatic learning from conversations is not switched on yet (Under the hood).")]));
   $("rules-retired").replaceChildren(...(retired.length ? retired.map(ruleRow) : [empty("None.")]));
   $("retired-count").textContent = `(${retired.length})`;
 
@@ -363,14 +363,62 @@ function drawSettings(prefs) {
   }
 }
 
+// -- Under the hood -----------------------------------------------------------
+
+function drawLayout(data, overview, prompt) {
+  const persona = overview.persona_source === "edited" ? "edited in this console" : "the shipped file";
+  const r = data.retrieval;
+  const layers = [
+    ["Persona", `Who Saathi is and how she speaks: name, warmth, plain words. From ${persona}; edit it on the Personality tab.`],
+    ["Memory instruction", data.code_sentences.memory_numbers],
+    ["Rules", `Every active learned fact about her, numbered [memory N]. ${overview.counts.rules} right now. Edit on the Memory tab.`],
+    ["Episodes", `The ${r.top_k} best-scoring things that happened (below). Picked again after every turn.`],
+    ["Length cap", data.code_sentences.length_cap],
+    ["Conversation so far", `A running summary of older talk, then the last ${data.window.exchanges} exchanges word for word (at most ~${data.window.tokens} tokens). Lost on restart.`],
+    ["Language", "One line: \u201cReply in english.\u201d (or the language she chose). Set on Keys & settings or by asking her."],
+    ["Mood", `Asked to start each reply with a tag the face shows and the voice never reads: ${data.moods.join(", ")}.`],
+    ["Her words", "What the speech-to-text heard this turn."],
+  ];
+  $("stack").replaceChildren(...layers.map(([title, text], i) =>
+    h("li", {}, h("span", { class: "layer__n" }, i + 1), h("div", {}, h("b", {}, title), h("p", {}, text)))));
+
+  $("retrieval").textContent = `Out of every episode ever stored, ${r.top_k} are sent each turn. `
+    + "Each one is scored on three things, so an old but important memory can still beat yesterday's small talk.";
+  $("retrieval-facts").replaceChildren(...[
+    ["Recency", `${r.recency_decay_per_hour} per hour since it happened (Park et al. 2023), so a day-old episode keeps ~${Math.round(100 * r.recency_decay_per_hour ** 24)}%.`],
+    ["Importance", "1–10, given when the episode is written (\u201cher son visited\u201d high, \u201csaid hello\u201d low)."],
+    ["Relevance", r.relevance_on
+      ? "How close in meaning it is to her last words (a small on-device model, all-MiniLM-L6-v2)."
+      : "Off on this device: the on-device model isn't installed, so ranking is recency + importance."],
+  ].flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
+
+  const f = data.files;
+  $("files").replaceChildren(...[
+    ["Data folder", f.data_dir],
+    ["Memory database", `${f.database} (${(f.database_bytes / 1024).toFixed(0)} KB)`],
+    ["Persona in use", f.persona_edited || `${f.persona_shipped} (shipped; Save on the Personality tab writes persona.txt in the data folder)`],
+    ["Keys", shell ? "this tablet's encrypted app storage (Keys & settings tab)" : "~/.saathi/env"],
+  ].flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, h("code", {}, v))]));
+
+  $("tables").replaceChildren(...data.tables.map((t) => h("article", { class: "tbl" },
+    h("header", {}, h("code", {}, t.name), h("span", { class: "pill" }, `${t.rows} rows`)),
+    h("p", {}, t.purpose),
+    h("dl", { class: "facts" },
+      h("dt", {}, "Written by"), h("dd", {}, t.written_by),
+      h("dt", {}, "Sent to the model"), h("dd", {}, t.sent)),
+    h("p", { class: "cols" }, ...t.columns.map((c) => h("code", {}, c))),
+  )));
+}
+
 // -- load -----------------------------------------------------------------------------
 
 async function loadAll() {
   try {
-    const [overview, memory, prompt, people, keys] = await Promise.all([
-      api("overview"), api("memory"), api("prompt"), api("contacts"), api("keys"),
+    const [overview, memory, prompt, people, keys, layout] = await Promise.all([
+      api("overview"), api("memory"), api("prompt"), api("contacts"), api("keys"), api("layout"),
     ]);
     drawOverview(overview);
+    drawLayout(layout, overview, prompt);
     drawMemory(memory);
     drawPrompt(prompt);
     drawContacts(people);
@@ -382,7 +430,7 @@ async function loadAll() {
 }
 
 $("refresh").addEventListener("click", () => loadAll().then(() => toast("Up to date")));
-const TABS = ["how", "memory", "persona", "contacts", "keys"];
+const TABS = ["how", "memory", "hood", "persona", "contacts", "keys"];
 const wanted = (location.hash || "").slice(1);
 show(TABS.includes(wanted) ? wanted : "how");
 loadAll();

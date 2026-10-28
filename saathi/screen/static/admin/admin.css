@@ -209,6 +209,30 @@ textarea { width: 100%; resize: vertical; line-height: 1.55; }
 
 .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.8rem; }
 
+.stack { list-style: none; padding: 0; margin: 0.5rem 0 0; display: grid; gap: 0.45rem; }
+.stack li {
+  display: grid; grid-template-columns: auto 1fr; gap: 0.8rem; align-items: start;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.65rem 0.85rem;
+}
+.stack li p { margin: 0.1rem 0 0; color: var(--muted); font-size: 0.9rem; }
+.stack li:last-child { border-style: dashed; }
+
+.formula {
+  font-family: ui-monospace, Menlo, Consolas, monospace; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 10px; padding: 0.7rem 0.9rem; margin-bottom: 0.8rem;
+  display: grid; gap: 0.2rem;
+}
+.formula .small { font-family: system-ui, sans-serif; }
+
+.tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0.7rem; }
+.tbl { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 0.8rem 0.95rem; box-shadow: var(--shadow); }
+.tbl header { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.tbl header code { font-size: 1rem; font-weight: 600; }
+.tbl > p { margin: 0.45rem 0; font-size: 0.9rem; }
+.tbl .facts { font-size: 0.85rem; grid-template-columns: max-content 1fr; }
+.cols { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.6rem 0 0; }
+.cols code { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 0.05rem 0.4rem; font-size: 0.78rem; color: var(--muted); }
+
 .empty { color: var(--muted); font-style: italic; padding: 0.4rem 0; }
 
 .toast {

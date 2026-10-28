@@ -178,3 +178,22 @@ class _Transport:
 
     def get_extra_info(self, name, default=None):
         return self._peer if name == "peername" else default
+
+
+async def test_under_the_hood_reads_the_real_schema_and_numbers(console):
+    from saathi.identity import compile as compile_mod
+    from saathi.voice import conversation
+
+    client, _, _ = console
+    layout = await (await client.get("/admin/api/layout")).json()
+    tables = {t["name"]: t for t in layout["tables"]}
+    # Columns come from the store's own schema, rows from the database.
+    assert tables["rules"]["columns"] == [
+        "id", "text", "confidence", "learned_at", "source_episode", "active",
+    ]
+    assert tables["rules"]["rows"] == 1 and tables["episodes"]["rows"] == 1
+    assert all(t["purpose"] for t in layout["tables"])  # every table explained
+    assert layout["retrieval"]["top_k"] == compile_mod._TOP_K_EPISODES
+    assert layout["window"]["exchanges"] == conversation.MAX_EXCHANGES
+    assert "happy" in layout["moods"]
+    assert layout["files"]["persona_edited"] is None

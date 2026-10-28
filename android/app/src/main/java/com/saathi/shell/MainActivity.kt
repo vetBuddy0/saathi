@@ -94,6 +94,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.PermissionRequest
@@ -208,6 +209,15 @@ class MainActivity : AppCompatActivity() {
             SetupDialog.show(this, settings, SetupDialog.Page.BRAIN, ::openConsole) { applyBrain() }
         }
         faceWeb.setOnTouchListener(setupHold)
+        // The corner gear (activity_main.xml): the console in one tap, the
+        // setup dialog (brain, keys, kiosk) on a long press.
+        findViewById<View>(R.id.settings_button).apply {
+            setOnClickListener { openConsole() }
+            setOnLongClickListener {
+                SetupDialog.show(this@MainActivity, settings, SetupDialog.Page.BRAIN, ::openConsole) { applyBrain() }
+                true
+            }
+        }
 
         // A kiosk has no back. Swallowed here rather than left to the
         // system, so a pinned screen stays pinned and an unpinned one

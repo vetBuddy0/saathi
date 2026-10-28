@@ -3799,3 +3799,18 @@ Whisper answers unclear audio with a prompt's own words, a suspect for the
 media-aware follow-up window (inactive in remote mode). Also: every turn
 now logs what was heard with the clip's length and loudness, so a reply
 that makes no sense can be traced to a mishearing or to the model.
+
+**2026-10-29 — A settings gear on the tablet's screen, and an "Under the
+hood" tab in the console.** The owner asked for a visible settings button;
+the five-second hold was too hidden to find. A dim gear (35% opacity, no
+text, never changing with her state) sits top-right: tap opens the
+developer console, long press the setup dialog. This reverses the setup
+dialog's "no control on her screen that is not for her" for one small
+icon; lost: the hold alone (still there). The new tab explains, from the
+code's own constants and the store's own schema, what makes up her
+personality each turn (persona, memory instruction, rules, episodes,
+length cap, conversation, language, mood, her words), how episodes are
+scored, where everything is stored, and each table: purpose, who writes
+it, what reaches the model. It says plainly that automatic learning
+(`identity/reflect.py`) is not run by the app yet: rules come from the
+console and her corrections.
