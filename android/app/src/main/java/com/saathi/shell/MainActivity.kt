@@ -205,7 +205,7 @@ class MainActivity : AppCompatActivity() {
 
         configureFace(faceWeb)
         setupHold = HoldListener(SetupDialog.HOLD_MS) {
-            SetupDialog.show(this, settings, SetupDialog.Page.BRAIN) { applyBrain() }
+            SetupDialog.show(this, settings, SetupDialog.Page.BRAIN, ::openConsole) { applyBrain() }
         }
         faceWeb.setOnTouchListener(setupHold)
 
@@ -349,6 +349,21 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         hideSystemBars()
         if (settings.kiosk) Kiosk.enterLockTaskIfOwner(this)
+        if (ConsoleActivity.keysChanged) {
+            // Keys saved from the console: the same restart the dialog's Save does.
+            ConsoleActivity.keysChanged = false
+            applyBrain()
+        }
+    }
+
+    /** The developer console on the engine in use, or why not (no engine answering yet). */
+    private fun openConsole() {
+        val engine = engineUrl
+        if (engine == null) {
+            Toast.makeText(this, getString(R.string.setup_console_no_engine), Toast.LENGTH_LONG).show()
+            return
+        }
+        ConsoleActivity.open(this, engine)
     }
 
     override fun onPause() {

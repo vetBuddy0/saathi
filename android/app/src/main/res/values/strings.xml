@@ -7,6 +7,8 @@
     <string name="setup_title">Setting Saathi up</string>
     <string name="setup_message">The address the engine prints when it starts, on this home\'s own network.</string>
     <string name="setup_kiosk">Keep Saathi on the screen (kiosk)</string>
+    <string name="setup_console">Developer console (memory, personality, contacts, keys)</string>
+    <string name="setup_console_no_engine">The console needs the engine running; it is not answering yet.</string>
     <string name="setup_save">Save</string>
     <string name="setup_cancel">Cancel</string>
     <string name="setup_rejected">That address is not on the home network, so it was not saved.</string>

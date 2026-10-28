@@ -162,6 +162,16 @@ object SetupDialog {
         show(activity, settings, null, null, page, onSaved)
     }
 
+    /**
+     * As [show] on [page], with a "Developer console" button that closes
+     * the dialog and calls [console] (`ConsoleActivity` says why the
+     * console is its own screen). Only the hold offers it: the dialogs
+     * opened because something is missing have no engine to show yet.
+     */
+    fun show(activity: Activity, settings: Settings, page: Page, console: () -> Unit, onSaved: () -> Unit) {
+        show(activity, settings, null, null, page, onSaved, console)
+    }
+
     /** As [show] with a page, opening on the Brain page. */
     fun show(
         activity: Activity,
@@ -186,6 +196,7 @@ object SetupDialog {
         audioLink: AudioLink?,
         page: Page,
         onSaved: () -> Unit,
+        console: (() -> Unit)? = null,
     ) {
         val context: Context = activity
         val density = context.resources.displayMetrics.density
@@ -370,6 +381,18 @@ object SetupDialog {
             addView(keysPage)
             addView(kioskBox)
         }
+        var dismiss: () -> Unit = {}
+        if (console != null) {
+            column.addView(
+                Button(context).apply {
+                    text = context.getString(R.string.setup_console)
+                    setOnClickListener {
+                        dismiss()
+                        console()
+                    }
+                },
+            )
+        }
         // A pasted credential is long and the screen is a phone's in
         // landscape: the body scrolls, the buttons stay.
         val body = ScrollView(context).apply { addView(column) }
@@ -440,6 +463,7 @@ object SetupDialog {
         // window that can hold a private key (the header). Set before
         // show(), when the window is created but not yet attached.
         dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        dismiss = dialog::dismiss
         dialog.show()
         dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.setOnClickListener {
             if (save()) dialog.dismiss()

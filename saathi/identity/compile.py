@@ -63,6 +63,7 @@ toss is unacceptable.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,22 @@ import numpy as np
 from saathi.identity.store import IdentityStore
 
 _BASE_PERSONA_PATH = Path(__file__).parent.parent / "voice" / "persona_stub.txt"
+# The developer console's edit of the persona (screen/admin.py), in the
+# data dir so an app update -- which replaces the package, and
+# persona_stub.txt with it -- never undoes it. Present: it wins; absent:
+# the shipped file. Lost: writing persona_stub.txt in place (inside the
+# APK's extracted package, overwritten on every install).
+PERSONA_OVERRIDE_NAME = "persona.txt"
+
+
+def persona_override_path() -> Path:
+    return Path(os.environ.get("SAATHI_DATA_DIR", Path.home() / ".saathi")) / PERSONA_OVERRIDE_NAME
+
+
+def persona_path() -> Path:
+    """The persona file compile_context reads: the override if there is one."""
+    override = persona_override_path()
+    return override if override.is_file() else _BASE_PERSONA_PATH
 
 # Park et al.'s own constant for their MemoryStream's recency decay.
 # Nothing about this project's usage pattern argues for a different
@@ -213,7 +230,7 @@ def compile_context(
     now: datetime | None = None,
     query_embedding: np.ndarray | None = None,
     top_k: int = _TOP_K_EPISODES,
-    base_persona_path: Path = _BASE_PERSONA_PATH,
+    base_persona_path: Path | None = None,
 ) -> str:
     """The one translation this module exists for: rows with confidence
     and provenance (stored) into plain sentences a model acts on (sent).
@@ -230,7 +247,7 @@ def compile_context(
     embedding itself.
     """
     now = now or datetime.now(timezone.utc)
-    sentences = [base_persona_path.read_text().strip()]
+    sentences = [(base_persona_path or persona_path()).read_text().strip()]
 
     active_rules = [r for r in store.read("rules") if r.get("active", 1)]
     numbered = [f"[memory {r['id']}] {r['text'].strip()}" for r in active_rules if r.get("text")]

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Saathi Console</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+  <!-- The developer console (screen/admin.py): for whoever builds or sets
+       Saathi up, never her screen. Every panel is drawn by admin.js from
+       /admin/api/*; nothing here is stored in the browser. -->
+  <header class="top">
+    <div class="brand">
+      <span class="brand__dot" aria-hidden="true"></span>
+      <div>
+        <h1>Saathi Console</h1>
+        <p class="muted">How she remembers, who she is, and what she runs on.</p>
+      </div>
+    </div>
+    <button class="btn btn--ghost" id="refresh" type="button">Refresh</button>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="how" aria-selected="true">How it works</button>
+    <button role="tab" data-tab="memory">Memory</button>
+    <button role="tab" data-tab="persona">Personality</button>
+    <button role="tab" data-tab="contacts">Contacts</button>
+    <button role="tab" data-tab="keys">Keys &amp; settings</button>
+  </nav>
+
+  <main>
+    <!-- How it works -->
+    <section class="panel" id="tab-how">
+      <div class="cards" id="stats"></div>
+
+      <h2>One turn, end to end</h2>
+      <p class="lead">She presses the button (or says the name) and speaks. Everything below happens
+        for every turn; the two steps on the bottom row run <em>after</em> she has heard the reply,
+        so they never slow her down.</p>
+      <ol class="flow" id="flow"></ol>
+      <ol class="flow flow--after">
+        <li><b>Digest</b><span>One background call turns the exchange into an <em>episode</em> worth
+          remembering (with an importance score) and folds older talk into the running summary.</span></li>
+        <li><b>Compile</b><span>Persona + active rules + the 5 best episodes are rewritten as plain
+          sentences, ready for the <em>next</em> turn. Memory is one turn stale on purpose.</span></li>
+      </ol>
+
+      <h2>Stored vs sent</h2>
+      <p class="lead">Memory is stored as rows with scores, timestamps and sources. The model never
+        sees a score: it receives sentences. See the exact text on the <a href="#persona" data-goto="persona">Personality</a> tab.</p>
+
+      <h2>This run</h2>
+      <dl class="facts" id="runtime"></dl>
+      <details class="notes"><summary>Start-up notes</summary><ul id="notes"></ul></details>
+    </section>
+
+    <!-- Memory -->
+    <section class="panel" id="tab-memory" hidden>
+      <div class="layers">
+        <article class="layer"><span class="layer__n">1</span><h3>Conversation window</h3>
+          <p>The last few exchanges, word for word. Lives in memory only; a restart starts a new conversation.</p></article>
+        <article class="layer"><span class="layer__n">2</span><h3>Running summary</h3>
+          <p>Older talk from this conversation, folded into a short summary. Also not saved.</p></article>
+        <article class="layer"><span class="layer__n">3</span><h3>Episodes</h3>
+          <p>Things that happened, saved for good. The 5 with the best <em>recency + importance + relevance</em> are sent each turn.</p></article>
+        <article class="layer"><span class="layer__n">4</span><h3>Rules</h3>
+          <p>What Saathi has learned about her. Every active rule is sent every turn, as <code>[memory N]</code>, so she can correct one.</p></article>
+      </div>
+
+      <h2>1–2 · This conversation</h2>
+      <div id="short-term"></div>
+
+      <h2>4 · Rules <small class="muted">learned facts about her</small></h2>
+      <form class="inline-form" id="rule-add">
+        <input name="text" placeholder="e.g. She prefers to be called Auntie Lee." maxlength="2000" required>
+        <button class="btn" type="submit">Add rule</button>
+      </form>
+      <ul class="rows" id="rules"></ul>
+      <details><summary>Retired rules <span id="retired-count" class="muted"></span></summary>
+        <ul class="rows rows--retired" id="rules-retired"></ul></details>
+
+      <h2>3 · Episodes <small class="muted">append-only: add, never edit or delete</small></h2>
+      <form class="inline-form" id="episode-add">
+        <input name="text" placeholder="e.g. Her son Udhi visited on Sunday and brought kaya toast." maxlength="2000" required>
+        <label class="imp">Importance <input name="importance" type="range" min="0" max="1" step="0.1" value="0.5"><output>0.5</output></label>
+        <button class="btn" type="submit">Add episode</button>
+      </form>
+      <p class="muted small"><span class="pill pill--sent">sent</span> = in the 5 episodes the model receives right now.</p>
+      <ul class="rows" id="episodes"></ul>
+
+      <h2>Preferences</h2>
+      <dl class="facts" id="preferences"></dl>
+
+      <h2>Recent turns <small class="muted">speed and cost of each reply</small></h2>
+      <div class="table-wrap"><table class="table" id="turns"></table></div>
+    </section>
+
+    <!-- Personality -->
+    <section class="panel" id="tab-persona" hidden>
+      <h2>Persona <span class="pill" id="persona-source"></span></h2>
+      <p class="lead">The first thing the model reads every turn: who Saathi is and how she speaks.
+        Saving writes <code>persona.txt</code> in the data folder, which wins over the shipped file
+        and survives app updates. <b>Reset</b> goes back to the shipped one.</p>
+      <textarea id="persona" rows="9" spellcheck="true"></textarea>
+      <div class="actions">
+        <button class="btn" id="persona-save" type="button">Save persona</button>
+        <button class="btn btn--ghost" id="persona-reset" type="button">Reset to shipped</button>
+      </div>
+
+      <h2>What the model receives right now</h2>
+      <p class="lead">Exactly the system text compiled from the persona, the active rules
+        (<code>[memory N]</code>) and the retrieved episodes, plus two sentences added by code: the
+        memory-number instruction and the two-sentence length cap. Then come the conversation window
+        and her words.</p>
+      <pre class="prompt" id="compiled"></pre>
+    </section>
+
+    <!-- Contacts -->
+    <section class="panel" id="tab-contacts" hidden>
+      <h2>Contacts</h2>
+      <p class="lead">The people she can call by name or by relation ("call my son"). Saving a name
+        that exists replaces its number; history is kept.</p>
+      <form class="contact-form" id="contact-form">
+        <label>Name <input name="name" required maxlength="80" placeholder="Udhi"></label>
+        <label>Phone <input name="phone" required maxlength="40" placeholder="+65 8961 4304"></label>
+        <label>Relation <input name="relation" maxlength="40" placeholder="son" list="relations"></label>
+        <label>Country <select name="country">
+          <option value="SG">Singapore</option><option value="IN">India</option>
+          <option value="MY">Malaysia</option><option value="GB">UK</option>
+          <option value="US">US</option><option value="">Other (use +code)</option></select></label>
+        <button class="btn" type="submit">Save contact</button>
+        <datalist id="relations"><option value="son"><option value="daughter"><option value="wife">
+          <option value="husband"><option value="brother"><option value="sister"><option value="friend">
+          <option value="doctor"><option value="nurse"></datalist>
+      </form>
+      <div class="table-wrap"><table class="table" id="contacts"></table></div>
+    </section>
+
+    <!-- Keys & settings -->
+    <section class="panel" id="tab-keys" hidden>
+      <h2>Keys</h2>
+      <p class="lead" id="keys-lead"></p>
+      <form id="keys-form"><ul class="rows" id="keys"></ul>
+        <div class="actions" id="keys-actions" hidden>
+          <button class="btn" type="submit">Save keys &amp; restart</button>
+          <span class="muted small">Only filled fields change. Values are never shown back.</span>
+        </div></form>
+
+      <h2>Settings</h2>
+      <div class="settings">
+        <label>Language she replies in
+          <select data-pref="language"><option value="english">English</option><option value="chinese">Mandarin</option></select></label>
+        <label>Voice
+          <select data-pref="tts_backend"><option value="google-chirp3-hd">Google Chirp 3 HD (warm)</option>
+            <option value="google-neural2">Google Neural2</option><option value="android-tts">This tablet's voice</option>
+            <option value="piper">Piper (offline)</option></select></label>
+        <label>Captions on her screen
+          <select data-pref="captions"><option value="off">Off</option><option value="on">On</option></select></label>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script type="module" src="/admin/static/admin.js"></script>
+</body>
+</html>

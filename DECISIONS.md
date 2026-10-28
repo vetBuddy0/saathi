@@ -3734,4 +3734,30 @@ dialer never acts on them. Lost: a token server (one more public thing to
 run); twilio-python for the token (not in the APK, twenty lines);
 creating the Bin/App from the engine through the REST API (Bins aren't in
 the API, and writing to her Twilio account at boot is a side effect
-nobody asked for). Not yet run against real Twilio or on the tablet.
+nobody asked for). Run once against real Twilio from the laptop's
+headless Chromium (rang, answered, hung up); not yet on the tablet.
+
+**2026-10-28 — A developer console at `/admin`, for whoever builds or sets
+Saathi up.** The owner asked for pages showing how memory and personality
+work, with the files editable: `screen/admin.py` plus
+`static/admin/` (How it works, Memory, Personality, Contacts, Keys &
+settings). Loopback only, like `/phone/token`; on the tablet it opens from
+the setup dialog's "Developer console" button (`ConsoleActivity`), never
+from her face. It writes only through what already exists: rules through
+`IdentityStore` retire + append, with a provenance episode ("Noted by the
+care team: …") so an edited rule still has a source; episodes append-only;
+contacts through `call/contacts.py`'s convention (removal is a newer row
+with no phone, so history stays); preferences as the existing keys. The
+persona edit is `persona.txt` in the data folder, which
+`compile_context` prefers over the shipped file, so it survives app
+updates; Reset deletes it. After a write the engine recompiles context
+between turns (`refresh_context`), never during one. Keys are shown as
+set/missing, never a value: on the laptop they live in `~/.saathi/env`
+(edit there); on the tablet the page saves them through a `SaathiShell`
+bridge into the shell's encrypted store and the engine restarts, the
+dialog's Save path. The bridge exists only in `ConsoleActivity`, which
+refuses navigation off `$engine/admin`. Lost: a native Android console
+(a second UI to keep in step, and the laptop wouldn't have it); editing
+episodes in place (they are the record rules cite); writing keys from the
+engine (it doesn't own them on the tablet, and a page that writes secrets
+over HTTP is one more thing to secure).

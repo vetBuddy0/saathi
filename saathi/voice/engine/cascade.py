@@ -525,6 +525,36 @@ class CascadeSession:
         self._last_turn_timings = None
         return timings
 
+    def refresh_context(self) -> None:
+        """Recompile her context now, in the background -- for the
+        developer console after a memory or persona edit, so the next
+        turn uses it rather than the one after. Between turns like every
+        other compile; a turn already running keeps what it read."""
+        self._refresh_compiled_context_in_background()
+
+    def describe(self) -> dict[str, Any]:
+        """What this session runs on, for the developer console: never a
+        key, only names."""
+        provider = self._provider
+        return {
+            "provider": provider.name,
+            "llm_model": provider.llm_model,
+            "stt_model": provider.stt_model,
+            "tools": [
+                schema.get("function", {}).get("name") for schema in (self._tool_schemas or [])
+            ],
+            "voice": self._current_backend().id,
+        }
+
+    def conversation_snapshot(self) -> dict[str, Any]:
+        """Short-term memory as it stands: the running summary and the
+        verbatim window (voice/conversation.py). Read-only."""
+        memory = self._conversation
+        return {
+            "summary": memory.summary,
+            "window": [{"her": e.user, "saathi": e.assistant} for e in memory.window],
+        }
+
     def _refresh_compiled_context_in_background(self) -> None:
         # SPEC.md: "Context is compiled between turns, never during
         # one." Called once a turn is fully over (see _speak()'s tail),

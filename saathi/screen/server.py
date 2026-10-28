@@ -466,6 +466,7 @@ def build_app(
     calls=None,
     family=None,
     phone=None,
+    admin_info=None,
     follow_up_seconds: float | None = None,
     open_after_reply: bool = True,
     listen_window=None,
@@ -1275,6 +1276,11 @@ def build_app(
         return ws
 
     app.router.add_get("/", index)
+    if store is not None:
+        # The developer console (screen/admin.py): loopback only.
+        from saathi.screen.admin import Console, add_routes
+
+        add_routes(app, Console(store.path, session=session, info=admin_info))
     app.router.add_get("/ws", websocket_handler)
     if phone is not None and hasattr(phone, "token"):
 

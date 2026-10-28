@@ -90,6 +90,14 @@ released (Groq was ~1.3 s but rate-limited; see TODO.md).
 - **Captions** — show/hide a strip with what it *heard* and what it
   *said*. Turn this on for demos: it tells a bad mic from a bad reply.
 
+## Developer console
+
+Memory, personality, contacts and keys, for whoever sets Saathi up (not
+her screen). Laptop: open `http://127.0.0.1:8765/admin` on the same
+machine. Tablet: hold the face 5 s → setup dialog → **Developer console**.
+"How it works" shows one turn end to end; "Personality" shows the exact
+text the model receives. Edits apply from the next turn.
+
 ## What to say
 
 Hold nothing — tap space, speak, and it answers.

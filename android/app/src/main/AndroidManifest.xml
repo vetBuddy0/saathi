@@ -54,6 +54,13 @@
             </intent-filter>
         </activity>
 
+        <!-- The developer console (ConsoleActivity.kt): opened only from
+             the setup dialog, never exported. -->
+        <activity
+            android:name=".ConsoleActivity"
+            android:exported="false"
+            android:lockTaskMode="if_whitelisted" />
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">

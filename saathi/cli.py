@@ -656,6 +656,25 @@ def _build_calling(runtime: Runtime, handles: Any, device_phone: Any = None) -> 
         runtime.tool_schemas.append(tool_to_openai_schema(tool, description))
 
 
+def console_info(runtime: Runtime) -> dict[str, Any]:
+    """What the developer console (screen/admin.py) shows about how this
+    run was put together: the notes printed at start, and where calls go."""
+    if runtime.device_phone is not None:
+        calls = runtime.device_phone.route
+    elif runtime.calling is not None:
+        calls = "Twilio, through this computer's relay"
+    elif runtime.family is not None:
+        calls = "the family app"
+    else:
+        calls = "off"
+    return {
+        "audio": runtime.config.audio_mode,
+        "data_dir": str(runtime.config.data_dir),
+        "calls": calls,
+        "notes": list(runtime.notes),
+    }
+
+
 def _remote_phone(runtime: Runtime):
     """Remote mode's calling route: Twilio from the face page when the
     Twilio keys and a TwiML App are set (call/web_phone.py, the owner's
@@ -865,6 +884,7 @@ def _run() -> int:
         calls=runtime.call_panel,
         family=runtime.family,
         phone=runtime.device_phone,
+        admin_info=lambda: console_info(runtime),
         follow_up_seconds=follow_up_seconds() if runtime.session is not None else None,
         open_after_reply=open_after_reply(),
         remote_audio=runtime.remote_audio,
