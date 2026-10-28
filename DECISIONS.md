@@ -3814,3 +3814,15 @@ scored, where everything is stored, and each table: purpose, who writes
 it, what reaches the model. It says plainly that automatic learning
 (`identity/reflect.py`) is not run by the app yet: rules come from the
 console and her corrections.
+
+**2026-10-29 — The shell asks for MODIFY_AUDIO_SETTINGS: Twilio calls from
+the tablet never reached Twilio without it.** Every "call my son" ended in
+under a second and Twilio had no record of it. In the WebView, getUserMedia
+failed ("NotReadableError: Could not start audio source"); Chromium's own
+log said why: "Requires MODIFY_AUDIO_SETTINGS and RECORD_AUDIO". The
+manifest had only RECORD_AUDIO. It is an install-time permission, so no
+prompt. With it, a test call from the tablet's page opened the mic, reached
+Twilio and rang. The SDK reports "disconnect" before the "error" that
+caused it, and `WebPhone` dropped that error as stale, which is why the
+log said only "the call ended": a late failure is now logged with its
+reason.

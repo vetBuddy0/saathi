@@ -105,6 +105,21 @@ def test_the_pages_events_move_the_panel_and_a_stale_id_is_dropped():
     assert shown[-1] == {"type": "call", "call": None}
 
 
+def test_the_error_that_follows_the_disconnect_is_still_logged(caplog):
+    # The SDK's order (2026-10-29, the tablet): "disconnect", then the
+    # "error" that caused it. The call is over at the first; the reason
+    # from the second must not be dropped as stale.
+    phone, sent, shown, _hold, _clock = _phone()
+    phone.on_status("page", True, "twilio")
+    phone.dial(SON, who="Udhi")
+    call_id = sent[0]["id"]
+    phone.on_event({"id": call_id, "event": "ended"})
+    with caplog.at_level("WARNING", logger="saathi.call.web_phone"):
+        phone.on_event({"id": call_id, "event": "failed", "detail": "Could not start audio source"})
+    assert "Could not start audio source" in caplog.text
+    assert not phone.active and shown[-1] == {"type": "call", "call": None}
+
+
 def test_the_end_button_and_a_hold_reach_the_same_hangup():
     phone, sent, shown, hold, _ = _phone()
     phone.on_status("page", True, "twilio")

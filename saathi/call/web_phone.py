@@ -167,8 +167,8 @@ class WebPhone:
         with self._lock:
             call = self._call
             if call is None or payload.get("id") != call.id:
-                return
-            if event == "ringing" and call.status == "calling":
+                call = None
+            elif event == "ringing" and call.status == "calling":
                 call.status = "ringing"
             elif event == "connected" and call.status != "connected":
                 call.status = "connected"
@@ -176,6 +176,17 @@ class WebPhone:
             elif event not in ("ended", "failed"):
                 return
             view = self._view_locked()
+        if call is None:
+            # The SDK says "disconnect" before the "error" that caused it
+            # (seen 2026-10-29: the mic could not open, the call ended in
+            # 0.9 s and the reason was dropped here). The call is over
+            # either way; the reason still goes in the log.
+            if event == "failed":
+                logger.warning(
+                    "twilio call failed (after it ended): %s",
+                    str(payload.get("detail", ""))[:200],
+                )
+            return
         if event in ("ended", "failed"):
             if event == "failed":
                 logger.warning("twilio call failed: %s", str(payload.get("detail", ""))[:200])
