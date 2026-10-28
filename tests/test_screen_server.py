@@ -79,6 +79,16 @@ async def test_index_serves_the_page():
         assert "face-container" in await response.text()
 
 
+async def test_the_page_and_its_scripts_are_never_cached():
+    # Inside the APK every file's mtime is 1980, and a heuristically
+    # cached face outlived app updates (server.py's _never_cached).
+    async with TestClient(TestServer(build_app(Core()))) as client:
+        for path in ("/", "/static/js/main.js", "/static/js/roboeyes.js"):
+            response = await client.get(path)
+            assert response.status == 200
+            assert response.headers["Cache-Control"] == "no-store", path
+
+
 async def test_spacebar_input_drives_state_over_the_websocket():
     core = Core()
     async with TestClient(TestServer(build_app(core))) as client:

@@ -314,6 +314,12 @@ class MainActivity : AppCompatActivity() {
         web.isHapticFeedbackEnabled = false
         web.webViewClient = FacePages()
         web.webChromeClient = FaceChrome()
+        // What an older engine left in the cache never runs again: the
+        // engine's files used to go out with a 1980 Last-Modified, and
+        // the WebView kept the old face for years (screen/server.py's
+        // _never_cached says why). The engine is on this phone, so a
+        // cold cache costs nothing.
+        web.clearCache(true)
     }
 
     /** The face from the engine in use with a fresh retry clock: when an engine is chosen, and after the setup dialog saves. */

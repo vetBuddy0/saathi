@@ -1298,7 +1298,24 @@ def build_app(
     if remote_audio is not None:
         app.router.add_get("/audio", audio_handler)
     app.router.add_static("/static/", _STATIC_DIR)
+    app.on_response_prepare.append(_never_cached)
     return app
+
+
+async def _never_cached(request: web.Request, response: web.StreamResponse) -> None:
+    """Every page and script of ours goes out `no-store`.
+
+    Why: inside the APK every file's mtime is 1980 (Chaquopy unpacks with
+    a fixed timestamp), so `Last-Modified` said "unchanged for decades" and
+    the tablet's WebView cached the face heuristically for years: after an
+    update it ran the old `roboeyes.js` and `main.js` (found 2026-10-29:
+    every state threw and Twilio never started). Revalidation alone
+    (`no-cache`) was the option that lost: the ETag aiohttp derives from
+    that frozen mtime and the size misses an edit that keeps the size.
+    Everything is served from this machine, so not caching costs nothing.
+    """
+    if request.path.startswith(("/static/", "/admin")) or request.path == "/":
+        response.headers["Cache-Control"] = "no-store"
 
 
 def run(

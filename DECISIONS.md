@@ -3771,3 +3771,15 @@ voice-capable tablet later): the demo tablet may be data-only, and a call
 that quietly takes another route is harder to explain on stage than one
 that says what is missing. Four remote-mode tests in `test_cli.py` and one
 in `test_android_entry.py` pinned the fallback and were rewritten for this.
+
+**2026-10-29 — The engine's pages go out `no-store`; the shell clears its
+WebView cache at start.** On the tablet, after updating the APK, the face
+ran the pre-merge `roboeyes.js` (every state change threw
+`setBlush is not a function`) and a `main.js` from before Twilio, so calls
+never started. Cause: inside the APK every file's mtime is 1980, so the
+WebView cached them heuristically for years. `screen/server.py` now sends
+`Cache-Control: no-store` for `/`, `/static/` and `/admin`, and
+`MainActivity` clears the cache once at start for what older engines
+left behind. Lost: `no-cache` with revalidation (the ETag from a frozen
+mtime misses a same-size edit) and versioned file names (every import in
+the face would change).
