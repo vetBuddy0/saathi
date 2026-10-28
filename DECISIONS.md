@@ -3826,3 +3826,20 @@ Twilio and rang. The SDK reports "disconnect" before the "error" that
 caused it, and `WebPhone` dropped that error as stale, which is why the
 log said only "the call ended": a late failure is now logged with its
 reason.
+
+**2026-10-29 — A developer switch keeps the last ten turns' audio; turning
+the volume up before Whisper was measured and lost.** On the tablet, "I'm
+feeling fucked up today" was transcribed "I think that's a great deal." and
+the model answered that sentence ("I'm glad you feel that way"): the reply
+was right for what it was given; the hearing was wrong. Every tablet turn
+logged that day arrived quiet (rms 115-205 of 32767), so normalising the
+level before upload was the obvious fix. It was measured first: the repo's
+two test sentences, turned down to rms 80-150 with background noise, gave
+Whisper the same transcript raw and boosted 20-40x, and the errors followed
+the noise, not the level. So the cause is in the audio itself (distance,
+room noise, or the platform's noise suppression on top of
+VOICE_COMMUNICATION's), and that needs the real clip. With
+`<data dir>/debug/keep-turn-audio` present, each turn past the speech gate
+is written to `<data dir>/debug/turn-<time>.wav`, the newest ten kept, off
+the hot path. Off by default: her voice is not kept on disk unless a
+developer asks.

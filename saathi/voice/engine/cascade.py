@@ -283,6 +283,34 @@ def _rms(pcm: bytes) -> int:
     return round(float(np.sqrt(np.mean(samples.astype(np.float64) ** 2))))
 
 
+# The developer's switch for hearing what the transcriber heard
+# (2026-10-29: "I'm feeling fucked up today" came back as "I think that's
+# a great deal." on the tablet, and a log line can't say whether the
+# audio was noisy, clipped by the platform's noise suppression, or fine).
+# Off unless a file named KEEP_TURN_AUDIO_FLAG exists in <data dir>/debug:
+# her voice is not kept on disk by default. Only the newest
+# KEEP_TURN_AUDIO_COUNT turns, named by time so they match the "heard"
+# log lines. Lost: an environment variable (the tablet's environment is
+# the shell's key store, not something a developer can flip over adb).
+KEEP_TURN_AUDIO_FLAG = "keep-turn-audio"
+KEEP_TURN_AUDIO_COUNT = 10
+
+
+def _turn_audio_dir() -> Path | None:
+    debug = Path(os.environ.get("SAATHI_DATA_DIR", Path.home() / ".saathi")) / "debug"
+    return debug if (debug / KEEP_TURN_AUDIO_FLAG).exists() else None
+
+
+def _keep_turn_audio(folder: Path, pcm: bytes) -> None:
+    try:
+        name = time.strftime("turn-%Y%m%d-%H%M%S.wav")
+        (folder / name).write_bytes(_pcm_to_wav_bytes(pcm))
+        for old in sorted(folder.glob("turn-*.wav"))[:-KEEP_TURN_AUDIO_COUNT]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        logger.exception("could not keep this turn's audio")
+
+
 def _pcm_to_flac_bytes(pcm: bytes, sample_rate: int = _SAMPLE_RATE) -> bytes:
     """The preferred upload, wherever `soundfile` imports. Used to be a
     raw WAV built with the stdlib `wave` module; real, live measurement
@@ -778,6 +806,10 @@ class CascadeSession:
             # Called by name and then silence: still a call, not nothing.
             self.heard_only_name = self._started_by_name
             return ""
+        keep_in = _turn_audio_dir()
+        if keep_in is not None:
+            # Off the hot path: the transcriber doesn't wait on the disk.
+            threading.Thread(target=_keep_turn_audio, args=(keep_in, pcm), daemon=True).start()
         upload_name, upload_bytes = _encode_for_stt(pcm)
 
         # A stored preference (Ctrl+L panel, or the spoken "speak to me
