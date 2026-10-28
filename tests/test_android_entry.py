@@ -201,8 +201,9 @@ async def test_start_serves_the_face_and_the_websocket_and_sets_the_environment(
     # the session on the "remote" sink, with the notes a person would see.
     assert FakeCascadeSession.instances[-1].sink_id == "remote"
     assert any("SAATHI_AUDIO=remote" in note for note in started["notes"])
-    # No Twilio relay on a phone; calls go over its SIM instead.
-    assert any("Calls use this device's SIM" in note for note in started["notes"])
+    # No Twilio relay on a phone, and no SIM route (Twilio only,
+    # 2026-10-28): these keys are not a full Twilio set, and the note says so.
+    assert any("Calls off" in note and "Twilio keys" in note for note in started["notes"])
 
 
 def test_stop_closes_the_port_restores_the_environment_and_a_second_start_works(entry):

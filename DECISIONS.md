@@ -3761,3 +3761,13 @@ refuses navigation off `$engine/admin`. Lost: a native Android console
 episodes in place (they are the record rules cite); writing keys from the
 engine (it doesn't own them on the tablet, and a page that writes secrets
 over HTTP is one more thing to secure).
+
+**2026-10-28 — On the Android app, calls go through Twilio only.** The
+owner: "the calls should go through Twilio only". Remote mode no longer
+falls back to the device's SIM when the TwiML App is missing; calling is
+off and the start-up note names the missing key. Lost: the SIM fallback
+(`call/device_phone.py` and the shell's `SimDialer` stay, unused, for a
+voice-capable tablet later): the demo tablet may be data-only, and a call
+that quietly takes another route is harder to explain on stage than one
+that says what is missing. Four remote-mode tests in `test_cli.py` and one
+in `test_android_entry.py` pinned the fallback and were rewritten for this.

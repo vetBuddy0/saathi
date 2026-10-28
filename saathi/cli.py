@@ -676,11 +676,12 @@ def console_info(runtime: Runtime) -> dict[str, Any]:
 
 
 def _remote_phone(runtime: Runtime):
-    """Remote mode's calling route: Twilio from the face page when the
-    Twilio keys and a TwiML App are set (call/web_phone.py, the owner's
-    choice for the demo, 2026-10-28), else the device's SIM
-    (call/device_phone.py)."""
-    from saathi.call.device_phone import DevicePhone
+    """Remote mode's calling route: Twilio from the face page
+    (call/web_phone.py) when the Twilio keys and a TwiML App are set,
+    else none. Twilio only, the owner's call (2026-10-28): the SIM route
+    (call/device_phone.py) lost because a demo tablet's SIM may be
+    data-only, and a call that silently goes another way is harder to
+    explain than one that says what key is missing."""
     from saathi.call.twilio import TwilioCredentials
     from saathi.call.web_phone import APP_SID_VAR, WebPhone, app_sid_from_env
 
@@ -694,9 +695,9 @@ def _remote_phone(runtime: Runtime):
             panel=panel.update if panel is not None else None,
             hold=runtime.hold,
         )
-    if creds is not None:
-        runtime.notes.append(f"Twilio calls need {APP_SID_VAR} too; using the SIM.")
-    return DevicePhone()
+    missing = "the Twilio keys" if creds is None else APP_SID_VAR
+    runtime.notes.append(f"Calls off: Twilio calls from the face page need {missing}.")
+    return None
 
 
 def _gated(tool, calling: CallingRuntime):
