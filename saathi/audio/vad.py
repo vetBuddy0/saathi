@@ -48,14 +48,24 @@ CHUNK_BYTES = CHUNK_SAMPLES * 2
 
 # The energy gate's threshold: per-chunk RMS, in int16 sample units after
 # removing the chunk's DC offset (a biased mic must not read as constant
-# speech). 1000 is about -30 dBFS. Why there: the echo-cancelled source's
-# silence, measured on this machine (2026-09-24, see `contains_speech`'s
-# docstring), sat at RMS 1-750, so 1000 clears it with margin; the
-# `known_sentence.wav` fixture's spoken chunks have a median RMS of
-# ~1650 and runs of 16+ consecutive chunks over 1000, against the
-# three-chunk debounce `SpeechStartDetector` asks for. A single click
-# or a door closing is one or two chunks, not three.
-ENERGY_GATE_RMS = 1000
+# speech). 100 is about -50 dBFS. A single click or a door closing is one
+# or two chunks, not the three `SpeechStartDetector` asks for.
+#
+# Why there (2026-10-28, measured on a Xiaomi tablet, Android 16, through
+# the shell's VOICE_COMMUNICATION capture): a full sentence at arm's
+# length and close up peaked at -32 dBFS and mostly sat at -35 to -55;
+# the room between words was -60 to -90. Every hold ended "nothing said".
+# What lost: 1000 (-30 dBFS), the first value, chosen from the laptop's
+# echo-cancelled silence (RMS 1-750, 2026-09-24) -- but the laptop runs
+# Silero, so this gate never sees that source; it only runs on Android,
+# where a phone held to the mouth cleared 1000 and a tablet across the
+# table never did. 100 passes `known_sentence.wav` scaled to a -40 dBFS
+# peak (seven chunks in a row) and sits 10 dB over the tablet's loudest
+# sustained room tone. Also lost: an adaptive gate relative to each
+# hold's noise floor (a hold that is all speech has no floor to measure),
+# and the platform's AutomaticGainControl in the shell (it lifts the room
+# with the voice, which is what this gate is here to tell apart).
+ENERGY_GATE_RMS = 100
 
 # Which gate has been logged for this process, so it's said once —
 # `contains_speech()` builds a fresh detector every turn.

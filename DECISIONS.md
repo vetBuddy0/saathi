@@ -3068,3 +3068,19 @@ widget whose only purpose is to unmask a private key).
 `git ls-files` and `git ls-tree origin/android-app` both list
 `.github/workflows/android.yml`, and the four workflow tests pass on a
 clean checkout.
+
+**2026-10-28 — The Android speech gate opens at RMS 100 (-50 dBFS),
+not 1000 (-30 dBFS).** "Works on my phone, not my tablet": on a Xiaomi
+tablet (Android 16) every hold ended "nothing said; turn ended
+silently". The microphone was fine -- AudioFlinger showed the shell's
+`VOICE_COMMUNICATION` capture open, unsilenced, AEC and NS attached --
+but speech across a table peaked at -32 dBFS and the RMS energy gate
+(the only gate on Android: no `pysilero-vad` wheel) wanted three 32 ms
+chunks in a row over -30. A phone held to the mouth clears that; a
+tablet never did. 1000 had come from the laptop's echo-cancelled
+silence, a source this gate never sees (the laptop runs Silero). 100
+passes `known_sentence.wav` at a -40 dBFS peak and stays 10 dB over the
+tablet's loudest room tone (-60). Lost: an adaptive per-hold floor (an
+all-speech hold has none to measure) and Android's AutomaticGainControl
+(lifts the room with the voice). `audio/vad.py`'s constant comment has
+the numbers; two tests pin them.

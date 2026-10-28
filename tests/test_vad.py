@@ -204,3 +204,41 @@ def test_energy_gate_still_requires_the_debounce(monkeypatch):
     assert vad_module.contains_speech(silent_chunk * 5 + loud_chunk + silent_chunk * 5) is False
     assert vad_module.contains_speech(silent_chunk * 5 + loud_chunk * 2 + silent_chunk * 5) is False
     assert vad_module.contains_speech(silent_chunk * 5 + loud_chunk * 3 + silent_chunk * 5) is True
+
+
+def _at_peak_dbfs(pcm: bytes, peak_dbfs: float) -> bytes:
+    """`pcm` scaled so its loudest 32 ms chunk has this RMS in dBFS."""
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float64)
+    loudest = max(
+        float(np.sqrt(np.mean((chunk - chunk.mean()) ** 2)))
+        for chunk in (samples[i : i + 512] for i in range(0, len(samples) - 511, 512))
+    )
+    target = 32768 * 10 ** (peak_dbfs / 20)
+    return np.clip(samples * target / loudest, -32768, 32767).astype("<i2").tobytes()
+
+
+def test_energy_gate_hears_a_sentence_at_tablet_level(monkeypatch):
+    # Measured 2026-10-28 on a Xiaomi tablet (Android 16): speech across
+    # a table peaked at -32 dBFS and every hold ended "nothing said" at
+    # the old -30 dBFS gate. A sentence peaking at -32 or even -40 dBFS
+    # is her talking, not a silent turn.
+    import saathi.audio.vad as vad_module
+
+    monkeypatch.setitem(sys.modules, "pysilero_vad", None)
+    sentence = _resampled_pcm16(_KNOWN_SENTENCE_WAV, SAMPLE_RATE)
+
+    assert vad_module.contains_speech(_at_peak_dbfs(sentence, -32.0)) is True
+    assert vad_module.contains_speech(_at_peak_dbfs(sentence, -40.0)) is True
+
+
+def test_energy_gate_ignores_tablet_room_tone(monkeypatch):
+    # The same tablet's room between words: -60 dBFS at the loudest,
+    # sustained for half a second. Three seconds of it is a silent turn.
+    import saathi.audio.vad as vad_module
+
+    monkeypatch.setitem(sys.modules, "pysilero_vad", None)
+    rng = np.random.default_rng(0)
+    rms = 32768 * 10 ** (-60.0 / 20)
+    room = (rng.standard_normal(SAMPLE_RATE * 3) * rms).astype("<i2").tobytes()
+
+    assert vad_module.contains_speech(room) is False
