@@ -73,6 +73,12 @@ data class PhoneMessage(val action: String, val number: String?, val via: String
         get() = via == null || via == "sim"
 }
 
+/**
+ * `{"type":"wake","listen":...}`: whether the tablet may listen for its
+ * wake word now (`WakeWord.kt`). Sent only after [Protocol.subscribeWake].
+ */
+data class WakeMessage(val listen: Boolean) : WsMessage
+
 /** A `type` this build does not know. Kept so it can be logged, never acted on. */
 data class UnknownMessage(val type: String, val raw: JSONObject) : WsMessage
 
@@ -103,6 +109,8 @@ object Protocol {
     const val TYPE_CARD = "card"
     const val TYPE_CAPTION = "caption"
     const val TYPE_SETTINGS = "settings"
+    const val TYPE_WAKE = "wake"
+    const val TYPE_SUBSCRIBE = "subscribe"
     const val TYPE_PHONE = "phone"
 
     // client -> server types
@@ -178,6 +186,7 @@ object Protocol {
             TYPE_CAPTION -> obj.str("text")?.let { CaptionMessage(obj.str("who"), it, obj) }
             TYPE_SETTINGS -> SettingsMessage(obj)
             TYPE_PHONE -> obj.str("action")?.let { PhoneMessage(it, obj.str("number"), obj.str("via")) }
+            TYPE_WAKE -> obj.bool("listen")?.let { WakeMessage(it) }
             else -> UnknownMessage(type, obj)
         }
     }
@@ -188,6 +197,21 @@ object Protocol {
             .put("type", TYPE_INPUT)
             .put("event", if (pressed) EVENT_PRESS else EVENT_RELEASE)
             .toString()
+
+    /**
+     * `{"type":"input","event":"press","by":"name"}` -- the wake word
+     * pressed for her: the engine then wants the name in the transcript.
+     */
+    fun pressByName(): String =
+        JSONObject()
+            .put("type", TYPE_INPUT)
+            .put("event", EVENT_PRESS)
+            .put("by", "name")
+            .toString()
+
+    /** `{"type":"subscribe","wake":true}` -- send this socket the [WakeMessage]s. */
+    fun subscribeWake(): String =
+        JSONObject().put("type", TYPE_SUBSCRIBE).put("wake", true).toString()
 
     /** `{"type":"phone_status","can_call":...}` -- whether this device can place a call over its SIM. */
     fun phoneStatus(canCall: Boolean): String =

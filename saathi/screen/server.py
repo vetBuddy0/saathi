@@ -199,6 +199,7 @@ from saathi.identity.preferences import (
     CAPTIONS_KEY,
     LANGUAGE_KEY,
     TTS_BACKEND_KEY,
+    WAKE_WORD_KEY,
     read_preference,
     write_preference,
 )
@@ -543,8 +544,41 @@ def build_app(
         if task is not None:
             task.cancel()
 
+    # The tablet's wake word ("Melody": the Android shell's keyword
+    # spotter, on the device). The shell owns the microphone and the
+    # spotting; whether it may listen is decided here, where the turn
+    # and the calls are known: her setting on, the engine idle or
+    # asleep (never while she is listening, being answered, or spoken
+    # to), and no call on screen -- the call's page needs the mic, and
+    # "Melody" said to her son mid-call must not start a turn. Sent as
+    # `{"type": "wake", "listen": bool}` only to sockets that asked
+    # (`{"type": "subscribe", "wake": true}`), so the face page's
+    # stream is unchanged.
+    wake_subscribers: set[web.WebSocketResponse] = set()
+    wake_listen: dict[str, bool | None] = {"value": None}
+
+    def wake_allowed() -> bool:
+        if session is None:
+            return False
+        if store is not None and read_preference(store, WAKE_WORD_KEY, "on") == "off":
+            return False
+        if calls is not None and calls.current_id is not None:
+            return False
+        return core.state in (State.IDLE, State.SLEEPING)
+
+    def refresh_wake() -> None:
+        allowed = wake_allowed()
+        if allowed == wake_listen["value"]:
+            return
+        wake_listen["value"] = allowed
+        message = json.dumps({"type": "wake", "listen": allowed})
+        for ws in list(wake_subscribers):
+            if not ws.closed:
+                asyncio.ensure_future(ws.send_str(message))
+
     def broadcast_state(state, _event: Event) -> None:
         _send_all(json.dumps({"type": "state", "state": state.value}))
+        refresh_wake()
 
     core.subscribe(broadcast_state)
 
@@ -574,6 +608,8 @@ def build_app(
         if loop is None or loop.is_closed():
             return
         loop.call_soon_threadsafe(_send_all, json.dumps(payload))
+        if payload.get("type") == "call":
+            loop.call_soon_threadsafe(refresh_wake)
 
     def end_turn_answered_on_screen() -> None:
         """Her tap answered the question the live turn is asking, so the
@@ -645,10 +681,14 @@ def build_app(
     # websocket_handler's `finally`.
     press_owner: dict[str, web.WebSocketResponse | None] = {"ws": None}
 
-    def handle_input(kind: str, ws: web.WebSocketResponse) -> None:
+    def handle_input(kind: str, ws: web.WebSocketResponse, by_name: bool = False) -> None:
         """One press or release from `ws` -- or the release the server
         synthesises for a socket that closed with its press down. Every
-        press and release goes through here, so the two cannot drift."""
+        press and release goes through here, so the two cannot drift.
+        `by_name`: the tablet heard its wake word and pressed for her;
+        the turn's audio starts with the name, and the cloud transcript
+        must have it too (cascade.py's `mentions_name`) or the turn ends
+        silently -- the same second check as the laptop's wake path."""
         if kind == "press":
             press_route["value"] = "hold" if hold is not None and hold.active else "core"
         routed_to_hold = press_route["value"] == "hold"
@@ -711,6 +751,8 @@ def build_app(
                     turn_generation["value"] += 1
                     session.interrupt()
                 begin_capture(_make_on_chunk(session))
+                if by_name:
+                    _mark_started_by_name(session)
         elif kind == "release":
             end_listening()
 
@@ -1099,12 +1141,12 @@ def build_app(
                 if payload.get("type") == "set_preference":
                     key = payload.get("key")
                     value = payload.get("value")
-                    if key not in (LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY) or not isinstance(
-                        value, str
-                    ):
+                    if key not in (
+                        LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY, WAKE_WORD_KEY
+                    ) or not isinstance(value, str):
                         logger.warning("dropped malformed set_preference: %r", payload)
                         continue
-                    if key == CAPTIONS_KEY and value not in ("on", "off"):
+                    if key in (CAPTIONS_KEY, WAKE_WORD_KEY) and value not in ("on", "off"):
                         logger.warning("dropped malformed set_preference: %r", payload)
                         continue
                     if store is None:
@@ -1126,6 +1168,7 @@ def build_app(
                         )
                     )
                     _send_all(_settings_message(store))
+                    refresh_wake()
                     continue
                 if payload.get("type") == "media_event":
                     # The player reporting back ("ended", "error"). A
@@ -1213,13 +1256,19 @@ def build_app(
                     else:
                         logger.info("end-call tap dropped: no such call on screen")
                     continue
+                if payload.get("type") == "subscribe":
+                    if payload.get("wake") is True:
+                        wake_subscribers.add(ws)
+                        await ws.send_str(json.dumps({"type": "wake", "listen": wake_allowed()}))
+                    continue
                 if payload.get("type") != "input":
                     continue
                 kind = payload.get("event")
                 if kind in ("press", "release"):
-                    handle_input(kind, ws)
+                    handle_input(kind, ws, by_name=payload.get("by") == "name")
         finally:
             websockets.discard(ws)
+            wake_subscribers.discard(ws)
             if phone is not None:
                 phone.on_status(ws, False)
             if press_owner["ws"] is ws and ws.close_code != WSCloseCode.OK:
@@ -1300,7 +1349,7 @@ def build_app(
                 store.path,
                 session=session,
                 info=admin_info,
-                settings_changed=lambda: _send_all(_settings_message(store)),
+                settings_changed=lambda: (_send_all(_settings_message(store)), refresh_wake()),
             ),
         )
     app.router.add_get("/ws", websocket_handler)

@@ -357,7 +357,7 @@ for (const select of document.querySelectorAll("[data-pref]")) {
 }
 
 function drawSettings(prefs) {
-  const defaults = { language: "english", tts_backend: "google-chirp3-hd", captions: "off" };
+  const defaults = { language: "english", tts_backend: "google-chirp3-hd", captions: "off", wake_word: "on" };
   for (const select of document.querySelectorAll("[data-pref]")) {
     const value = prefs[select.dataset.pref] ?? defaults[select.dataset.pref];
     if ([...select.options].some((o) => o.value === value)) select.value = value;

@@ -85,6 +85,14 @@ class OkHttpEngineLink(private val client: OkHttpClient) : EngineLink {
         send(Protocol.input(pressed))
     }
 
+    override fun sendPressByName() {
+        send(Protocol.pressByName())
+    }
+
+    override fun subscribeWake() {
+        send(Protocol.subscribeWake())
+    }
+
     override fun sendMediaEvent(event: String, videoId: String?, code: Any?, target: String?) {
         send(Protocol.mediaEvent(event, videoId, code, target))
     }
@@ -214,6 +222,10 @@ class OkHttpEngineLink(private val client: OkHttpClient) : EngineLink {
                 }
                 is PhoneMessage -> {
                     target.onPhone(message)
+                    true
+                }
+                is WakeMessage -> {
+                    target.onWake(message.listen)
                     true
                 }
                 else -> false

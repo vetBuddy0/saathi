@@ -370,3 +370,65 @@ def test_mentions_name_confirms_the_cloud_heard_her_name():
     assert not mentions_name("Then how? We need to finish the report.")
     assert not mentions_name("Cookie or cake?")
     assert not mentions_name("今天天气怎么样？")
+
+
+# -- "Melody", the tablet's wake word (2026-10-29) ----------------------------
+
+
+def test_melody_is_a_name_she_answers_to_and_its_command_is_what_follows():
+    from saathi.audio.wake import is_only_name, match_wake_word, mentions_name, strip_wake_word
+
+    assert match_wake_word("Melody, play a song.") == (True, "play a song")
+    assert match_wake_word("Hey Melody, call my son.") == (True, "call my son")
+    assert strip_wake_word("Melody, what time is it?", loose=True) == "what time is it?"
+    assert is_only_name("Melody?", loose=True)
+    assert mentions_name("Melodie, play something.")  # the cloud's respelling
+
+
+def test_malady_the_one_word_the_tablet_takes_for_melody_fails_the_cloud_check():
+    from saathi.audio.wake import match_wake_word, mentions_name
+
+    assert not mentions_name("What a lovely malady.")
+    assert match_wake_word("What a lovely malady.") == (False, "")
+
+
+def test_talk_about_a_melody_is_not_a_call():
+    from saathi.audio.wake import match_wake_word
+
+    assert match_wake_word("That's a nice melody.") == (False, "")
+    assert match_wake_word("Play this melody again.") == (False, "")
+
+
+# Groq's whisper-large-v3-turbo with the language pinned to Hindi, on
+# "Melody, ..." clips (measured 2026-10-29): the name comes back in
+# Devanagari, and the second check must still find it.
+@pytest.mark.parametrize(
+    "heard, command",
+    [
+        (" मेलदी, वट ताम इस इत?", "वट ताम इस इत?"),
+        (" मेलोड़ी. वट ताम इस इत?", "वट ताम इस इत?"),
+        (" मेलोड़ वट ताम इस इट", "वट ताम इस इट"),
+        (" मेलोधी, आफ फिल्ग जोड़ तोड़ जाई", "आफ फिल्ग जोड़ तोड़ जाई"),
+        (" मेलदी", ""),
+    ],
+)
+def test_melody_written_in_devanagari_is_her_name(heard, command):
+    from saathi.audio.wake import is_only_name, mentions_name, strip_wake_word
+
+    assert mentions_name(heard)
+    assert strip_wake_word(heard, loose=True) == command
+    assert is_only_name(heard, loose=True) == (command == "")
+
+
+def test_melody_run_into_the_next_word_is_still_her_name():
+    from saathi.audio.wake import is_only_name, mentions_name, strip_wake_word
+
+    assert mentions_name("melodyplay a song")
+    assert not mentions_name("a melodious song")
+
+
+def test_devanagari_is_only_cut_when_the_turn_began_with_her_name():
+    from saathi.audio.wake import is_only_name, mentions_name, strip_wake_word
+
+    assert strip_wake_word("मेलदी, गाना बजाओ") == "मेलदी, गाना बजाओ"
+    assert not mentions_name("गाना बजाओ")

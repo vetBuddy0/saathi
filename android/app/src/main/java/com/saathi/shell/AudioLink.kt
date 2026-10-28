@@ -56,6 +56,16 @@ interface AudioLink {
      */
     fun stopSending(onDrained: (() -> Unit)? = null)
 
+    /** [startSending], with [preroll] (audio already captured) sent first. */
+    fun startSending(preroll: ByteArray) = startSending()
+
+    /**
+     * With a [tap], the microphone stays open between holds and every
+     * captured frame is handed to it (on the mic thread), sent or not --
+     * the wake word's ears. Null closes the mic again between holds.
+     */
+    fun setFrameTap(tap: ((ByteArray) -> Unit)?) = Unit
+
     var listener: Listener?
 
     interface Listener {

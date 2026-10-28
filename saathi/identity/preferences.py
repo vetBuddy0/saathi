@@ -40,6 +40,10 @@ TTS_BACKEND_KEY = "tts_backend"
 # and what she replied. For whoever is setting up or demoing the device,
 # toggled from the Ctrl+L panel -- see screen/static/js/captions.js.
 CAPTIONS_KEY = "captions"
+# "on" / "off" (absent = on): the tablet listens for its wake word
+# ("Melody", the Android shell's keyword spotter) between turns. Off
+# leaves the button only, and the mic closed between holds.
+WAKE_WORD_KEY = "wake_word"
 VOICE_KEY = "voice"
 
 

@@ -79,6 +79,7 @@ import queue
 import re
 import threading
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable
@@ -89,6 +90,12 @@ from saathi.audio.vad import CHUNK_BYTES, SAMPLE_RATE, VoiceActivityDetector
 logger = logging.getLogger(__name__)
 
 WAKE_WORD = "kaki"
+# Every name she answers to. "Melody" was added for the tablet
+# (2026-10-29, owner), where the Android shell's keyword spotter hears
+# it on the device; the turn's cloud transcript must still contain one
+# of these (`mentions_name`). The laptop's tiny.en listener matches
+# both too, primed with "Kaki" only.
+WAKE_NAMES = (WAKE_WORD, "melody")
 # What tiny.en is told to expect, so it spells the name the same way.
 WAKE_PROMPT = "Kaki"
 DEFAULT_WAKE_MODEL = "tiny.en"
@@ -102,6 +109,8 @@ _NOT_A_CALL_BEFORE = frozenset({
     "my", "your", "his", "her", "our", "their", "the", "a", "an", "old", "best",
     "kopi", "mahjong", "makan", "drinking", "chess", "gym", "jogging", "walking",
     "football", "badminton", "karaoke", "shopping", "kaki",
+    # "a lovely melody", "this melody": talk about a tune, not a call.
+    "this", "that", "nice", "lovely", "sweet", "beautiful", "sad", "same", "melody",
 })
 _WAKE_WITHIN_WORDS = 3
 
@@ -119,7 +128,7 @@ Transcriber = Callable[[bytes], str]
 def _is_name(word: str) -> bool:
     if word in _KNOWN_MISHEARINGS:
         return True
-    return difflib.SequenceMatcher(None, word, WAKE_WORD).ratio() >= _SIMILARITY
+    return any(difflib.SequenceMatcher(None, word, name).ratio() >= _SIMILARITY for name in WAKE_NAMES)
 
 
 def match_wake_word(text: str) -> tuple[bool, str]:
@@ -148,6 +157,9 @@ def match_wake_word(text: str) -> tuple[bool, str]:
 # nearest English word. They also confirm a wake (`mentions_name`).
 _CLOUD_MISHEARINGS = frozenset({
     "khaki", "cocky", "kacky", "cakey", "kakki", "caki", "tacky", "packy", "kaggy", "paki",
+    # "Melody" (similarity 0.77-0.83, under the line): never "malady"
+    # (0.67), the one word the tablet's spotter also takes for the name.
+    "melodie", "melodi", "melodee",
 })
 # Said before the name, never meant as content: "Hey Kaki".
 _GREETINGS = frozenset({"hey", "hi", "hello", "ok", "okay", "oh"})
@@ -181,6 +193,11 @@ def strip_wake_word(text: str, *, loose: bool = False) -> str:
     (`_CLOUD_MISHEARINGS`). A name said twice ("Saathi... Saathi, play")
     is taken twice."""
     while True:
+        if loose:
+            cut = _strip_scripted_name(text)
+            if cut != text:
+                text = cut
+                continue
         words = re.findall(r"[^\W_]+(?:'[^\W_]+)?", text, flags=re.UNICODE)
         drop = _leading_name_words([w.lower() for w in words], loose)
         if not drop:
@@ -193,10 +210,41 @@ def strip_wake_word(text: str, *, loose: bool = False) -> str:
         text = text[position:].lstrip(" ,.!?;:-")
 
 
+def _strip_scripted_name(text: str) -> str:
+    """A leading "Melody" the transcriber wrote in Devanagari, cut with
+    the vowel signs that hang off it (they are not \\w to `re`, so the
+    word loop above cannot see the name)."""
+    normal = unicodedata.normalize("NFC", text).lstrip(" ,.!?;:-")
+    for name in _CLOUD_NAME_SCRIPTED:
+        if normal.startswith(name):
+            rest = normal[len(name):]
+            while rest and unicodedata.category(rest[0]).startswith("M"):
+                rest = rest[1:]
+            return rest.lstrip(" ,.!?;:-।")
+    return text
+
+
 # How the cloud transcriber writes the name in Chinese characters when
 # she says it in a Mandarin sentence (measured 2026-10-09, gpt-transcribe
 # on Chirp3-HD cmn-CN clips: "卡奇，今天天气怎么样？").
 _CLOUD_NAME_HANZI = ("卡奇", "咖奇", "卡琪", "卡吉", "卡key")
+
+# "Melody" as Groq's whisper-large-v3-turbo writes it with the language
+# pinned to Hindi (measured 2026-10-29 on 36 synthetic "Melody, ..."
+# clips, six voices: 22 in Devanagari, 9 in Latin letters, 5 lost or
+# mangled). Longest first, so the cut in `_strip_scripted_name` takes
+# the whole name. With the language pinned to Chinese it stayed in
+# Latin letters every time it was written at all, once run into the
+# next word ("melodyplay": `_NAME_PREFIXES`). Bengali was not measured
+# usefully: English speech pinned to Bengali came back as noise.
+_CLOUD_NAME_SCRIPTED = tuple(
+    unicodedata.normalize("NFC", name)
+    for name in ("मेलोड़ी", "मेलोडी", "मेलोधी", "मेलोदी", "मेलदी", "मेलडी", "मेलोड़")
+)
+
+# Names long enough that a word starting with one is the name run into
+# the next word, not another word.
+_NAME_PREFIXES = ("melody",)
 
 
 def mentions_name(text: str) -> bool:
@@ -213,7 +261,12 @@ def mentions_name(text: str) -> bool:
     respellings count (`_CLOUD_MISHEARINGS`)."""
     if any(name in text for name in _CLOUD_NAME_HANZI):
         return True
+    normal = unicodedata.normalize("NFC", text)
+    if any(name in normal for name in _CLOUD_NAME_SCRIPTED):
+        return True
     words = re.findall(r"[^\W_]+(?:'[^\W_]+)?", text.lower(), flags=re.UNICODE)
+    if any(w.startswith(_NAME_PREFIXES) for w in words):
+        return True
     return any(_is_name(w) or w in _CLOUD_MISHEARINGS for w in words) or any(
         _is_name(a + b) for a, b in zip(words, words[1:])
     )

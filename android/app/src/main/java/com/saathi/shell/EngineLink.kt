@@ -29,6 +29,12 @@ interface EngineLink {
     /** The push-to-talk: `press` on true, `release` on false. */
     fun sendInput(pressed: Boolean)
 
+    /** The wake word's press (`WakeWord.kt`); a plain press where a link has no such thing. */
+    fun sendPressByName() = sendInput(true)
+
+    /** Ask for `{"type":"wake"}` frames on this socket; once per connection. */
+    fun subscribeWake() = Unit
+
     /**
      * The watch page reporting `ended`, `error` (with a code) or `reset`.
      * [target] names which player is reporting (`Protocol.TARGET_BROWSER`
@@ -51,6 +57,9 @@ interface EngineLink {
 
         /** A `phone` frame: a call the engine has decided on. Only [PhoneCalls] acts on it. */
         fun onPhone(message: PhoneMessage) = Unit
+
+        /** Whether the tablet may listen for its wake word now. */
+        fun onWake(listen: Boolean) = Unit
 
         fun onConnected()
 

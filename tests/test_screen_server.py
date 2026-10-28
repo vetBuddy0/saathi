@@ -2787,3 +2787,84 @@ def test_run_hands_the_console_info_and_the_cloud_copy_to_the_app(monkeypatch):
     info, cloud = (lambda: {}), object()
     server_module.run(Core(), "127.0.0.1", 0, admin_info=info, cloud=cloud)
     assert seen["admin_info"] is info and seen["cloud"] is cloud and seen["app"] == "app"
+
+
+# -- the tablet's wake word: when it may listen, and a press by name ---------
+
+
+async def _next_wake(ws) -> bool:
+    while True:
+        message = await asyncio.wait_for(ws.receive_json(), 5)
+        if message.get("type") == "wake":
+            return message["listen"]
+
+
+class NamedSession(HeardSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.by_name = 0
+
+    def started_by_name(self) -> None:
+        self.by_name += 1
+
+
+async def test_the_tablet_may_listen_only_while_idle_and_only_when_it_asked(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    store = _tmp_store()
+    app = build_app(Core(initial=State.IDLE), session=HeardSession(), capture_source_id="src", store=store)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as shell, client.ws_connect("/ws") as face:
+            await _connect(shell)
+            await _connect(face)
+            await shell.send_json({"type": "subscribe", "wake": True})
+            assert await _next_wake(shell) is True
+            await shell.send_json({"type": "input", "event": "press"})
+            assert await _next_wake(shell) is False  # her turn: the button has the mic
+            await shell.send_json({"type": "input", "event": "release"})
+            assert await _next_wake(shell) is True  # the turn is over
+            # Her setting turns it off and on.
+            await face.send_json({"type": "set_preference", "key": "wake_word", "value": "off"})
+            assert await _next_wake(shell) is False
+            await face.send_json({"type": "set_preference", "key": "wake_word", "value": "on"})
+            assert await _next_wake(shell) is True
+            face_got = []
+            while True:
+                try:
+                    face_got.append(await asyncio.wait_for(face.receive_json(), 0.3))
+                except asyncio.TimeoutError:
+                    break
+    store.close()
+    assert not [m for m in face_got if m.get("type") == "wake"]  # never asked, never told
+
+
+async def test_the_tablet_is_deaf_to_its_name_while_a_call_is_on_screen(monkeypatch):
+    from saathi.screen.call_panel import CallPanel, CallView
+
+    calls = CallPanel()
+    app = build_app(Core(initial=State.IDLE), session=HeardSession(), capture_source_id="src", calls=calls)
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as shell:
+            await _connect(shell)
+            await shell.send_json({"type": "subscribe", "wake": True})
+            assert await _next_wake(shell) is True
+            calls.update(CallView("Udhi", "+65", "ringing"))
+            assert await _next_wake(shell) is False
+            calls.update(None)
+            assert await _next_wake(shell) is True
+
+
+async def test_a_press_by_name_marks_the_turn_and_a_plain_press_does_not(monkeypatch):
+    monkeypatch.setattr(server_module, "Capture", FakeCapture)
+    session = NamedSession()
+    app = build_app(Core(initial=State.IDLE), session=session, capture_source_id="src")
+    async with TestClient(TestServer(app)) as client:
+        async with client.ws_connect("/ws") as ws:
+            await _connect(ws)
+            await _turn_messages(ws)
+            assert session.by_name == 0
+            await ws.send_json({"type": "input", "event": "press", "by": "name"})
+            await ws.receive_json()  # listening
+            assert session.by_name == 1
+            await ws.send_json({"type": "input", "event": "release"})
+            while (await ws.receive_json()) != {"type": "state", "state": "idle"}:
+                pass

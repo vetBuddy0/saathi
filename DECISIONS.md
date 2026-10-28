@@ -3893,3 +3893,40 @@ Also fixed: `screen/server.py`'s `run()` took no `admin_info`, which
 a TypeError before the face came up. KeysTest's pinned list of the names
 the tablet stores was extended by the four AWS names: the owner changed
 what the device holds, so the test changed with it.
+
+**2026-10-29 — "Melody" wakes the tablet, spotted on the device with
+sherpa-onnx.** The owner asked for "Melody" as the tablet's wake word, the
+best way. The laptop's listener (Silero VAD + faster-whisper tiny.en)
+cannot run in the app: the embedded Python has no onnxruntime or
+ctranslate2 wheels. So the shell spots the word itself: sherpa-onnx's
+keyword spotter (v1.13.8, Apache-2.0; Kotlin API vendored unmodified under
+`com/k2fsa/sherpa/onnx`, arm64 JNI libraries in `jniLibs`) with the
+3.3M-parameter gigaspeech zipformer (Apache-2.0, ~5 MB int8 in
+`assets/kws`), told the word as tokens (`▁ME LO D Y`). Measured on the
+laptop with the same model and settings: 36/36 synthetic "Melody, ..."
+clips across six voices (35/36 at the tablet's quiet level); no wake in
+204 s of ordinary talk or in nine of her real turns; the one near-miss is
+"malady" (6 of 60 negatives), which the engine's second check
+(`mentions_name`, similarity 0.67 < 0.88) drops silently. On the tablet,
+2 of 3 clips played from the laptop's speaker across the desk woke it and
+were answered. The engine decides when the tablet may listen
+(`{"type":"wake","listen":...}` to sockets that `subscribe`): the
+`wake_word` setting on (console, default on), idle or asleep, no call on
+screen. A wake presses with `"by":"name"`, so the turn gets the same
+second check as the laptop's. The turn's audio is the 2.5 s before the
+spot (the name, which that check needs) plus what follows, until an
+energy endpointer hears 0.9 s of quiet. The x86_64 emulator build has no
+wake word (no native library there); the button works everywhere. Cost:
+the spotter on every frame was ~31% of one tablet core, so frames the
+noise suppressor has gated to silence (rms <= 4) are skipped past a 1 s
+tail. The idle mic thread is now 0.8% of a core. The APK grew from ~62 to
+~97 MB, mostly onnxruntime (22 MB). Lost: Picovoice Porcupine (a new
+vendor with an access key: asked-first territory), Android's
+SpeechRecognizer in a loop (not made for always-on; no reliable
+on-device recogniser here), and sending audio to the cloud to find the
+name (nothing leaves the device before she calls). With the language
+pinned to Hindi, Whisper writes the name in Devanagari (22 of 36 clips:
+मेलदी, मेलोड़ी, ...), which the second check would have thrown away;
+those spellings now count and are cut like the Latin name (31 of 36 now
+pass, from 9). The persona and captions still call her "Kaki": renaming
+her changes what she hears, so it is the owner's call.

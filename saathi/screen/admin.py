@@ -55,6 +55,7 @@ from saathi.identity.preferences import (
     CAPTIONS_KEY,
     LANGUAGE_KEY,
     TTS_BACKEND_KEY,
+    WAKE_WORD_KEY,
     write_preference,
 )
 from saathi.identity.store import IdentityStore, UnknownRow
@@ -87,7 +88,7 @@ KEYS: list[tuple[str, str]] = [
     ("AWS_REGION", "The bucket's region, e.g. ap-southeast-1."),
     ("AWS_S3_BUCKET", "The S3 bucket name."),
 ]
-PREFERENCE_KEYS = (LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY)
+PREFERENCE_KEYS = (LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY, WAKE_WORD_KEY)
 
 # What each table in identity.sqlite3 is for, who writes it, and whether
 # any of it reaches the model -- the "Under the hood" tab. The columns

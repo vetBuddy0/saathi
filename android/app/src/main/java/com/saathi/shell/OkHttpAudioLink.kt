@@ -147,6 +147,7 @@ import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.IOException
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import okhttp3.OkHttpClient
@@ -184,6 +185,14 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
     /** True between [startSending] and [stopSending]; read by the mic thread. */
     @Volatile
     private var sending = false
+
+    /** Sent ahead of the hold's first live frame, then cleared (the wake word's name). */
+    @Volatile
+    private var preroll: ByteArray? = null
+
+    /** The wake word's ears: while set the mic stays open between holds (`WakeWord.kt`). */
+    @Volatile
+    private var tap: ((ByteArray) -> Unit)? = null
 
     @Volatile
     override var listener: AudioLink.Listener? = null
@@ -241,6 +250,30 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
             return
         }
         sending = true
+        val thread = synchronized(lock) {
+            mic ?: MicThread().also {
+                mic = it
+                it.start()
+            }
+        }
+        thread.wake()
+    }
+
+    override fun startSending(preroll: ByteArray) {
+        this.preroll = preroll
+        startSending()
+    }
+
+    override fun setFrameTap(tap: ((ByteArray) -> Unit)?) {
+        if (tap != null) {
+            val granted = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO)
+            if (granted != PackageManager.PERMISSION_GRANTED) {
+                Log.w(TAG, "RECORD_AUDIO not granted; no wake word")
+                return
+            }
+        }
+        this.tap = tap
+        if (tap == null) return
         val thread = synchronized(lock) {
             mic ?: MicThread().also {
                 mic = it
@@ -720,25 +753,36 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
             if (now) onDrained()
         }
 
+        /** Run the drain a hold left, while the mic stays open for the wake word. */
+        fun runPendingDrain() {
+            val drained = gate.withLock { pendingDrain.also { pendingDrain = null } }
+            drained?.invoke()
+        }
+
         override fun run() {
             while (!quitting) {
                 gate.withLock {
-                    while (!sending && !quitting) woken.await()
+                    while (!sending && tap == null && !quitting) woken.await()
                     capturing = true
                 }
-                if (!quitting) capture()
+                val ok = quitting || capture()
                 val drained = gate.withLock {
                     capturing = false
                     pendingDrain.also { pendingDrain = null }
                 }
                 drained?.invoke()
+                // A mic that failed while the wake word keeps it wanted is
+                // retried, but not in a tight loop.
+                if (!ok && tap != null) {
+                    gate.withLock { if (!quitting) woken.await(MIC_RETRY_MS, TimeUnit.MILLISECONDS) }
+                }
             }
         }
 
         // The permission is checked in startSending(), on the thread that
         // sets `sending`; lint cannot see across the thread hop.
         @SuppressLint("MissingPermission")
-        private fun capture() {
+        private fun capture(): Boolean {
             val minBytes = AudioRecord.getMinBufferSize(
                 Protocol.Audio.SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
@@ -747,7 +791,7 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
             if (minBytes <= 0) {
                 Log.e(TAG, "no 16 kHz mono capture on this device ($minBytes)")
                 sending = false
-                return
+                return false
             }
             val bufferBytes = maxOf(minBytes, Protocol.Audio.CHUNK_BYTES) * BUFFER_FACTOR
             val record = try {
@@ -761,13 +805,13 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
             } catch (e: IllegalArgumentException) {
                 Log.e(TAG, "AudioRecord refused 16 kHz mono PCM16", e)
                 sending = false
-                return
+                return false
             }
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(TAG, "microphone did not initialise (in use, or no permission)")
                 record.release()
                 sending = false
-                return
+                return false
             }
             val session = record.audioSessionId
             val aec = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(session) else null
@@ -781,11 +825,12 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
                 if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                     Log.e(TAG, "microphone did not start (held by another app?)")
                     sending = false
-                    return
+                    return false
                 }
-                while (sending && !quitting) {
+                while ((sending || tap != null) && !quitting) {
+                    val wasSending = sending
                     var filled = 0
-                    while (filled < chunk.size && sending && !quitting) {
+                    while (filled < chunk.size && (sending || tap != null) && !quitting) {
                         val n = record.read(chunk, filled, chunk.size - filled)
                         if (n > 0) {
                             filled += n
@@ -794,19 +839,45 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
                         if (n < 0 || record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                             Log.e(TAG, "microphone read failed ($n)")
                             sending = false
+                            return false
                         } else {
                             // Zero bytes while still recording: nothing
                             // ready yet. Yield rather than spin.
                             Thread.sleep(EMPTY_READ_SLEEP_MS)
                         }
                     }
+                    // Decided before the tap runs: a wake that starts the
+                    // hold from inside the tap has this frame in its preroll.
+                    val forHold = wasSending || sending
+                    if (filled > 0) {
+                        val ears = tap
+                        if (ears != null) {
+                            try {
+                                ears(chunk.copyOf(filled))
+                            } catch (e: RuntimeException) {
+                                Log.e(TAG, "wake word failed on a frame", e)
+                            }
+                        }
+                    }
+                    // The preroll (the wake word's name) goes first, once.
+                    preroll?.let {
+                        preroll = null
+                        sendFrame(it.toByteString())
+                    }
                     // The tail of a hold is the end of her sentence: a short
                     // last frame goes up rather than being dropped. The
                     // engine joins frames of any size.
-                    if (filled > 0) sendFrame(chunk.toByteString(0, filled))
+                    if (forHold && filled > 0) sendFrame(chunk.toByteString(0, filled))
+                    if (!sending) {
+                        // A hold ended while the mic stays open for the
+                        // wake word: its release goes out now, not when the
+                        // mic next closes.
+                        runPendingDrain()
+                    }
                 }
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "microphone failed mid-hold", e)
+                return false
             } catch (e: InterruptedException) {
                 quitting = true
             } finally {
@@ -819,6 +890,7 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
                 }
                 record.release()
             }
+            return true
         }
     }
 
@@ -832,6 +904,7 @@ class OkHttpAudioLink(private val client: OkHttpClient, context: Context) : Audi
         const val BACKOFF_FIRST_MS = 1000L
         const val BACKOFF_MAX_MS = 15000L
         private const val EMPTY_READ_SLEEP_MS = 5L
+        private const val MIC_RETRY_MS = 1000L
 
         /** A directory of this link's own under the app's cache: one file per sentence while the phone's voice renders it. */
         const val VOICE_CACHE_DIR = "tts"

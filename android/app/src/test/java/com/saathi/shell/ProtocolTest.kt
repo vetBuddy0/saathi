@@ -105,6 +105,20 @@ class ProtocolTest {
     }
 
     @Test
+    fun wakeFrameParsesAndNeedsABoolean() {
+        assertEquals(WakeMessage(true), Protocol.parse("""{"type":"wake","listen":true}"""))
+        assertEquals(WakeMessage(false), Protocol.parse("""{"type":"wake","listen":false}"""))
+        assertNull(Protocol.parse("""{"type":"wake","listen":"yes"}"""))
+        assertNull(Protocol.parse("""{"type":"wake"}"""))
+    }
+
+    @Test
+    fun wakeBuildersMatchTheServer() {
+        assertEquals(mapOf("type" to "input", "event" to "press", "by" to "name"), fields(Protocol.pressByName()))
+        assertEquals(mapOf("type" to "subscribe", "wake" to true), fields(Protocol.subscribeWake()))
+    }
+
+    @Test
     fun cardAnswerBuilderMatchesTheServer() {
         val sent = JSONObject(Protocol.cardAnswer("c1", JSONObject().put("index", 2)))
         assertEquals("card_answer", sent.getString("type"))

@@ -82,6 +82,11 @@
  * engine ends it on its own side for a socket that vanished; and the
  * setup hold is cancelled with the activity, so a renderer crash
  * mid-hold cannot open the dialog on a finished window.
+ *
+ * The wake word ("Melody", `WakeWord.kt`) listens only when the engine
+ * says it may and the activity is in front: a paused app is not allowed
+ * the mic on Android 16 anyway, and a word half-heard across a pause
+ * would start a turn nobody sees.
  */
 package com.saathi.shell
 
@@ -134,6 +139,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var simDialer: SimDialer
     private lateinit var phoneCalls: PhoneCalls
     private lateinit var setupHold: HoldListener
+
+    /** Null until the spotter has loaded, and on a device it cannot run on. */
+    private var wakeWord: WakeWord? = null
+
+    /** The engine's last `{"type":"wake"}`, and whether the activity is in front. */
+    private var wakeListen = false
+    private var resumed = false
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -205,6 +217,7 @@ class MainActivity : AppCompatActivity() {
         pushToTalk.attach(talkButton)
 
         configureFace(faceWeb)
+        loadWakeWord()
         setupHold = HoldListener(SetupDialog.HOLD_MS) {
             SetupDialog.show(this, settings, SetupDialog.Page.BRAIN, ::openConsole) { applyBrain() }
         }
@@ -363,6 +376,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        resumed = true
+        applyWake()
         hideSystemBars()
         if (settings.kiosk) Kiosk.enterLockTaskIfOwner(this)
         if (ConsoleActivity.keysChanged) {
@@ -389,6 +404,8 @@ class MainActivity : AppCompatActivity() {
         // or it would open the dialog on an activity that may be gone.
         pushToTalk.cancel()
         setupHold.cancel()
+        resumed = false
+        applyWake()
         super.onPause()
     }
 
@@ -407,6 +424,8 @@ class MainActivity : AppCompatActivity() {
         main.removeCallbacks(faceReload)
         if (::pushToTalk.isInitialized) pushToTalk.cancel()
         if (::setupHold.isInitialized) setupHold.cancel()
+        wakeWord?.setAllowed(false)
+        wakeWord = null
         if (::engineLink.isInitialized) {
             engineLink.listener = null
             engineLink.disconnect()
@@ -429,6 +448,44 @@ class MainActivity : AppCompatActivity() {
         // crash), not a finished one.
         if (isFinishing) EmbeddedEngine.stop()
         super.onDestroy()
+    }
+
+    /** The spotter takes a moment to load (~5 MB of model): off the main thread. */
+    private fun loadWakeWord() {
+        Thread({
+            val spotter = SherpaSpotter.load(assets) ?: return@Thread
+            main.post {
+                if (isDestroyed) return@post
+                wakeWord = WakeWord(spotter, WakeActions())
+                Log.i(TAG, "wake word ready")
+                engineLink.subscribeWake()
+            }
+        }, "saathi-wake-load").start()
+    }
+
+    private fun applyWake() {
+        wakeWord?.setAllowed(wakeListen && resumed)
+    }
+
+    /** What the wake word does, on this activity's links. Called on the mic thread. */
+    private inner class WakeActions : WakeWord.Actions {
+        override fun micWanted(on: Boolean) {
+            val word = wakeWord
+            audioLink.setFrameTap(if (on && word != null) word::onFrame else null)
+        }
+
+        override fun press() {
+            Log.i(TAG, "heard the wake word")
+            main.post { engineLink.sendPressByName() }
+        }
+
+        override fun send(preroll: ByteArray) {
+            audioLink.startSending(preroll)
+        }
+
+        override fun release() {
+            audioLink.stopSending { main.post { engineLink.sendInput(false) } }
+        }
     }
 
     private fun hideSystemBars() {
@@ -454,6 +511,12 @@ class MainActivity : AppCompatActivity() {
             media.onConnected()
             // Every open, so a restarted engine learns it again.
             engineLink.sendPhoneStatus(simDialer.canCall())
+            if (wakeWord != null) engineLink.subscribeWake()
+        }
+
+        override fun onWake(listen: Boolean) {
+            wakeListen = listen
+            applyWake()
         }
 
         override fun onState(state: String) {
@@ -468,6 +531,8 @@ class MainActivity : AppCompatActivity() {
         override fun onDisconnected() {
             media.onDisconnected()
             pushToTalk.cancel()
+            wakeListen = false
+            applyWake()
         }
     }
 
