@@ -21,6 +21,17 @@
 //     main.js only calls it where it exists. Size comes from the
 //     container (it can shrink beside a video or a call), so a face
 //     must draw to its container's box, not the window's.
+//   lookAt(clientX, clientY, ms) — OPTIONAL (2026-10-28): glance at a
+//     point on the screen (window coordinates) for `ms`, then back to the
+//     state's own look. main.js calls it when something she should see
+//     appears beside the face: a message or reminder card, a tab she
+//     opened. The owner asked for "her eyes to look at it".
+//   react(name) — OPTIONAL (2026-10-28): a one-off move ("wink", "yawn",
+//     "bounce", "look-around", "squint", "tilt") or "sway-on"/"sway-off"
+//     while music plays. Unknown names are ignored.
+//   Both optional for the same reason as onEmotion. Lost: making them
+//   required, which would have meant writing glances for an orb that has
+//   no gaze.
 //
 // Three faces exist "so a real person can pick — that decision isn't ours
 // to make from intuition" (SPEC.md). Nothing else in this codebase should

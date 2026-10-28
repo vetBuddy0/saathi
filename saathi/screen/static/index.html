@@ -3,12 +3,23 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kaki</title>
+  <title>Melody</title>
   <!-- No icon on purpose: this only stops Chromium requesting /favicon.ico
        and logging a 404 on every load, which reads like a real error
        when someone is debugging something that is. -->
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/css/style.css">
+  <!-- YouTube refuses most music videos (error 150) to a page whose
+       address is an IP: the same video plays at localhost and fails at
+       127.0.0.1 (2026-10-28, DECISIONS.md). So the face always runs at
+       localhost. Not in the Android shell's WebView ("; wv)"): it pins
+       the face to the engine address it loaded and plays YouTube in its
+       own pane. -->
+  <script>
+    if (location.hostname === "127.0.0.1" && !/; wv\)/.test(navigator.userAgent)) {
+      location.replace(location.href.replace("//127.0.0.1", "//localhost"));
+    }
+  </script>
 </head>
 <body>
   <div id="face-container"></div>

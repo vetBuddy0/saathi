@@ -604,3 +604,406 @@ body.media--fullscreen.call--open #face-container {
     animation: none;
   }
 }
+
+/* The screen's tabs (board.js, 2026-10-28). A row of four big buttons
+   under the face -- Messages, Reminders, Call, Add a phone -- dim at rest
+   so the resting screen is still the face, full strength when a pointer
+   or finger is near. Each opens a panel on the right 40%, and the face
+   moves to the left 60% exactly as it does for a call. Targets are at
+   least 9vh (~100 px at 1080p): fingers that shake, eyes that don't
+   read small. */
+#dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 3vh;
+  z-index: 4;
+  display: flex;
+  justify-content: center;
+  gap: 2.2vw;
+  opacity: 0.38;
+  transition: opacity 0.4s ease, right 0.5s ease;
+  pointer-events: none;
+}
+html.pointer-active #dock,
+#dock:focus-within,
+body.board--open #dock {
+  opacity: 1;
+}
+body.board--open #dock,
+body.shown--open #dock {
+  right: 40%;
+}
+body.call--open #dock,
+body.card--open #dock,
+body.media--fullscreen #dock,
+body.media--panel #dock {
+  display: none;
+}
+.dock__button {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6vh;
+  min-width: 9.5vw;
+  min-height: 11vh;
+  padding: 1.2vh 1.4vw;
+  border: 1px solid rgba(255, 206, 133, 0.16);
+  border-radius: 22px;
+  background: rgba(38, 34, 44, 0.72);
+  color: var(--card-fg);
+  font: 600 clamp(15px, 1.5vw, 26px) / 1.1 system-ui, -apple-system, "Segoe UI", Roboto,
+    "Noto Sans", sans-serif;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.3s ease, border-color 0.3s ease;
+}
+.dock__button svg,
+.board__close svg,
+.person svg,
+.shown__head svg {
+  width: 4.4vh;
+  height: 4.4vh;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.dock__button:active {
+  transform: scale(0.94);
+}
+.dock__button--on {
+  background: #3a2c22;
+  border-color: var(--card-accent);
+  color: var(--card-accent);
+}
+
+/* The panel a tab opens. */
+#board-panel {
+  position: fixed;
+  inset: 0 0 0 60%;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 4vh 2.6vw 3vh;
+  background: linear-gradient(180deg, #1d1814 0%, #120f0d 100%);
+  border-left: 1px solid rgba(255, 206, 133, 0.12);
+  color: var(--card-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK SC",
+    sans-serif;
+  cursor: default;
+  animation: board-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+#board-panel[hidden] {
+  display: none;
+}
+body.board--open #face-container,
+body.shown--open #face-container {
+  inset: 0 40% 0 0;
+  transition: inset 0.5s ease;
+}
+@keyframes board-in {
+  from { transform: translateX(8vw); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.board__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1vw;
+  margin-bottom: 2.4vh;
+}
+.board__title {
+  margin: 0;
+  font-size: clamp(26px, 2.6vw, 48px);
+  color: var(--card-accent);
+}
+.board__close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 9vh;
+  height: 9vh;
+  border: 0;
+  border-radius: 50%;
+  background: var(--card-button-bg);
+  color: var(--card-button-fg);
+  cursor: pointer;
+}
+.board__body {
+  flex: 1;
+  overflow-y: auto;
+  font-size: clamp(18px, 1.7vw, 30px);
+}
+.board__empty,
+.board__hint,
+.board__note {
+  margin: 2vh 0;
+  color: #d9d2c5;
+}
+.board__note:empty {
+  display: none;
+}
+.board__note {
+  color: var(--card-accent);
+}
+.board__action,
+.shown__ok {
+  font: inherit;
+  font-weight: 700;
+  padding: 1.6vh 3vw;
+  border: 0;
+  border-radius: 999px;
+  background: var(--card-accent);
+  color: #1a120c;
+  cursor: pointer;
+}
+
+/* Messages: theirs on the left, hers on the right, like a phone. */
+.messages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.6vh;
+}
+.message {
+  max-width: 88%;
+  padding: 1.4vh 1.2vw;
+  border-radius: 18px;
+  background: var(--card-button-bg);
+}
+.message--hers {
+  align-self: flex-end;
+  background: #3a2c22;
+}
+.message__who {
+  font-weight: 700;
+  color: var(--card-accent);
+}
+.message__text {
+  margin: 0.5vh 0;
+  line-height: 1.35;
+}
+.message__when {
+  font-size: 0.75em;
+  color: #cfc7b9;
+}
+
+/* Reminders: a calendar of the next six weeks, the chosen day below. */
+.calendar__months {
+  font-weight: 700;
+  margin-bottom: 1vh;
+}
+.calendar__grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.5vh;
+}
+.calendar__weekday {
+  text-align: center;
+  font-size: 0.7em;
+  color: #cfc7b9;
+}
+.calendar__day {
+  position: relative;
+  aspect-ratio: 1 / 0.82;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: rgba(38, 34, 44, 0.6);
+  color: var(--card-fg);
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.calendar__day:disabled {
+  background: transparent;
+  color: #6e665c;
+  cursor: default;
+}
+.calendar__day--today {
+  border-color: var(--card-accent);
+}
+.calendar__day--selected {
+  background: var(--card-accent);
+  color: #1a120c;
+}
+.calendar__dots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12%;
+  display: flex;
+  justify-content: center;
+  gap: 3px;
+}
+.calendar__dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--card-accent);
+}
+.calendar__day--selected .calendar__dots i {
+  background: #1a120c;
+}
+.day__title {
+  margin: 2.4vh 0 1vh;
+  font-size: 1.1em;
+}
+.day__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1vh;
+}
+.reminder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4vh 1vw;
+  padding: 1.2vh 1vw;
+  border-radius: 14px;
+  background: var(--card-button-bg);
+}
+.reminder__at {
+  font-weight: 700;
+  color: var(--card-accent);
+  min-width: 5.5em;
+}
+.reminder__text {
+  flex: 1;
+}
+.reminder__repeat {
+  font-size: 0.75em;
+  color: #cfc7b9;
+}
+
+/* Call: one big button per person. */
+.people {
+  display: flex;
+  flex-direction: column;
+  gap: 1.8vh;
+}
+.person {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 1.4vw;
+  padding: 2vh 1.6vw;
+  border: 0;
+  border-radius: 22px;
+  background: #1f6b46;
+  color: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.person svg {
+  grid-row: span 2;
+  width: 6vh;
+  height: 6vh;
+}
+.person__name {
+  font-size: 1.3em;
+  font-weight: 700;
+}
+.person__relation {
+  font-size: 0.8em;
+  opacity: 0.9;
+}
+.person:active,
+.board__action:active,
+.shown__ok:active {
+  transform: scale(0.97);
+}
+
+/* The card for what Melody is reading to her: a family message or a
+   reminder. On the right, where the eyes glance (board.js). Above a
+   tab's panel, below the pairing screen. */
+#shown-card {
+  position: fixed;
+  top: 50%;
+  right: 3vw;
+  width: 34vw;
+  z-index: 6;
+  box-sizing: border-box;
+  padding: 3.4vh 2.4vw;
+  border-radius: 28px;
+  border: 1px solid rgba(255, 206, 133, 0.28);
+  background: linear-gradient(180deg, #2a2019 0%, #17120e 100%);
+  box-shadow: 0 2vh 6vh rgba(0, 0, 0, 0.5), 0 0 5vh rgba(255, 176, 89, 0.12);
+  color: var(--card-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK SC",
+    sans-serif;
+  transform: translateY(-50%);
+  cursor: default;
+}
+#shown-card[hidden] {
+  display: none;
+}
+#shown-card.shown--in {
+  animation: shown-in 0.6s cubic-bezier(0.2, 0.9, 0.25, 1.15);
+}
+@keyframes shown-in {
+  from { transform: translate(6vw, -50%) scale(0.92); opacity: 0; }
+  to { transform: translateY(-50%); opacity: 1; }
+}
+.shown__head {
+  display: flex;
+  align-items: center;
+  gap: 1vw;
+  color: var(--card-accent);
+  font-size: clamp(22px, 2.2vw, 40px);
+  font-weight: 700;
+}
+#shown-card[data-kind="message"] .shown__head svg {
+  animation: shown-wiggle 1.2s ease 0.4s 2;
+}
+#shown-card[data-kind="reminder"] .shown__head svg {
+  transform-origin: 50% 10%;
+  animation: shown-ring 0.9s ease 0.4s 3;
+}
+@keyframes shown-wiggle {
+  0%, 100% { transform: none; }
+  25% { transform: rotate(-10deg); }
+  75% { transform: rotate(10deg); }
+}
+@keyframes shown-ring {
+  0%, 100% { transform: none; }
+  20% { transform: rotate(16deg); }
+  40% { transform: rotate(-14deg); }
+  60% { transform: rotate(9deg); }
+  80% { transform: rotate(-5deg); }
+}
+.shown__text {
+  margin: 2vh 0 1.4vh;
+  font-size: clamp(24px, 2.4vw, 44px);
+  line-height: 1.3;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+.shown__when {
+  color: #cfc7b9;
+  font-size: clamp(16px, 1.4vw, 24px);
+  margin-bottom: 2.4vh;
+}
+
+/* With the tabs showing, captions sit above them. */
+body:has(#dock) #captions {
+  bottom: 18vh;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #board-panel,
+  #shown-card.shown--in,
+  #shown-card .shown__head svg {
+    animation: none;
+  }
+}

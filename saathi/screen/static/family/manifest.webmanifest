@@ -1,7 +1,7 @@
 {
-  "name": "Kaki",
-  "short_name": "Kaki",
-  "description": "Calls with her Kaki, free over the internet.",
+  "name": "Melody",
+  "short_name": "Melody",
+  "description": "Call her, message her and see how she is, through Melody.",
   "start_url": "/family/",
   "scope": "/family/",
   "display": "standalone",

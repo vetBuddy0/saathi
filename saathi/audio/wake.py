@@ -1,4 +1,18 @@
-"""Hands-free start: she says "Kaki" and it listens, no button.
+"""Hands-free start: she says "Melody" and it listens, no button.
+
+Renamed from "Kaki" to "Melody" (owner, 2026-10-20). Live, tiny.en
+primed with "Kaki" heard the name in nearly every sentence in the room;
+the cloud check (`mentions_name`) kept those turns silent, but each one
+still woke the device. Measured with scripts/name_bench.py on 20
+candidates (Google en-IN/GB/AU/US, slow and normal, the name alone,
+Mandarin, Malay and Tamil): "Kaki" was made up from 7 of 162 nameless
+0.55-1.3 s pieces of speech (the early checks) and heard in only 8 of
+19 clips that said it. "Melody": 0 of 162 false, 17 of 19 heard (the 2
+misses spelled "Melodie", now listed), MERaLiON 18/19, Groq 19/19.
+Lost: "Benny" (2 errors in all to Melody's 3), a man's name for a
+woman's voice; "Daisy" and "Polly" (no false wakes, but the cloud ears
+wrote "Desi", "Poly"). "Melody" is also an English word, so "the/this/
+nice melody" is talk, not a call (`_NOT_A_CALL_BEFORE`).
 
 Renamed from "Saathi" to "Kaki" (owner, 2026-10-08). Measured the same
 way as below (tiny.en, prompt "Kaki"; Google Neural2/WaveNet en-IN,
@@ -88,20 +102,21 @@ from saathi.audio.vad import CHUNK_BYTES, SAMPLE_RATE, VoiceActivityDetector
 
 logger = logging.getLogger(__name__)
 
-WAKE_WORD = "kaki"
+WAKE_WORD = "melody"
 # What tiny.en is told to expect, so it spells the name the same way.
-WAKE_PROMPT = "Kaki"
+WAKE_PROMPT = "Melody"
 DEFAULT_WAKE_MODEL = "tiny.en"
 _SIMILARITY = 0.88
 # Spellings seen from whisper that score under the line but are the name.
-# None yet for "Kaki" (every hit in the 2026-10-08 measurement was exact).
-_KNOWN_MISHEARINGS: frozenset[str] = frozenset()
-# The word before the name that makes it talk about a kaki, not a call
-# to Kaki: "my kaki", "kopi kaki", "mahjong kaki".
+# tiny.en wrote "Melodie" for the name in Malay and Tamil sentences
+# (2026-10-20); it scores 0.77.
+_KNOWN_MISHEARINGS: frozenset[str] = frozenset({"melodie"})
+# The word before the name that makes it talk about a melody, not a
+# call to Melody: "my melody", "that nice melody", "hum the melody".
 _NOT_A_CALL_BEFORE = frozenset({
     "my", "your", "his", "her", "our", "their", "the", "a", "an", "old", "best",
-    "kopi", "mahjong", "makan", "drinking", "chess", "gym", "jogging", "walking",
-    "football", "badminton", "karaoke", "shopping", "kaki",
+    "this", "that", "same", "nice", "sweet", "sad", "happy", "lovely", "beautiful",
+    "favourite", "favorite", "play", "sing", "hum", "melody",
 })
 _WAKE_WITHIN_WORDS = 3
 
@@ -129,7 +144,7 @@ def match_wake_word(text: str) -> tuple[bool, str]:
     words = re.findall(r"[a-z]+", text.lower())
     for i in range(min(len(words), _WAKE_WITHIN_WORDS)):
         if i and words[i - 1] in _NOT_A_CALL_BEFORE:
-            continue  # "my kopi kaki": talk about a friend
+            continue  # "hum the melody": talk about a tune
         if _is_name(words[i]):
             return True, " ".join(words[i + 1 :])
         if i + 1 < len(words) and _is_name(words[i] + words[i + 1]):
@@ -140,16 +155,12 @@ def match_wake_word(text: str) -> tuple[bool, str]:
 # How the *cloud* transcriber might spell the name when it was all she
 # said (live, 2026-10-08, as "Saathi": "Saudi?", answered). Only trusted
 # on a turn that began with her name (`loose`), and none of these ever
-# wakes the device (match_wake_word doesn't use them). For "Kaki" these
-# are the likely English respellings, not yet seen live -- add what the
-# logs show.
-# Seen 2026-10-09 (gpt-transcribe, Chirp3-HD and Piper voices saying
-# "Kaki, ..."): tacky, packy, kaggy, paki -- the name read as the
-# nearest English word. They also confirm a wake (`mentions_name`).
-_CLOUD_MISHEARINGS = frozenset({
-    "khaki", "cocky", "kacky", "cakey", "kakki", "caki", "tacky", "packy", "kaggy", "paki",
-})
-# Said before the name, never meant as content: "Hey Kaki".
+# wakes the device (match_wake_word doesn't use them). For "Melody",
+# seen 2026-10-20 (scripts/name_bench.py, 76 clips across MERaLiON and
+# Groq): only MERaLiON's "Melodi", in a Malay sentence. Add what the
+# logs show. The "Kaki" list (khaki, tacky, cakie...) went with the name.
+_CLOUD_MISHEARINGS = frozenset({"melodi"})
+# Said before the name, never meant as content: "Hey Melody".
 _GREETINGS = frozenset({"hey", "hi", "hello", "ok", "okay", "oh"})
 
 
@@ -193,23 +204,24 @@ def strip_wake_word(text: str, *, loose: bool = False) -> str:
         text = text[position:].lstrip(" ,.!?;:-")
 
 
-# How the cloud transcriber writes the name in Chinese characters when
-# she says it in a Mandarin sentence (measured 2026-10-09, gpt-transcribe
-# on Chirp3-HD cmn-CN clips: "卡奇，今天天气怎么样？").
-_CLOUD_NAME_HANZI = ("卡奇", "咖奇", "卡琪", "卡吉", "卡key")
+# How the cloud transcriber might write the name in Chinese characters
+# when she says it in a Mandarin sentence. Not measured: on 2026-10-20
+# MERaLiON and Groq both wrote "Melody" in Latin letters there. These
+# are its usual transliterations.
+_CLOUD_NAME_HANZI = ("美乐迪", "麦乐迪", "梅乐迪", "美樂迪")
 
 
 def mentions_name(text: str) -> bool:
     """Whether the cloud transcript of a turn the wake listener started
     has her name in it -- the second, independent check that the name
-    was really said. tiny.en, primed with "Kaki", turns short bits of
-    ordinary talk into the name ("Cookie or cake?" -> "Kaki or Kaki?";
-    4-8 in 90 everyday sentences, 2026-10-09), and a room of people
+    was really said. tiny.en, primed with the name, can turn short bits
+    of ordinary talk into it (as "Kaki": "Cookie or cake?" -> "Kaki or
+    Kaki?"; 4-8 in 90 everyday sentences, 2026-10-09), and a room of people
     talking produces those bits all day. The cloud model is far larger
     and isn't primed, so both agreeing is a much rarer accident.
 
     Anywhere, not only first: with music playing the lyrics come before
-    her ("in love with your body, Kaki, stop"). Loose: the cloud's own
+    her ("in love with your body, Melody, stop"). Loose: the cloud's own
     respellings count (`_CLOUD_MISHEARINGS`)."""
     if any(name in text for name in _CLOUD_NAME_HANZI):
         return True

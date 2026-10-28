@@ -29,7 +29,7 @@ export function createSettingsPanel(send) {
     root.replaceChildren();
 
     const title = document.createElement("h1");
-    title.textContent = "Kaki settings";
+    title.textContent = "Melody settings";
     root.appendChild(title);
 
     if (settings === null) {

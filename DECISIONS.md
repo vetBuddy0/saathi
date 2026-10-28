@@ -3663,3 +3663,221 @@ tunnel needs cloudflared). Two of android-app's tests were written
 against Hindi/Bengali and STT without a language field; both changed on
 udhibranch on 2026-10-09, and the tests were brought in line with that,
 as udhibranch's own were then.
+
+**2026-10-13 — MERaLiON as an opt-in ear: `SAATHI_STT_PROVIDER=meralion`.**
+The owner asked to try A*STAR's Singapore-trained ASR "as a mode". It goes in
+the provider seam as a third transcriber (`voice/engine/meralion.py`), with
+Groq as its fallback when the reply provider is OpenAI, else the reply
+provider's own STT. Default unchanged (Groq). Twelve Google-TTS clips (en-IN,
+en-GB, en-AU, en-US Singlish sentences; cmn-CN), same clips through all three:
+MERaLiON median 555 ms (max 825), Groq 287 ms, gpt-transcribe 1,168 ms.
+Words: MERaLiON and gpt-transcribe both got "Toa Payoh" (Groq: "Toa Pao"),
+"Aiyo" (Groq: "Ayyo"), and kept numbers as words. MERaLiON alone misspelled
+the name in 4 of 7 clips with it in an English sentence (Kakki, Cakie, Cacky;
+"Cathy" before Mandarin, as Groq/OpenAI also do with Kathy/Katy). "cakie"
+and "cacky" were added to wake.py's cloud misspellings; "Cathy" was not,
+because it's a real name that "call Cathy" needs. Its particles come
+bracketed ("hot (ah)") and are unwrapped. What it can't do: the endpoint has
+no language or prompt field, so the rule that "the transcriber is always told
+her language" and the music-playing bias don't hold in this mode. The
+synthetic voices aren't Singaporean. The verdict on accent needs her own
+voice, live; that's why it's a mode, not the default. Lost: a separate
+VoiceSession, for the same reason provider.py gives. A typo in
+SAATHI_STT_PROVIDER is now refused at startup rather than silently meaning
+"no split", so a comparison can't quietly run on the wrong ear.
+Same day: the 555 ms was mostly the client, not MERaLiON. `RestChatClient`
+opens a new connection per call, and the TLS handshake to api.meralion.ai
+costs ~150-200 ms. Groq's SDK keeps a pool, so the comparison was unfair.
+MeralionClient now keeps one connection open, and its `models.list()` lets
+the cascade's existing warm-up open it while she speaks. Re-measured, both
+warmed first, the same 12 clips: MERaLiON median 322 ms (max 489), Groq
+250 ms (max 638). MERaLiON has no text-to-speech (its API only understands
+audio), so Kaki's voice stays Google's.
+
+**2026-10-20 — Her name is now "Melody" (was "Kaki").** Owner, after the
+device woke on nearly every sentence in the room: "its listening to
+ANYTHING im saying ... give me the name that performed best, implement it".
+The live log showed tiny.en, primed with "Kaki", hearing the name in
+ordinary talk ("That's a miracle.", "hm, hm, hm, see.") almost always at
+an early check. `mentions_name` kept those turns silent, but each one woke
+the face and spent a cloud call. Measured with `scripts/name_bench.py`
+(20 candidates; Google en-IN/GB/AU/US, slow and normal, the name alone,
+Mandarin, Malay, Tamil) plus the early-check pieces (0.55/0.9/1.3 s) of 54
+nameless sentences: false wakes of 162 / heard by tiny.en of 19 /
+MERaLiON / Groq: Kaki 7 / 8 / – / –; Benny 1/19/18/19; Melody 0/17/18/19
+(both misses "Melodie", now a known spelling); Daisy 0/19/17/17; Polly
+0/19/15/16. Lost: Benny, the fewest errors by one, because it's a man's
+name for a woman's voice (en-US-Neural2-C). Synthetic voices and clean
+audio: the live room is worse than this for every name, so the verdict
+is whether the false wakes stop on the laptop. "Melody" is an English
+word, so "the/this/nice melody" is talk (`_NOT_A_CALL_BEFORE`); "Kaki"'s
+Singlish compounds and its cloud spellings (khaki, cakie...) went with it.
+"melodie" (tiny.en) wakes; "melodi" (MERaLiON, Malay) only confirms. The
+tests that named Kaki's spellings now name Melody's: the name changed,
+not the behaviour under test. Past memories that say "Kaki" are left as
+they were, because they happened.
+
+**2026-10-20 — Quiet-day check: no word from her by 11:00, Melody asks; no
+answer in 30 min, the family's phones are told.** Owner: "add." to the
+proposal. `initiative/quiet_day.py`, ticked once a minute by the screen
+server. The greeting is a fixed sentence ("Good morning! How are you
+today?"), spoken through the same IDLE -> notice -> ATTENTIVE -> prompt ->
+SPEAKING path as "Yes?", then the window stays open so she can just answer.
+The family gets a Web Push "notice" (new `kind` in sw.js), worded with what
+each member calls her: "Mum hasn't talked to Melody yet today. Melody asked
+how she was at 11:00 and heard no answer." Never what she said, and no daily
+all-clear. Lost: the all-clear, because it makes Melody report on her. Signal:
+a `turns` row since local midnight. Lost: counting family calls or music,
+which would couple the family database to this for a rare case. Outside
+policy.py's social lane, on purpose: there is no presence sensor, and her
+absence is what's being checked; once a day, every step logged in
+`initiatives` (kind "event", reason "quiet day: ..."), so a restart resumes
+and "why did my phone say that" has an answer. `going_away(days)` tool
+(permission "preferences") holds it until the date she gives; days=0 clears
+it. Config: SAATHI_QUIET_DAY=off|HH:MM, SAATHI_QUIET_DAY_WAIT_MINUTES.
+Without the family app on, she is still asked, and the log says nobody could
+be told. The CLI tests that list every tool now list going_away too.
+Verified x86 only (this laptop); arm64 not run.
+
+**2026-10-20 — Spoken reminders: `set_reminder`, `list_reminders`,
+`cancel_reminder`, and Melody says them out loud.** Owner: "yes", with
+telling the family off unless she asks per reminder. `initiative/
+reminders.py`, ticked every 30 s by the screen server through the same
+`speak_first` as the quiet-day greeting. Reuses `scheduled_candidates()`
+(its `[reminder_id=N]` dedup) and policy.py's `reminder_may_fire()`. Presence
+is passed as confirmed: there is no presence sensor, and the repeat and the
+family message are what cover an empty room. What she hears is a template
+from her own words ("It's 8 PM. Reminder: take your tablet."); times are
+said as "8 PM", because a voice reads "20:00" as "twenty hundred". No
+answer (no `turns` row after it) in 10 min: "Just checking: ..."; 10 more
+and, only if she said so when setting it, the family's phones get "Mum
+didn't answer Melody's 8 PM reminder, asked twice: ...". Lost: listening
+for "done" specifically, because any reply proves she heard it. The day is
+given as today/tomorrow/a weekday/in N minutes and resolved in the tool,
+because the model isn't told the date. One-offs are retired once said;
+daily and weekly ones are retired and the next occurrence appended (no
+update on IdentityStore). A device off for days says a daily one once, not
+once per missed day. "Tell the family" is a `preferences` row per id, not a
+new column, because the schema is one of the five interfaces. New
+permission scope "reminders", granted. English lines only, for now, even
+when she has switched Melody to Mandarin. Verified x86 only.
+
+**2026-10-20 — The family app does more than call: how she is, messages
+both ways, her reminders, call history; and it survives a new address.**
+Owner: "i need the app to be fully functional. the one that has calling. add
+buncha featuers to that". `call/family_hub.py` answers the new requests on
+the existing authenticated socket. Lost: putting them on `FamilyCalls`,
+whose lock and rules are all about a call. Pages let in by a per-call push
+token get none of it ("extras": false). Tabs: Home (Call, "How she is
+today": when she last talked to Melody, the quiet-day outcome, today's
+reminders answered/not), Messages, Reminders, Calls. What they never see:
+anything she said to Melody. Lost: a transcript or summary of her day.
+Messages to her are read aloud word for word ("A message from Udhi: ...")
+by a 15 s screen-server tick through `speak_first` when she's free; "read to
+her" on their phone means Melody read it, not that she heard. Her replies:
+`message_family(to, text)` by name, relation or "everyone", as a Web Push
+notice; `read_messages` for "any messages?". The family can add and cancel
+her reminders through the same `make_reminder_tools` handlers her voice
+uses. Call history is per member (`FamilyCalls.on_ended`). `speak_first` now
+also captions what it says. New address: a quick tunnel's hostname changes
+on restart and a phone's key lives in the old origin's storage. On a changed
+address each phone with alerts gets a one-time relink link (3 days, new key,
+`relink_tokens`). Phones without alerts still need the QR. A stable
+SAATHI_PUBLIC_URL (a named tunnel: a Cloudflare account and a domain, so a
+vendor question for the owner) is the real fix and needs no relink. Verified
+in headless Chromium against the running device: pair, status, send ->
+Melody read it aloud -> "read to her" live, add/cancel a reminder, calls
+tab, no console errors. Not verified: push on a real phone, a call after
+this change (only the end-of-call hook was added). Two tests that pin exact
+shapes (the welcome message, the tool list) now include the new field and
+tools.
+
+**2026-10-28 — "The STT doesn't work": the mic was clipping, not the
+transcriber. `audio/level.py` now keeps the raw mic out of clipping.**
+Both ears (MERaLiON, Groq) transcribed `testdata/known_sentence.wav`
+correctly from the file. The live input was the fault: the internal-mic
+source sat at 53% (ALSA Capture +30 dB, Internal Mic Boost +10 dB; the
+WirePlumber state shows it changed minutes after today's boot, by what is
+not known -- a browser's autoGainControl is the usual suspect, unproven).
+At that level a silent room's low rumble (90% of its energy under 300 Hz)
+put 2-10% of samples at the rail; the same recording, high-passed, still
+transcribed as nonsense, so no filter downstream fixes it. At 20-30% a
+silent room peaked at 3,900-12,000. `MicLevelGuard` measures the raw
+hardware source (detected by `devices.py`, never named) for 1 s at
+start-up and every 5 min, and while more than 0.1% of samples are within
+6 dB of the rail it lowers the source 10 points, floor 15%. Lost: "any
+sample at the rail" as the test -- live it stopped at 43% with 0.2% still
+clipping in silence. Lost: raising a quiet mic too -- two controllers on
+one volume oscillate, and quiet degrades a transcript where clipping
+destroys it. Off with SAATHI_MIC_GUARD=off. Verified live: `saathi run`
+from 53% printed "lowered it from 53% to 23%"; through the real
+echo-cancel path Groq then wrote the test sentence word for word. Not
+verified: accuracy on a human voice (the only source here was the
+laptop's speaker into its own mic, which varied run to run). Seen but not
+acted on: in that loop MERaLiON twice wrote "How may I help you today?"
+for the test sentence -- an assistant phrase not in the audio. The trial
+setting SAATHI_STT_PROVIDER=meralion is the owner's; left as is.
+
+**2026-10-28 — The screen gets tabs, cards and a livelier face (owner: "the
+messages just pop up in subtitles", "she should move her eyes to look at
+it", "quite some animations", "clickable things on the screen").**
+Why messages looked like subtitles: `speak_first` read a family message
+aloud and the only trace on screen was the caption strip. Now a message or
+a reminder being said is a `shown` card on the right (who, their words,
+when, an OK button; 60 s), and not also a caption -- the same words twice.
+Four big buttons under the face (static/js/board.js): Messages, Reminders
+(a six-week Monday-first calendar with dots, the chosen day's list below;
+daily/weekly ones shown on every day they'll fire), Call (one button per
+paired family member), Add a phone (the Ctrl+P pairing screen, which now
+also has a Close button for touch). Each opens a panel on the right 40%
+and the face moves left, as for a call. Dim at rest, full on touch.
+Reads are loopback-only GETs (screen/board.py), like the pairing routes.
+The one action, Call, is a `screen_action` asking for `call_contact`,
+run through `runtime.handle_intent` -- the registry and its permission
+check, the door her voice uses -- and narrowed to `SCREEN_TOOLS`. Lost: a
+direct "dial" route for the screen (a second door around the
+permission check). Lost: adding/cancelling reminders by tap -- typing on
+a kiosk is not her way; the panel says "just ask Melody". Not status:
+nothing here says what the device is doing (SPEC.md, "The face").
+Face interface: two new OPTIONAL methods, `lookAt(x, y, ms)` and
+`react(name)`, like `onEmotion` -- orb and ink stay valid unchanged. The
+owner asked for exactly this, which is the conversation CLAUDE.md asks
+for; recorded here. The eyes glance at a card or panel as it appears and
+twice more while a card is up, and bounce when one arrives. Model
+(roboeyes.js): wink, yawn, bounce, look-around, sway (while music plays),
+double blinks; each settles exactly where it began (tests). Idle
+flourishes every 25-50 s (was 45-90) from a wider set, yawns weighted to
+21:00-07:00, only squint/tilt under reduced motion; a nod now and then
+while speaking. Verified in headless Chromium against the running device
+with real data (Bhan's messages, Bhan in Call). Not verified on the
+device's touchscreen, and not a real incoming message while awake -- the
+card path is tested end to end through the server's message tick.
+
+**2026-10-28 — YouTube "shows for a split second then cuts": the face was
+at 127.0.0.1, and YouTube refuses label uploads to an IP address. The
+face now moves itself to localhost.** Measured in headless Chromium with
+the IFrame API: the same video (a label upload) gives error 150 when the
+embedding page is at http://127.0.0.1:port and plays (state 1) at
+http://localhost:port or an https domain. Error 150 sent the controller
+down its refusal path, so the panel opened and closed at once. A small
+script in index.html's head replaces 127.0.0.1 with localhost before
+anything loads; the kiosk script and DEMO.md name localhost too. Not in
+the Android WebView ("; wv)" in its user agent): the shell refuses any
+navigation off the engine address it loaded and plays YouTube in its own
+pane. Lost: changing the bind address -- the server stays on loopback and
+the loopback checks read the peer address, not Host, so nothing else moved.
+
+**2026-10-28 — Calls that "show for a split second then cut": a phone
+paired again kept its old login on its open socket.** `connect()` in the
+family app returns early while a socket is open, so after a second
+pairing (every quick-tunnel address change asks for one) the phone saved
+the new member's key but stayed connected as the old member. Her call to
+the new member found no live socket and no push subscription: the call
+panel showed "calling" and the call ended "unreachable". Pairing and
+relink now close the socket and say hello again (`reconnect()`). Both
+directions were verified with two headless tabs over the real tunnel:
+connected, held, ended when the phone left. A phone that is neither open
+nor has alerts on is still unreachable -- that is by design. Owner asked
+for a blank start the same day: the state in ~/.saathi (family, identity,
+medication databases, tunnel address) was moved to
+~/saathi-state-backup-20261028-232038, not deleted.

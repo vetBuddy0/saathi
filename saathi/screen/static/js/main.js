@@ -36,6 +36,11 @@
 // (face.js), and the phone panel (call-panel.js) draws a call on the
 // right with an End call button whose tap goes back to the server —
 // the server, not this page, decides whether it hangs anything up.
+//
+// 2026-10-28: the screen's tabs and the message/reminder card (board.js),
+// and the face reacting to what's on screen: it glances at a card or a
+// panel as it appears (face.lookAt), and sways while music plays
+// (face.react). Both optional on a Face, so orb and ink are unchanged.
 
 import { FACE_MODULES, DEFAULT_FACE } from "./face.js";
 import { createSettingsPanel } from "./settings-panel.js";
@@ -46,6 +51,7 @@ import { createCallPanel } from "./call-panel.js";
 // Family-app calls (call/webrtc.py): this page is the device's WebRTC
 // end; Ctrl+P shows the pairing QR. See family-call.js.
 import { createFamilyCall } from "./family-call.js";
+import { createBoard } from "./board.js";
 
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 30000;
@@ -119,14 +125,17 @@ function connectWithReconnect(face, onMessage, isInputBlocked, onOpen) {
   // The cursor shows while the mouse moves and hides after it rests
   // (style.css, html.pointer-active), so buttons stay clickable.
   let pointerTimer = null;
-  window.addEventListener("pointermove", () => {
+  const wakePointer = () => {
     document.documentElement.classList.add("pointer-active");
     clearTimeout(pointerTimer);
     pointerTimer = setTimeout(
       () => document.documentElement.classList.remove("pointer-active"),
       3000,
     );
-  });
+  };
+  window.addEventListener("pointermove", wakePointer);
+  // A finger on a touchscreen sends no move before it taps.
+  window.addEventListener("pointerdown", wakePointer);
 
   window.addEventListener("keydown", (event) => {
     if (event.code !== "Space" || event.repeat || holding || isInputBlocked()) return;
@@ -165,6 +174,17 @@ async function main() {
   // `?demo=call-calling|call-connected` draws the phone panel locally.
   const callPanel = createCallPanel(sendLater, { demo });
   const familyCall = createFamilyCall(sendLater);
+  const board = createBoard(sendLater, { face, openPairing: familyCall.openPairing });
+  const react = (name) => typeof face.react === "function" && face.react(name);
+  // `?demo=board-messages|board-reminders|board-family` opens that tab;
+  // `?demo=shown-message|shown-reminder` shows a sample card. Dev only.
+  if (demo && demo.startsWith("board-")) setTimeout(() => board.open(demo.slice(6)), 600);
+  if (demo === "shown-message" || demo === "shown-reminder") {
+    const sample = demo === "shown-message"
+      ? { kind: "message", from: "Priya", text: "Hi Ma! Coming over on Sunday with the kids.", at: "Today 9:42 AM" }
+      : { kind: "reminder", text: "Take your blood pressure tablet", at: "9 AM" };
+    setTimeout(() => board.onMessage({ type: "shown", ...sample }), 600);
+  }
   // `?demo=emotion-blush` (any EMOTION_NAMES entry) or `?demo=sleeping`
   // shows that look, re-applied after the connect's own state message.
   // Dev only, like the others.
@@ -189,6 +209,11 @@ async function main() {
       captions.onMessage(message);
       callPanel.onMessage(message);
       familyCall.onMessage(message);
+      board.onMessage(message);
+      if (message.type === "media") {
+        if (message.action === "play" || message.action === "resume") react("sway-on");
+        else if (["pause", "stop", "results"].includes(message.action)) react("sway-off");
+      }
     },
     // Not the media panel, and not cards: space must keep working
     // during playback (a press ducks the video) and while a card is up

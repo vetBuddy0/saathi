@@ -31,7 +31,7 @@ set -a; . ~/.saathi/env; set +a
 ```sh
 uv run saathi smoke          # mic/speaker found, AI key accepted
 uv run saathi voice          # should say google-chirp3-hd, available now: yes
-uv run saathi run            # face on http://127.0.0.1:8765
+uv run saathi run            # face on http://localhost:8765 (127.0.0.1 redirects there)
 ```
 
 Open the page in Chrome (or `scripts/saathi-face-kiosk.sh`). Tests:

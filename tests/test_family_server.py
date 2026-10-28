@@ -99,7 +99,7 @@ async def test_the_socket_refuses_a_stranger_and_carries_a_members_call(tmp_path
             {"type": "hello", "member": paired["member_id"], "key": paired["key"]}))
         welcome = json.loads((await ws.receive()).data)
         assert welcome == {"type": "welcome", "name": "Priya", "calls_her": "Mum",
-                           "can_call": True}
+                           "can_call": True, "extras": False}
         await ws.send_str(json.dumps({"type": "call"}))
         waiting = json.loads((await ws.receive(timeout=2)).data)
         assert waiting["type"] == "waiting" and calls.active

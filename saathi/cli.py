@@ -141,7 +141,7 @@ def _test_resident(by: str) -> int:
                 son_saved=applied.son_saved)
     print(f"Mock eMAR: {len(RESIDENTS)} residents, {doses} daily doses.")
     if applied.rules_written:
-        print(f"Profile: {applied.rules_written} things Kaki now knows about {NAME}.")
+        print(f"Profile: {applied.rules_written} things Melody now knows about {NAME}.")
     else:
         print(f"Profile: already there for {NAME}; nothing rewritten.")
     saved = "saved" if applied.son_saved else "already saved"
@@ -157,7 +157,9 @@ def _test_resident(by: str) -> int:
 # "contacts" writes her memory and "calls" rings a phone (DECISIONS
 # 2026-09-25, calls in scope; wired on cloud/demo 2026-09-26 with S1
 # fixed and S2-S4 still open in TODO.md).
-GRANTED_PERMISSIONS = frozenset({"preferences", "memory", "music", "calls", "contacts"})
+GRANTED_PERMISSIONS = frozenset(
+    {"preferences", "memory", "music", "calls", "contacts", "reminders", "messages"}
+)
 
 # The quick tunnel's hostname took ~84 s to resolve on the first live
 # run, so the relay comes up at boot on its own thread, not at the
@@ -206,6 +208,9 @@ class Runtime:
     # route the default sink through the canceller (and back on exit).
     aec_handles: Any = None
     speaker_id: str | None = None
+    # The detected microphone's own (hardware) source, for the clipping
+    # guard (audio/level.py), which must measure before the canceller.
+    mic_id: str | None = None
     # The /audio seam (audio/remote.py): always built, with or without
     # an engine, so the screen server always has the route to offer a
     # phone; it only does anything once a client connects.
@@ -297,6 +302,18 @@ def build_runtime() -> Runtime:
         TTS_BACKEND_KEY,
         threadsafe_reader,
     )
+    from saathi.call.family_hub import (
+        MESSAGE_FAMILY_DESCRIPTION,
+        READ_MESSAGES_DESCRIPTION,
+        make_message_tools,
+    )
+    from saathi.initiative.quiet_day import GOING_AWAY_DESCRIPTION, make_going_away_tool
+    from saathi.initiative.reminders import (
+        CANCEL_REMINDER_DESCRIPTION,
+        LIST_REMINDERS_DESCRIPTION,
+        SET_REMINDER_DESCRIPTION,
+        make_reminder_tools,
+    )
     from saathi.tools.language import SET_LANGUAGE_DESCRIPTION, make_set_language_tool
     from saathi.tools.llm_schema import tool_to_openai_schema
     from saathi.tools.media import MEDIA_DESCRIPTION, make_media_tool
@@ -313,7 +330,23 @@ def build_runtime() -> Runtime:
     set_language_tool = make_set_language_tool(store)
     correct_memory_tool = make_correct_memory_tool(store)
     media_tool = make_media_tool(media)
-    for tool in (set_language_tool, correct_memory_tool, media_tool):
+    going_away_tool = make_going_away_tool(store.path)
+    set_reminder_tool, list_reminders_tool, cancel_reminder_tool = make_reminder_tools(store.path)
+    # The family app comes up later in this function, and may not at all.
+    message_family_tool, read_messages_tool = make_message_tools(
+        lambda: runtime.family.hub if runtime.family is not None else None
+    )
+    for tool in (
+        set_language_tool,
+        correct_memory_tool,
+        media_tool,
+        going_away_tool,
+        set_reminder_tool,
+        list_reminders_tool,
+        cancel_reminder_tool,
+        message_family_tool,
+        read_messages_tool,
+    ):
         registry.register(tool)
 
     def handle_intent(name: str, arguments: dict) -> dict:
@@ -328,6 +361,12 @@ def build_runtime() -> Runtime:
         tool_to_openai_schema(set_language_tool, SET_LANGUAGE_DESCRIPTION),
         tool_to_openai_schema(correct_memory_tool, CORRECT_MEMORY_DESCRIPTION),
         tool_to_openai_schema(media_tool, MEDIA_DESCRIPTION),
+        tool_to_openai_schema(going_away_tool, GOING_AWAY_DESCRIPTION),
+        tool_to_openai_schema(set_reminder_tool, SET_REMINDER_DESCRIPTION),
+        tool_to_openai_schema(list_reminders_tool, LIST_REMINDERS_DESCRIPTION),
+        tool_to_openai_schema(cancel_reminder_tool, CANCEL_REMINDER_DESCRIPTION),
+        tool_to_openai_schema(message_family_tool, MESSAGE_FAMILY_DESCRIPTION),
+        tool_to_openai_schema(read_messages_tool, READ_MESSAGES_DESCRIPTION),
     ]
     runtime.registry = registry
     runtime.tool_schemas = tool_schemas
@@ -416,6 +455,7 @@ def build_runtime() -> Runtime:
     runtime.capture_source_id = handles.source_id
     runtime.aec_handles = handles
     runtime.speaker_id = speaker.id
+    runtime.mic_id = mic.id
     return runtime
 
 
@@ -673,6 +713,7 @@ def _build_family(runtime: Runtime):
             panel=panel.update if panel is not None else None,
             emotions=runtime.emotions,
             other_active=twilio_active,
+            identity_db=runtime.config.identity_db_path,
         )
     except ValueError as exc:
         runtime.notes.append(f"Family app off: {exc}")
@@ -715,7 +756,7 @@ def _wake_listener(runtime: Runtime):
 
     source_id = runtime.capture_source_id
     media = runtime.media
-    print('Wake word on: say "Kaki" to start talking (heard on this device only).')
+    print('Wake word on: say "Melody" to start talking (heard on this device only).')
 
     def playing() -> bool:
         return bool(media is not None and media.playing)
@@ -737,7 +778,7 @@ def _wake_listener(runtime: Runtime):
     )
 
 
-WAKE_MEDIA_PROMPT = "Kaki, stop. Kaki, pause. Kaki, louder. Kaki, softer. Kaki, next."
+WAKE_MEDIA_PROMPT = "Melody, stop. Melody, pause. Melody, louder. Melody, softer. Melody, next."
 # Seconds she has to start a follow-up after a reply before the
 # conversation closes (screen/server.py). 0 or "off" turns it off.
 DEFAULT_FOLLOW_UP_SECONDS = 7.0
@@ -788,10 +829,67 @@ def _route_default_sink(runtime: Runtime):
     return restore
 
 
+def _guard_mic_level(runtime: Runtime):
+    """The clipping guard on the detected mic (audio/level.py), started;
+    returns stop(), or None with no local mic. Off with
+    SAATHI_MIC_GUARD=off."""
+    if runtime.mic_id is None or runtime.capture_source_id is None:
+        return None
+    if os.environ.get("SAATHI_MIC_GUARD", "on").lower() == "off":
+        return None
+    from saathi.audio.level import MicLevelGuard
+
+    return MicLevelGuard(runtime.mic_id).start()
+
+
+def _quiet_day(runtime: Runtime):
+    """The quiet-day check (initiative/quiet_day.py), or None: off by
+    SAATHI_QUIET_DAY=off, misconfigured (said in the notes), or no voice
+    to greet her with. The family is told through the family app when
+    it is on; without it the greeting still happens and the log says
+    nobody could be told."""
+    from saathi.initiative.quiet_day import QuietDayConfig, QuietDayWatch
+
+    if runtime.session is None:
+        return None
+    try:
+        config = QuietDayConfig.from_env(os.environ)
+    except ValueError as exc:
+        runtime.notes.append(f"Quiet-day check off: {exc}")
+        return None
+    if config is None:
+        return None
+    family = runtime.family
+    tell = family.tell_family if family is not None else None
+    runtime.notes.append(
+        f"Quiet-day check on: at {config.check_at:%H:%M}, if she hasn't talked to Melody, "
+        f"Melody asks how she is; no answer in {config.wait_minutes} min tells the family"
+        + ("." if tell is not None else " (family app off, so nobody can be told).")
+    )
+    return QuietDayWatch(runtime.config.identity_db_path, config, tell_family=tell)
+
+
+def _reminders(runtime: Runtime):
+    """Spoken reminders (initiative/reminders.py), or None with no voice
+    to speak them. The family is told of a missed one only where she
+    asked for that, through the family app when it is on."""
+    from saathi.initiative.reminders import ReminderWatch
+
+    if runtime.session is None:
+        return None
+    family = runtime.family
+    return ReminderWatch(
+        runtime.config.identity_db_path,
+        tell_family=family.tell_family if family is not None else None,
+    )
+
+
 def _run() -> int:
     from saathi.screen.server import run
 
     runtime = build_runtime()
+    quiet_day = _quiet_day(runtime)
+    reminders = _reminders(runtime)
     for note in runtime.notes:
         print(note)
     if runtime.calling is not None:
@@ -801,6 +899,7 @@ def _run() -> int:
         import atexit
 
         atexit.register(restore_sink)  # once only; also runs below on a clean exit
+    stop_mic_guard = _guard_mic_level(runtime)
     run(
         runtime.core,
         runtime.config.screen_host,
@@ -818,7 +917,15 @@ def _run() -> int:
         follow_up_seconds=follow_up_seconds() if runtime.session is not None else None,
         open_after_reply=open_after_reply(),
         remote_audio=runtime.remote_audio,
+        quiet_day=quiet_day,
+        reminders=reminders,
+        messages=runtime.family.hub if runtime.family is not None else None,
+        # The tabs: a tap asks the same registry her voice does.
+        screen_intent=runtime.handle_intent,
+        identity_db=runtime.config.identity_db_path,
     )
+    if stop_mic_guard is not None:
+        stop_mic_guard()
     if restore_sink is not None:
         try:
             restore_sink()

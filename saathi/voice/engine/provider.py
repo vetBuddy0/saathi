@@ -37,6 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from saathi.voice.engine.meralion import MERALION_STT_MODEL, MeralionClient
 from saathi.voice.engine.rest_client import GROQ_BASE_URL, OPENAI_BASE_URL, RestChatClient
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,9 @@ OPENAI_STT_MODEL = "gpt-transcribe"
 _REASONING_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
 
 PROVIDERS = ("openai", "groq")
+# SAATHI_STT_PROVIDER: who hears her. Unset is "groq" (the split below);
+# "meralion" is the Singapore-trained ear, opt-in (voice/engine/meralion.py).
+STT_PROVIDERS = ("groq", "openai", "meralion")
 # SAATHI_AI_CLIENT: how the provider is reached. Unset means the SDK
 # when it imports, else REST.
 CLIENT_KINDS = ("sdk", "rest")
@@ -160,6 +164,18 @@ def _key_name(name: str) -> str:
     return "OPENAI_API_KEY" if name == "openai" else "GROQ_API_KEY"
 
 
+def choose_stt_provider(environ: Mapping[str, str]) -> str:
+    """`SAATHI_STT_PROVIDER`, default "groq". Anything else is refused,
+    not guessed: a typo'd "meralon" silently hearing her on Groq would
+    make a comparison of the two meaningless."""
+    explicit = environ.get("SAATHI_STT_PROVIDER", "").strip().lower() or "groq"
+    if explicit not in STT_PROVIDERS:
+        raise ProviderUnavailable(
+            f"SAATHI_STT_PROVIDER={explicit!r}; expected one of {', '.join(STT_PROVIDERS)}"
+        )
+    return explicit
+
+
 def _base_url(name: str) -> str:
     return OPENAI_BASE_URL if name == "openai" else GROQ_BASE_URL
 
@@ -176,8 +192,11 @@ def missing_key(environ: Mapping[str, str] | None = None) -> str | None:
         return "OPENAI_API_KEY or GROQ_API_KEY"
     try:
         choose_client_kind(environ)
+        stt = choose_stt_provider(environ)
     except ProviderUnavailable as exc:
         return str(exc)
+    if stt == "meralion" and not environ.get("MERALION_API_KEY"):
+        return "MERALION_API_KEY"
     key = _key_name(name)
     return None if environ.get(key) else key
 
@@ -203,6 +222,8 @@ def provider_from_env(
             raise ProviderUnavailable(f"{_key_name(name)} is not set in the environment")
         kind = choose_client_kind(environ)
         client = build_client(name, key, kind)
+        if choose_stt_provider(environ) == "meralion":
+            return _meralion_hears(environ, name, client, llm, stt, kind)
         # Hearing her on Groq while OpenAI replies (2026-10-07): measured
         # from the demo laptop, Groq's whisper-large-v3-turbo transcribed
         # the test sentence in 270 ms median against gpt-transcribe's
@@ -214,7 +235,7 @@ def provider_from_env(
             name == "openai"
             and environ.get("GROQ_API_KEY")
             and not environ.get("SAATHI_STT_MODEL")
-            and environ.get("SAATHI_STT_PROVIDER", "groq").strip().lower() == "groq"
+            and choose_stt_provider(environ) == "groq"
         )
         if split:
             return AIProvider(
@@ -230,6 +251,35 @@ def provider_from_env(
                 stt_fallback=(client, stt),
             )
     return AIProvider(name=name, client=client, llm_model=llm, stt_model=stt)
+
+
+def _meralion_hears(
+    environ: Mapping[str, str], name: str, client: Any, llm: str, stt: str, kind: str | None
+) -> AIProvider:
+    """MERaLiON hears her; `client` replies. The fallback is Groq when
+    its key is set (the default ear, so a MERaLiON outage sounds like an
+    ordinary turn), else the reply provider's own transcriber. Fails fast
+    like the Groq split: no retry, a 4 s deadline -- measured 450-830 ms
+    from the demo laptop (2026-10-13), so 4 s is an outage, not a slow call."""
+    key = environ.get("MERALION_API_KEY")
+    if not key:
+        raise ProviderUnavailable(
+            "SAATHI_STT_PROVIDER=meralion but MERALION_API_KEY is not set in the environment"
+        )
+    meralion = MeralionClient(key, timeout=4.0, connect_timeout=CONNECT_TIMEOUT_SECONDS, retries=0)
+    if environ.get("GROQ_API_KEY") and name == "openai":
+        fallback = (build_client("groq", environ["GROQ_API_KEY"], kind), GROQ_STT_MODEL)
+    else:
+        fallback = (client, stt)
+    logger.info("STT: MERaLiON (%s), falling back to %s", MERALION_STT_MODEL, fallback[1])
+    return AIProvider(
+        name=name,
+        client=client,
+        llm_model=llm,
+        stt_model=MERALION_STT_MODEL,
+        stt_client=meralion,
+        stt_fallback=fallback,
+    )
 
 
 def build_client(

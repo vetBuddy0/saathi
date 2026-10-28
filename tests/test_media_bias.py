@@ -16,7 +16,7 @@ PLAYING = Context(media_playing=True)
 @pytest.mark.parametrize(
     "heard, action",
     [
-        ("Kaki, stop.", "stop"),
+        ("Melody, stop.", "stop"),
         ("Pause.", "pause"),
         ("Resume", "resume"),
         ("Volume up please", "louder"),
@@ -26,8 +26,8 @@ PLAYING = Context(media_playing=True)
         ("Next.", "next"),
         ("Next song", "next"),
         ("Reduce the volume", "quieter"),
-        ("baby I'm in love with your body Kaki stop", "stop"),
-        ("...shape of you. Khaki, pause.", "pause"),
+        ("baby I'm in love with your body Melody stop", "stop"),
+        ("...shape of you. Melodie, pause.", "pause"),
     ],
 )
 def test_media_commands_while_playing_are_routed(heard, action):
@@ -41,7 +41,7 @@ def test_media_commands_while_playing_are_routed(heard, action):
     [
         "What's this song called?",
         "I don't want you to stop",
-        "Kaki, what's the weather tomorrow?",
+        "Melody, what's the weather tomorrow?",
     ],
 )
 def test_anything_else_while_playing_still_goes_to_the_model(heard):
@@ -56,14 +56,14 @@ def test_without_music_stop_still_belongs_to_the_model():
     assert route("stop") is None
 
 
-def test_kaki_stop_ends_at_the_short_pause_while_music_plays():
-    assert sounds_complete("Kaki stop", media_playing=True)
-    assert sounds_complete("Kaki, volume up", media_playing=True)
-    assert not sounds_complete("Kaki stop", media_playing=False)
+def test_melody_stop_ends_at_the_short_pause_while_music_plays():
+    assert sounds_complete("Melody stop", media_playing=True)
+    assert sounds_complete("Melody, volume up", media_playing=True)
+    assert not sounds_complete("Melody stop", media_playing=False)
 
 
 def test_a_routed_stop_says_stopped():
-    assert route("Kaki stop", context=PLAYING) == Command(
+    assert route("Melody stop", context=PLAYING) == Command(
         "play_music", {"action": "stop"}, "Stopped."
     )
 
@@ -71,17 +71,15 @@ def test_a_routed_stop_says_stopped():
 @pytest.mark.parametrize(
     "text, loose, only",
     [
-        ("Kaki?", False, True),
-        ("Kaki.", True, True),
-        ("Hey Kaki", False, True),
-        ("Cocky?", True, True),
-        ("Cocky?", False, False),
-        ("Kacky?", True, True),
-        ("Kacky?", False, False),
-        ("Kaki Kaki", False, True),
-        ("Kaki, play a song", True, False),
+        ("Melody?", False, True),
+        ("Melody.", True, True),
+        ("Hey Melody", False, True),
+        ("Melodi?", True, True),
+        ("Melodi?", False, False),
+        ("Melody Melody", False, True),
+        ("Melody, play a song", True, False),
         ("", True, False),
-        ("Cocky guy", True, False),
+        ("Melodi guy", True, False),
     ],
 )
 def test_is_only_name(text, loose, only):
@@ -89,9 +87,9 @@ def test_is_only_name(text, loose, only):
 
 
 def test_strip_takes_the_loose_spellings_only_when_asked():
-    assert strip_wake_word("Cocky, play Shape of You", loose=True) == "play Shape of You"
-    assert strip_wake_word("Cocky people annoy me") == "Cocky people annoy me"
-    assert strip_wake_word("Kaki... Kaki, play a song") == "play a song"
+    assert strip_wake_word("Melodi, play Shape of You", loose=True) == "play Shape of You"
+    assert strip_wake_word("Melodi people annoy me") == "Melodi people annoy me"
+    assert strip_wake_word("Melody... Melody, play a song") == "play a song"
 
 
 # -- the default sink through the canceller ----------------------------------
@@ -187,9 +185,9 @@ def test_the_wake_transcriber_is_primed_with_media_commands_only_while_playing(m
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
     playing = {"value": False}
     transcribe = local_transcriber(
-        "tiny.en", prompt=lambda: "Kaki, stop." if playing["value"] else None
+        "tiny.en", prompt=lambda: "Melody, stop." if playing["value"] else None
     )
     transcribe(b"\x00\x00" * 160)
     playing["value"] = True
     transcribe(b"\x00\x00" * 160)
-    assert prompts == ["Kaki", "Kaki, stop."]
+    assert prompts == ["Melody", "Melody, stop."]

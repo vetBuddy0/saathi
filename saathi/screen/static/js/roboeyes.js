@@ -51,6 +51,22 @@
 // Blush (2026-10-07, owner's request for a playful face): one more eased
 // number, 0..1. The model only says how much; `eyes-face.js` draws the
 // pink cheeks under the eyes. No eyebrows and no mouth were added.
+//
+// More life (2026-10-28, owner: "quite some animations for her"). More
+// one-shot macros, each a bounded shape over its own clock that settles
+// back exactly where it started, so none can leave the eyes stuck. None
+// is RoboEyes.
+//   - wink: one eye closes and reopens, the other smiles a little;
+//   - yawn: a squeeze, a tall stretch, then a slow settle (sleepy hours);
+//   - bounce: two quick hops that shrink (something nice just arrived);
+//   - look-around: left, hold, right, hold, back. Gaze waypoints that
+//     override the drift for its length only;
+//   - sway: a slow side-to-side lean for as long as music plays;
+//   - double blink: now and then the autoblinker blinks twice, which is
+//     what people do and a timer doesn't.
+// The option that lost was a sprite-sheet of drawn expressions: it would
+// leave the eased model, and every blend between two of them would
+// have to be drawn by hand.
 
 export const Mood = Object.freeze({
   DEFAULT: "default",
@@ -71,6 +87,12 @@ const BLINK_RATE = 9;
 
 const PERK_MS = 1200;
 const NOD_MS = 900;
+const WINK_MS = 700;
+const YAWN_MS = 2600;
+const BOUNCE_MS = 900;
+const LOOK_AROUND_MS = 3000;
+// Share of autoblinks followed by a second one.
+const DOUBLE_BLINK_CHANCE = 0.2;
 
 function approach(current, target, dtSeconds, rate = EASE_RATE) {
   const factor = 1 - Math.exp(-rate * dtSeconds);
@@ -175,6 +197,13 @@ export class RoboEyesModel {
     this._nodUntilMs = null;
     this._idleRegion = null; // {x: [min, max], y: [min, max]} as fractions of range
     this._perkUntilMs = null;
+    this._winkUntilMs = null;
+    this._winkLeft = false;
+    this._yawnUntilMs = null;
+    this._bounceUntilMs = null;
+    this._lookAround = null; // {startMs, points: [[x, y, untilMs], ...]}
+    this._sway = false;
+    this._doubleBlinkAt = null;
     this._squintUntilMs = null;
     this._squintMs = 0;
     this.tilt = 0; // radians, eased
@@ -364,6 +393,42 @@ export class RoboEyesModel {
     this._squintUntilMs = this._clockMs + ms;
   }
 
+  // One eye closes and opens again; the other smiles a little.
+  anim_wink(leftEye = false) {
+    this._winkLeft = Boolean(leftEye);
+    this._winkUntilMs = this._clockMs + WINK_MS;
+  }
+
+  // Squeeze, stretch tall, settle. Slow on purpose: a yawn is.
+  anim_yawn() {
+    this._yawnUntilMs = this._clockMs + YAWN_MS;
+  }
+
+  // Two quick hops, the second smaller.
+  anim_bounce() {
+    this._bounceUntilMs = this._clockMs + BOUNCE_MS;
+  }
+
+  // Left, hold, right, hold, back to centre. Overrides the gaze target
+  // for its length, then hands it back to whatever drift was running.
+  anim_lookAround() {
+    const x = this._maxGazeX * 0.8;
+    const y = this._maxGazeY * 0.1;
+    const t = this._clockMs;
+    this._lookAround = {
+      points: [
+        [-x, y, t + 900],
+        [x, y, t + 2100],
+        [0, 0, t + LOOK_AROUND_MS],
+      ],
+    };
+  }
+
+  // A slow lean from side to side for as long as it is on (music).
+  setSway(active) {
+    this._sway = Boolean(active);
+  }
+
   // Occasional small "mm-hm" nods and tilts while listening. Not RoboEyes.
   setAttentiveNods(active, minIntervalSeconds = 1.4, variationSeconds = 1.8) {
     if (!active) {
@@ -393,6 +458,21 @@ export class RoboEyesModel {
       this.blink();
       this._autoblink.nextAt =
         this._clockMs + this._autoblink.minMs + Math.random() * this._autoblink.variationMs;
+      if (Math.random() < DOUBLE_BLINK_CHANCE) this._doubleBlinkAt = this._clockMs + 320;
+    }
+    if (this._doubleBlinkAt !== null && this._clockMs >= this._doubleBlinkAt) {
+      this._doubleBlinkAt = null;
+      if (this._autoblink) this.blink();
+    }
+
+    if (this._lookAround) {
+      const point = this._lookAround.points.find((p) => this._clockMs < p[2]);
+      if (point) {
+        this.setGazeTarget(point[0], point[1]);
+      } else {
+        this.setGazeTarget(0, 0);
+        this._lookAround = null;
+      }
     }
 
     if (this._idle && this._clockMs >= this._idle.nextAt) {
@@ -487,6 +567,74 @@ export class RoboEyesModel {
       }
     }
 
+    let leftHeight = 1;
+    let rightHeight = 1;
+    let leftHappy = 0;
+    let rightHappy = 0;
+    let widthScale = 1;
+
+    if (this._winkUntilMs !== null) {
+      const remaining = this._winkUntilMs - this._clockMs;
+      if (remaining <= 0) {
+        this._winkUntilMs = null;
+      } else {
+        // Closed for the middle of it, eased in and out.
+        const shut = Math.sin(Math.PI * (1 - remaining / WINK_MS));
+        if (this._winkLeft) {
+          leftHeight = 1 - shut * 0.9;
+          rightHappy = shut * 0.25;
+        } else {
+          rightHeight = 1 - shut * 0.9;
+          leftHappy = shut * 0.25;
+        }
+      }
+    }
+
+    if (this._yawnUntilMs !== null) {
+      const remaining = this._yawnUntilMs - this._clockMs;
+      if (remaining <= 0) {
+        this._yawnUntilMs = null;
+      } else {
+        const t = 1 - remaining / YAWN_MS; // 0 -> 1
+        if (t < 0.35) {
+          // Squeeze: lower, with the happy lid rising.
+          const k = Math.sin((Math.PI / 2) * (t / 0.35));
+          leftHeight *= 1 - k * 0.55;
+          rightHeight *= 1 - k * 0.55;
+          happyExtra = Math.max(happyExtra, k * 0.35);
+        } else if (t < 0.7) {
+          // Stretch: tall and a little narrow, a lift.
+          const k = Math.sin(Math.PI * ((t - 0.35) / 0.35));
+          leftHeight *= 1 + k * 0.2;
+          rightHeight *= 1 + k * 0.2;
+          widthScale *= 1 - k * 0.06;
+          shakeY -= k * 3;
+        } else {
+          // Settle, a little heavy-lidded on the way.
+          const k = Math.sin(Math.PI * ((t - 0.7) / 0.3));
+          leftHeight *= 1 - k * 0.3;
+          rightHeight *= 1 - k * 0.3;
+        }
+      }
+    }
+
+    if (this._bounceUntilMs !== null) {
+      const remaining = this._bounceUntilMs - this._clockMs;
+      if (remaining <= 0) {
+        this._bounceUntilMs = null;
+      } else {
+        const t = 1 - remaining / BOUNCE_MS;
+        shakeY -= Math.abs(Math.sin(2 * Math.PI * t)) * 6 * (1 - t);
+        scale *= 1 + Math.abs(Math.sin(2 * Math.PI * t)) * 0.03 * (1 - t);
+      }
+    }
+
+    let tilt = this.tilt;
+    if (this._sway) {
+      shakeX += Math.sin(this._clockMs / 700) * 4;
+      tilt += Math.sin(this._clockMs / 700) * 0.045;
+    }
+
     if (this._squintUntilMs !== null) {
       const remaining = this._squintUntilMs - this._clockMs;
       if (remaining <= 0) {
@@ -496,10 +644,16 @@ export class RoboEyesModel {
       }
     }
 
+    const left = this._frameFor(this.left, shakeX, shakeY, scale, happyExtra + leftHappy);
+    const right = this._frameFor(this.right, shakeX, shakeY, scale, happyExtra + rightHappy);
+    left.height *= leftHeight;
+    right.height *= rightHeight;
+    left.width *= widthScale;
+    right.width *= widthScale;
     return {
-      left: this._frameFor(this.left, shakeX, shakeY, scale, happyExtra),
-      right: this._frameFor(this.right, shakeX, shakeY, scale, happyExtra),
-      tilt: this.tilt,
+      left,
+      right,
+      tilt,
       sparkle: this.sparkle,
       brightness: this.brightness,
       blush: this.blush,

@@ -47,7 +47,7 @@ def _turn(session, by_name=False) -> str:
 
 
 def test_her_name_alone_is_no_turn_and_no_model_call():
-    client = FakeClient(heard="Kaki?")
+    client = FakeClient(heard="Melody?")
     session = _session(client)
     assert _turn(session, by_name=True) == ""
     assert session.heard_only_name is True
@@ -55,40 +55,40 @@ def test_her_name_alone_is_no_turn_and_no_model_call():
     assert session.last_heard is None  # nothing to caption
 
 
-def test_cocky_alone_on_a_wake_turn_is_her_name_too():
-    client = FakeClient(heard="Cocky?")
+def test_melodi_alone_on_a_wake_turn_is_her_name_too():
+    client = FakeClient(heard="Melodi?")
     session = _session(client)
     assert _turn(session, by_name=True) == ""
     assert session.heard_only_name is True
     assert client.chat.completions.calls == []
 
 
-def test_cocky_over_the_spacebar_is_not_her_name():
+def test_melodi_over_the_spacebar_is_not_her_name():
     # Only a turn that began with her name reads the cloud's odder
-    # spellings as the name: "Cocky?" pressed-and-said is her words.
-    client = FakeClient(heard="Cocky?", reply="I said it's teatime.")
+    # spellings as the name: "Melodi?" pressed-and-said is her words.
+    client = FakeClient(heard="Melodi?", reply="I said it's teatime.")
     session = _session(client)
     assert _turn(session) == "I said it's teatime."
     assert session.heard_only_name is False
 
 
 def test_name_and_request_reach_the_model_as_the_request_alone():
-    client = FakeClient(heard="Kaki, what's the weather like?", reply="Sunny.")
+    client = FakeClient(heard="Melody, what's the weather like?", reply="Sunny.")
     session = _session(client)
     assert _turn(session, by_name=True) == "Sunny."
     assert client.chat.completions.calls[0]["messages"][-1]["content"] == "what's the weather like?"
     assert session.last_heard == "what's the weather like?"
 
 
-def test_kaki_play_shape_of_you_reaches_the_model_as_play_shape_of_you():
-    client = FakeClient(heard="Kaki play Shape of You", reply="")
+def test_melody_play_shape_of_you_reaches_the_model_as_play_shape_of_you():
+    client = FakeClient(heard="Melody play Shape of You", reply="")
     session = _session(client)
     _turn(session, by_name=True)
     assert client.chat.completions.calls[0]["messages"][-1]["content"] == "play Shape of You"
 
 
 def test_a_follow_up_that_starts_with_her_name_is_just_stripped():
-    client = FakeClient(heard="Khaki, and tomorrow?", reply="Rain.")
+    client = FakeClient(heard="Melodie, and tomorrow?", reply="Rain.")
     session = _session(client)
     assert _turn(session) == "Rain."
     assert client.chat.completions.calls[0]["messages"][-1]["content"] == "and tomorrow?"
@@ -114,9 +114,9 @@ def test_while_music_plays_the_transcriber_is_primed_with_media_commands():
     assert "prompt" not in client.audio.transcriptions.calls[1]
 
 
-def test_kaki_stop_mid_song_is_routed_without_the_model():
+def test_melody_stop_mid_song_is_routed_without_the_model():
     intents: list = []
-    client = FakeClient(heard="in love with your body, Kaki, stop.")
+    client = FakeClient(heard="in love with your body, Melody, stop.")
     session = _session(client, media_playing=lambda: True, intents=intents)
     assert _turn(session, by_name=True) == "Stopped."
     assert intents == [("play_music", {"action": "stop"})]
@@ -141,7 +141,7 @@ def test_her_name_then_silence_is_still_her_calling():
 
 
 def test_a_wake_the_transcriber_doesnt_confirm_is_no_turn_and_no_model_call():
-    # Live, 2026-10-09: tiny.en heard "Kaki" in two people's chat across
+    # Live, 2026-10-09: tiny.en heard "Melody" in two people's chat across
     # the table; the cloud transcript had no name. Nobody called her.
     client = FakeClient(heard="Then how? We need to finish the report.")
     session = _session(client)
@@ -158,10 +158,10 @@ def test_the_same_words_over_the_spacebar_are_still_answered():
 
 
 def test_the_transcriber_is_told_her_language_and_never_given_her_name():
-    # 2026-10-09: a "Kaki." hint on wake turns came back as the whole
+    # 2026-10-09: a "Melody." hint on wake turns came back as the whole
     # transcript of unclear speech -- read as her calling. And left to
     # guess, Whisper heard Spanish, French and Hindi in the room.
-    client = FakeClient(heard="Kaki, what time is it?")
+    client = FakeClient(heard="Melody, what time is it?")
     session = _session(client)
     _turn(session, by_name=True)
     session._last_language = "chinese"

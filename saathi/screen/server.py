@@ -190,6 +190,7 @@ from saathi.identity.preferences import (
     read_preference,
     write_preference,
 )
+from saathi.screen.board import SCREEN_TOOLS, install_board_routes
 from saathi.voice.language import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
 from saathi.voice.tts.registry import DEFAULT_PREFERRED_BACKEND_ID, default_backends
 
@@ -293,6 +294,15 @@ def _log_turn(store, session, eou_ms: int | None) -> None:
         )
     except Exception:
         logger.exception("failed to log turn")
+
+
+# The quiet-day check's one tick (see `build_app`), for tests to drive
+# without waiting a minute.
+QUIET_DAY_TICK = web.AppKey("quiet_day_tick", object)
+REMINDER_TICK = web.AppKey("reminder_tick", object)
+MESSAGE_TICK = web.AppKey("message_tick", object)
+# How soon a message from family is read after it arrives (if she's free).
+MESSAGE_SECONDS = 15.0
 
 
 async def _run_turn(
@@ -440,6 +450,14 @@ def _settings_message(store) -> str:
     )
 
 
+def _clock_label(when: datetime) -> str:
+    """"9 AM", "2:30 PM": a reminder card's time, on the device's clock."""
+    when = when.astimezone()
+    hour = when.hour % 12 or 12
+    minutes = "" if when.minute == 0 else f":{when.minute:02d}"
+    return f"{hour}{minutes} {'AM' if when.hour < 12 else 'PM'}"
+
+
 def build_app(
     core: Core,
     session=None,
@@ -458,6 +476,11 @@ def build_app(
     listen_window=None,
     name_prompt_seconds: float = _NAME_PROMPT_SECONDS,
     remote_audio=None,
+    quiet_day=None,
+    reminders=None,
+    messages=None,
+    screen_intent=None,
+    identity_db=None,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -1001,6 +1024,145 @@ def build_app(
 
     app.on_cleanup.append(close_window_on_cleanup)
 
+    def speak_first(line: str, card: dict | None = None) -> str | None:
+        """Melody speaks without being asked (initiative/quiet_day.py):
+        IDLE -> notice -> ATTENTIVE -> prompt -> SPEAKING, the path her
+        "Yes?" already takes, then the window stays open so she can just
+        answer. Returns why it couldn't, or None once it's speaking. Only
+        from IDLE (or asleep): any other state means she is mid-turn, so
+        not a quiet day after all, and a call on screen is never talked
+        over."""
+        if session is None:
+            return "no voice session"
+        if calls is not None and calls.current_id is not None:
+            return "a call is on screen"
+        if core.state is State.SLEEPING:
+            core.handle(Event("wake"))
+        if core.state is not State.IDLE:
+            return f"she is busy ({core.state.value})"
+        if not core.handle(Event("notice")):
+            return "the face wouldn't turn to her"
+        if not core.handle(Event("prompt")):
+            core.handle(Event("dismiss"))
+            return "the face wouldn't speak"
+        turn_generation["value"] += 1
+        if card is not None:
+            # What she is hearing, as a card she can read again and the
+            # eyes glance at (static/js/board.js). Not a caption too: the
+            # same words twice on one screen.
+            _send_all(json.dumps({"type": "shown", **card}))
+        else:
+            caption("saathi", line)  # on screen too: she may not catch it all
+        asyncio.get_running_loop().create_task(
+            _speak_and_finish(
+                session,
+                core,
+                turn_generation["value"],
+                turn_generation,
+                line,
+                None,  # not an exchange: no `turns` row, so not "she spoke"
+                None,
+                on_done=lambda g: open_conversation(g, after_her_name=True),
+            )
+        )
+        return None
+
+    def every(seconds: float, tick, what: str) -> None:
+        """Runs `tick` every `seconds` while the app runs. Sleeps first:
+        the face and the family app are up by then, and tests drive the
+        tick directly without racing a startup one."""
+        holder: dict[str, asyncio.Task | None] = {"task": None}
+
+        async def forever() -> None:
+            while True:
+                await asyncio.sleep(seconds)
+                try:
+                    await tick()
+                except Exception:
+                    logger.exception("%s check failed; trying again next time", what)
+
+        async def start(_app: web.Application) -> None:
+            holder["task"] = asyncio.get_running_loop().create_task(forever())
+
+        async def stop(_app: web.Application) -> None:
+            task = holder.pop("task", None)
+            if task is not None:
+                task.cancel()
+
+        app.on_startup.append(start)
+        app.on_cleanup.append(stop)
+
+    if quiet_day is not None:
+
+        async def quiet_day_tick() -> None:
+            loop = asyncio.get_running_loop()
+            step = await loop.run_in_executor(None, quiet_day.decide)
+            if step is None:
+                return
+            if step.action == "greet":
+                why_not = speak_first(quiet_day.greeting)
+                if why_not is None:
+                    await loop.run_in_executor(None, quiet_day.greeted)
+                else:
+                    await loop.run_in_executor(None, quiet_day.held, why_not)
+            elif step.action == "notify":
+                await loop.run_in_executor(None, quiet_day.notify, step)
+            elif step.action == "away":
+                await loop.run_in_executor(None, quiet_day.away, step)
+
+        from saathi.initiative.quiet_day import TICK_SECONDS as QUIET_DAY_SECONDS
+
+        every(QUIET_DAY_SECONDS, quiet_day_tick, "quiet day")
+        app[QUIET_DAY_TICK] = quiet_day_tick  # tests drive it without the timer
+
+    if reminders is not None:
+
+        async def reminder_tick() -> None:
+            """Says what's due, one per tick: speaking makes the face busy,
+            so the next one waits for the tick after it's done."""
+            loop = asyncio.get_running_loop()
+            steps = await loop.run_in_executor(None, reminders.decide)
+            spoke = False
+            for step in steps:
+                if step.action == "tell":
+                    await loop.run_in_executor(None, reminders.tell, step)
+                    continue
+                if spoke:
+                    continue  # its turn comes next tick, not a "held"
+                busy = (calls is not None and calls.current_id is not None) or core.state not in (
+                    State.IDLE,
+                    State.SLEEPING,
+                )
+                card = {"kind": "reminder", "text": step.text, "at": _clock_label(step.due)}
+                why_not = reminders.may_speak(step, busy=busy) or speak_first(step.line, card)
+                if why_not is None:
+                    spoke = True
+                    await loop.run_in_executor(None, reminders.spoken, step)
+                else:
+                    await loop.run_in_executor(None, reminders.held, step, why_not)
+
+        from saathi.initiative.reminders import TICK_SECONDS as REMINDER_SECONDS
+
+        every(REMINDER_SECONDS, reminder_tick, "reminder")
+        app[REMINDER_TICK] = reminder_tick
+
+    if messages is not None:
+
+        async def message_tick() -> None:
+            """A message from her family, read to her word for word when
+            she is free (call/family_hub.py). One per tick; the rest wait."""
+            loop = asyncio.get_running_loop()
+            waiting = await loop.run_in_executor(None, messages.next_for_her)
+            if waiting is None:
+                return
+            message_id, line = waiting
+            card = await loop.run_in_executor(None, messages.card, message_id)
+            if speak_first(line, card) is None:
+                await loop.run_in_executor(None, messages.mark_read, message_id)
+
+        every(MESSAGE_SECONDS, message_tick, "family message")
+        app[MESSAGE_TICK] = message_tick
+
     live_endpointer: dict[str, object | None] = {"value": None}
     if wake_endpointer is None:
 
@@ -1144,6 +1306,29 @@ def build_app(
                             else:
                                 logger.info("tap on %s dropped: not the current card", card_id)
                     continue
+                if payload.get("type") == "screen_action":
+                    # A tap on one of the screen's tabs (static/js/board.js)
+                    # asking for a tool: ring Priya. The same registry and
+                    # permission check her voice goes through, narrowed to
+                    # SCREEN_TOOLS (screen/board.py). The result goes back
+                    # to this screen only.
+                    tool = payload.get("tool")
+                    args = payload.get("args")
+                    if (
+                        screen_intent is None
+                        or tool not in SCREEN_TOOLS
+                        or not isinstance(args, dict)
+                    ):
+                        logger.info("screen action refused: %r", tool)
+                        result = {"status": "refused"}
+                    else:
+                        result = await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: screen_intent(tool, args)
+                        )
+                    await ws.send_str(
+                        json.dumps({"type": "screen_action_result", "tool": tool, "result": result})
+                    )
+                    continue
                 if payload.get("type") == "rtc":
                     # The kiosk's half of a family-app call (offer, ICE,
                     # connected/failed). Validated in call/webrtc.py.
@@ -1246,6 +1431,13 @@ def build_app(
 
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
+    # The tabs' reads (screen/board.py): loopback-only, like the pairing QR.
+    install_board_routes(
+        app,
+        identity_db=identity_db,
+        hub=lambda: messages,
+        registry=lambda: family.registry if family is not None else None,
+    )
     if family is not None:
         # Ctrl+P's pairing QR: loopback-only, never on the tunnelled app.
         family.install_local_routes(app)
@@ -1272,6 +1464,11 @@ def run(
     follow_up_seconds: float | None = None,
     open_after_reply: bool = True,
     remote_audio=None,
+    quiet_day=None,
+    reminders=None,
+    messages=None,
+    screen_intent=None,
+    identity_db=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
@@ -1290,6 +1487,11 @@ def run(
             follow_up_seconds=follow_up_seconds,
             open_after_reply=open_after_reply,
             remote_audio=remote_audio,
+            quiet_day=quiet_day,
+            reminders=reminders,
+            messages=messages,
+            screen_intent=screen_intent,
+            identity_db=identity_db,
         ),
         host=host,
         port=port,

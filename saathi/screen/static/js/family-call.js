@@ -46,6 +46,8 @@ const STYLE = `
 #family-pairing .fp-note { color: #ffcf9e; font-size: 18px; }
 #family-pairing .fp-url { font-size: 14px; word-break: break-all; opacity: .7; }
 #family-pairing ul { padding-left: 20px; }
+#family-pairing .fp-close { margin: 18px 0 0; font-size: 24px; padding: 14px 40px;
+  border-radius: 999px; }
 #family-pairing button { font: inherit; font-size: 16px; margin-left: 12px;
   padding: 4px 12px; border-radius: 8px; border: 0; background: #7a3b2e; color: #fff; }
 `;
@@ -243,24 +245,38 @@ export function createFamilyCall(send) {
     }
     if (!list.children.length) list.appendChild(el("li", "None yet"));
     side.appendChild(list);
-    side.appendChild(el("p", "Esc to close", "fp-note"));
+    // A button, not only Esc: since 2026-10-28 a tab on the face opens
+    // this, and a touchscreen has no Esc.
+    const close = el("button", "Close", "fp-close");
+    close.addEventListener("click", closePairing);
+    side.appendChild(close);
     box.append(qr, side);
     overlay.replaceChildren(box);
+  }
+
+  function openPairing() {
+    overlay.hidden = false;
+    renderPairing();
+  }
+
+  function closePairing() {
+    overlay.hidden = true;
+    overlay.replaceChildren();
   }
 
   window.addEventListener("keydown", (event) => {
     if (event.ctrlKey && event.code === "KeyP") {
       event.preventDefault();
-      overlay.hidden = !overlay.hidden;
-      if (!overlay.hidden) renderPairing();
+      if (overlay.hidden) openPairing();
+      else closePairing();
     } else if (event.code === "Escape" && !overlay.hidden) {
-      overlay.hidden = true;
-      overlay.replaceChildren();
+      closePairing();
     }
   });
 
   return {
     isOpen: () => !overlay.hidden,
+    openPairing,
     onMessage(message) {
       if (!message || message.type !== "rtc") return;
       if (message.to && message.to !== peer) return;

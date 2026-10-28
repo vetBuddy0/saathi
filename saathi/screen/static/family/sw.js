@@ -45,6 +45,19 @@ self.addEventListener("push", (event) => {
         });
         return;
       }
+      if (data.kind === "notice") {
+        // Not a call: "Mum hasn't talked to Melody yet today"
+        // (initiative/quiet_day.py). Stays until read; tapping opens the app.
+        await self.registration.showNotification(data.title, {
+          body: data.body,
+          tag: data.call_id,
+          renotify: true,
+          requireInteraction: true,
+          icon: "/family/static/icon-192.png",
+          data: { url: data.url || "/family/" },
+        });
+        return;
+      }
       for (const old of await self.registration.getNotifications({ tag: data.call_id })) {
         old.close();
       }

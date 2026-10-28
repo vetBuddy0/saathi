@@ -5,25 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#2b1d14">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="Kaki">
-  <title>Kaki</title>
+  <meta name="apple-mobile-web-app-title" content="Melody">
+  <title>Melody</title>
   <link rel="manifest" href="/family/manifest.webmanifest">
   <link rel="icon" href="/family/static/icon-192.png">
   <link rel="apple-touch-icon" href="/family/static/icon-192.png">
-  <link rel="stylesheet" href="/family/static/app.css">
+  <link rel="stylesheet" href="/family/static/app.css?v=2">
 </head>
 <body>
   <!-- The family app (call/family_server.py serves it; app.js drives it).
        One screen at a time; app.js shows the one that fits. -->
   <main>
     <section id="screen-unpaired" hidden>
-      <h1>Kaki</h1>
+      <h1>Melody</h1>
       <p class="big">This phone isn't paired yet.</p>
-      <p>On Kaki, press <b>Ctrl+P</b> and scan the code with this phone's camera.</p>
+      <p>On Melody, press <b>Ctrl+P</b> and scan the code with this phone's camera.</p>
+      <p id="unpaired-note" class="hint" hidden></p>
     </section>
 
     <section id="screen-pair" hidden>
-      <h1>Pair with Kaki</h1>
+      <h1>Pair with Melody</h1>
       <form id="pair-form">
         <label>Your name
           <input id="pair-name" name="name" autocomplete="given-name" required maxlength="40">
@@ -53,20 +54,93 @@
       </form>
     </section>
 
-    <section id="screen-home" hidden>
-      <h1 id="home-title">Kaki</h1>
-      <button id="call-her" class="btn btn-go btn-round">Call</button>
-      <div id="alerts" hidden>
-        <p>Turn on call alerts so this phone rings when she calls.</p>
-        <button id="alerts-on" class="btn">Turn on call alerts</button>
+    <section id="screen-home" class="tabbed" hidden>
+      <header class="top">
+        <h1 id="home-title">Melody</h1>
+      </header>
+
+      <div id="tab-home" class="panel">
+        <button id="call-her" class="btn btn-go btn-round">Call</button>
+        <p id="home-status" class="hint"></p>
+        <div class="card" id="how-card">
+          <h2>How she is today</h2>
+          <p id="last-talked" class="line"></p>
+          <p id="quiet-day" class="line warn" hidden></p>
+          <ul id="today-reminders" class="list"></ul>
+        </div>
+        <div id="alerts" class="card" hidden>
+          <p>Turn on alerts so this phone rings when she calls, and you hear when she messages you.</p>
+          <button id="alerts-on" class="btn">Turn on alerts</button>
+        </div>
+        <p id="ios-hint" class="hint" hidden>To get calls and alerts on iPhone: tap Share, then
+          <b>Add to Home Screen</b>, and open Melody from there.</p>
       </div>
-      <p id="ios-hint" class="hint" hidden>To receive calls on iPhone: tap Share, then
-        <b>Add to Home Screen</b>, and open Kaki from there.</p>
-      <p id="home-status" class="hint"></p>
+
+      <div id="tab-messages" class="panel" hidden>
+        <p class="hint">Melody reads your message to her out loud, word for word.
+          When she answers, it comes here.</p>
+        <ol id="thread" class="thread"></ol>
+        <form id="message-form" class="composer">
+          <textarea id="message-text" rows="2" maxlength="500" placeholder="Write to her…" required></textarea>
+          <button type="submit" class="btn btn-go">Send</button>
+        </form>
+        <p id="message-error" class="error" hidden></p>
+      </div>
+
+      <div id="tab-reminders" class="panel" hidden>
+        <ul id="reminder-list" class="list"></ul>
+        <form id="reminder-form" class="card">
+          <h2>New reminder</h2>
+          <label>Melody will say
+            <input id="reminder-text" maxlength="200" placeholder="take your blood pressure tablet" required>
+          </label>
+          <div class="pair">
+            <label>At
+              <input id="reminder-at" type="time" required>
+            </label>
+            <label>On
+              <select id="reminder-day">
+                <option value="">Next time</option>
+                <option value="today">Today</option>
+                <option value="tomorrow">Tomorrow</option>
+                <option value="monday">Monday</option>
+                <option value="tuesday">Tuesday</option>
+                <option value="wednesday">Wednesday</option>
+                <option value="thursday">Thursday</option>
+                <option value="friday">Friday</option>
+                <option value="saturday">Saturday</option>
+                <option value="sunday">Sunday</option>
+              </select>
+            </label>
+          </div>
+          <label>Repeat
+            <select id="reminder-repeat">
+              <option value="once">Once</option>
+              <option value="daily">Every day</option>
+              <option value="weekly">Every week</option>
+            </select>
+          </label>
+          <label class="check"><input id="reminder-tell" type="checkbox">
+            Tell the family if she doesn't answer</label>
+          <button type="submit" class="btn btn-go">Add reminder</button>
+          <p id="reminder-error" class="error" hidden></p>
+        </form>
+      </div>
+
+      <div id="tab-calls" class="panel" hidden>
+        <ul id="call-list" class="list"></ul>
+      </div>
+
+      <nav class="tabs">
+        <button data-tab="home" class="tab on">Home</button>
+        <button data-tab="messages" class="tab">Messages<span id="unread-dot" class="dot" hidden></span></button>
+        <button data-tab="reminders" class="tab">Reminders</button>
+        <button data-tab="calls" class="tab">Calls</button>
+      </nav>
     </section>
 
     <section id="screen-ringing" hidden>
-      <p class="caption">Kaki</p>
+      <p class="caption">Melody</p>
       <h1 id="ringing-name">is calling</h1>
       <div class="row">
         <button id="decline" class="btn btn-stop btn-round">Decline</button>
@@ -82,6 +156,6 @@
     </section>
   </main>
   <audio id="remote" autoplay playsinline></audio>
-  <script type="module" src="/family/static/app.js"></script>
+  <script type="module" src="/family/static/app.js?v=4"></script>
 </body>
 </html>

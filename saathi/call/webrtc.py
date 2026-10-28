@@ -175,6 +175,9 @@ class FamilyCalls:
     ) -> None:
         self._registry = registry
         self._push = push
+        # (member, direction, reason, seconds talked or None) after every
+        # call ends: the family app's call history (call/family_hub.py).
+        self.on_ended: Callable[[Member, str, str, float | None], None] | None = None
         self._public_url = public_url
         self._hold = hold
         self._cards = cards
@@ -651,6 +654,12 @@ class FamilyCalls:
             self._clear_card(fx, call)
             self._set_panel(fx, None)
             fx.add(self._hold.clear)
+            if self.on_ended is not None:
+                talked = (
+                    self._clock() - call.connected_at if call.connected_at is not None else None
+                )
+                on_ended = self.on_ended
+                fx.add(lambda: on_ended(call.member, call.direction, reason, talked))
             # Only a ring they never picked up becomes "Missed call" on
             # their phone; a decline or their own hang-up needs nothing.
             notify_phone = (
@@ -736,7 +745,7 @@ class FamilyCalls:
 def _her_name(member: Member) -> str:
     """What the family member calls her ("Mum"), from their pairing; a
     neutral fallback otherwise."""
-    return getattr(member, "calls_her", None) or "Kaki"
+    return getattr(member, "calls_her", None) or "Melody"
 
 
 def _unreachable(name: str) -> dict[str, Any]:

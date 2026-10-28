@@ -53,6 +53,9 @@ from saathi.call.contacts import normalise_name, normalise_relation
 from saathi.call.push import Subscription
 
 PAIRING_TTL_SECONDS = 10 * 60
+# A relink link arrives in a push after the device's address changed; she
+# may not look at her phone for a day or two.
+RELINK_TTL_SECONDS = 3 * 24 * 3600
 MAX_NAME_CHARS = 40
 
 _SCHEMA = (
@@ -68,6 +71,16 @@ _SCHEMA = (
     )""",
     """CREATE TABLE IF NOT EXISTS pairing_tokens (
         token_hash TEXT PRIMARY KEY,
+        created_at REAL NOT NULL,
+        expires_at REAL NOT NULL,
+        used_at REAL
+    )""",
+    # One-time links that re-pair an *existing* member on a new address
+    # (2026-10-20): a quick tunnel's hostname changes on every restart,
+    # and the key a phone holds lives in that old origin's storage.
+    """CREATE TABLE IF NOT EXISTS relink_tokens (
+        token_hash TEXT PRIMARY KEY,
+        member_id TEXT NOT NULL,
         created_at REAL NOT NULL,
         expires_at REAL NOT NULL,
         used_at REAL
@@ -196,6 +209,70 @@ class FamilyRegistry:
         finally:
             conn.close()
         return Member(member_id, clean, rel, None, her), key
+
+    # -- relinking -----------------------------------------------------------
+
+    def issue_relink(self, member_id: str, ttl: float = RELINK_TTL_SECONDS) -> str:
+        """A one-time link for this member alone, sent to their phone by
+        push when the address changed. Spending it gives them a new key
+        on the new address; nothing else about them changes."""
+        token = secrets.token_urlsafe(24)
+        now = self._clock()
+        self._run(
+            lambda c: c.execute(
+                "INSERT INTO relink_tokens VALUES (?, ?, ?, ?, NULL)",
+                (_hash(token), member_id, now, now + ttl),
+            )
+        )
+        return token
+
+    def redeem_relink(self, token: Any) -> tuple[Member, str]:
+        """Spends the token; returns the member and their new key (the
+        old key stops working, as the old origin's storage is gone
+        anyway). Raises `PairingError`."""
+        if not isinstance(token, str) or not token:
+            raise PairingError("This link isn't valid. Ask for a new code.")
+        now = self._clock()
+        key = secrets.token_urlsafe(32)
+        found: dict[str, Any] = {}
+
+        def spend(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT member_id, expires_at, used_at FROM relink_tokens WHERE token_hash = ?",
+                (_hash(token),),
+            ).fetchone()
+            if row is None:
+                raise PairingError("This link isn't valid. Ask for a new code.")
+            if row["used_at"] is not None:
+                raise PairingError("This link has already been used. Ask for a new code.")
+            if now >= row["expires_at"]:
+                raise PairingError("This link has expired. Ask for a new code.")
+            member = conn.execute(
+                "SELECT * FROM members WHERE id = ? AND revoked_at IS NULL", (row["member_id"],)
+            ).fetchone()
+            if member is None:
+                raise PairingError("This phone was unpaired. Ask for a new code.")
+            conn.execute(
+                "UPDATE relink_tokens SET used_at = ? WHERE token_hash = ?", (now, _hash(token))
+            )
+            conn.execute(
+                "UPDATE members SET key_hash = ? WHERE id = ?", (_hash(key), row["member_id"])
+            )
+            found["member"] = _member(member)
+
+        conn = self._connect()
+        try:
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                spend(conn)
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+        finally:
+            conn.close()
+        return found["member"], key
 
     # -- members -------------------------------------------------------------
 

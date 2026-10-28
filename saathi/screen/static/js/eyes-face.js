@@ -75,6 +75,27 @@ export const EMOTION_NAMES = Object.freeze([
   "curious",
 ]);
 
+// What react() accepts besides sway-on/sway-off.
+export const REACTIONS = Object.freeze(["squint", "tilt", "look-around", "wink", "bounce", "yawn"]);
+
+// Which idle flourish, from a roll in [0, 1) and the hour. Yawns are
+// mostly for the evening and night; with reduced motion, only the two
+// that barely move. Pure, so the mix is testable.
+export function pickFlourish(roll, hour, reducedMotion = false) {
+  if (reducedMotion) return roll < 0.5 ? "squint" : "tilt";
+  const sleepy = hour >= 21 || hour < 7;
+  const table = sleepy
+    ? [["yawn", 0.3], ["squint", 0.2], ["tilt", 0.2], ["look-around", 0.15], ["wink", 0.15]]
+    : [["squint", 0.2], ["tilt", 0.2], ["look-around", 0.25], ["wink", 0.15], ["bounce", 0.1],
+      ["yawn", 0.1]];
+  let edge = 0;
+  for (const [name, share] of table) {
+    edge += share;
+    if (roll < edge) return name;
+  }
+  return table[table.length - 1][0];
+}
+
 function randomBetween(min, max) {
   return min + Math.random() * (max - min);
 }
@@ -274,6 +295,8 @@ export default class EyesFace {
     this._ambient = new AmbientDirector({ minGapMs: 60000, maxGapMs: 120000 });
     this._floaters = new Floaters();
     this._following = false;
+    this._glanceUntil = 0;
+    this._swayWanted = false;
     this._emotion = null;
     this._emotionEntering = false;
 
@@ -332,8 +355,9 @@ export default class EyesFace {
       width: w,
       height: h,
     });
-    this._followVisitor(visitor, w, h, idle);
-    if (!this._following && !this._emotion) this._idleFlourish(dtMs);
+    const glancing = performance.now() < this._glanceUntil;
+    if (!glancing) this._followVisitor(visitor, w, h, idle);
+    if (!this._following && !this._emotion && !glancing) this._idleFlourish(dtMs);
 
     const frame = this._model.tick(dtMs);
     const scale = fitScale(w, h);
@@ -475,22 +499,80 @@ export default class EyesFace {
     }
   }
 
-  // While idle, every 15-30 s: a curious tilt or a happy squint. Rare
-  // enough to feel like a personality, not a screensaver.
+  // While idle, every 25-50 s, one small thing from a repertoire:
+  // a happy squint, a curious tilt, a look around the room, a wink, a
+  // little bounce, or (more often late in the evening) a yawn. Was 45-90 s
+  // and only squint or tilt; the owner (2026-10-28) wanted her livelier.
+  // Still rare enough to be a personality, not a screensaver.
   _idleFlourish(dtMs) {
     if (this._lastState !== "idle" && this._lastState !== null) return;
-    this._flourishInMs = (this._flourishInMs ?? randomBetween(45000, 90000)) - dtMs;
+    this._flourishInMs = (this._flourishInMs ?? randomBetween(25000, 50000)) - dtMs;
     if (this._flourishInMs > 0) return;
-    this._flourishInMs = randomBetween(45000, 90000);
-    if (Math.random() < 0.5) {
-      this._model.anim_squint(1100);
-    } else {
-      this._model.setTiltTarget(randomBetween(0.04, 0.07) * (Math.random() < 0.5 ? -1 : 1));
-      clearTimeout(this._untiltTimer);
-      this._untiltTimer = setTimeout(() => {
-        if (this._lastState === "idle" || this._lastState === null) this._model.setTiltTarget(0);
-      }, 1400);
+    this._flourishInMs = randomBetween(25000, 50000);
+    this._flourish(pickFlourish(Math.random(), new Date().getHours(), this._reducedMotion));
+  }
+
+  _flourish(name) {
+    const model = this._model;
+    switch (name) {
+      case "squint":
+        model.anim_squint(1100);
+        break;
+      case "tilt":
+        model.setTiltTarget(randomBetween(0.04, 0.07) * (Math.random() < 0.5 ? -1 : 1));
+        clearTimeout(this._untiltTimer);
+        this._untiltTimer = setTimeout(() => {
+          if (this._lastState === "idle" || this._lastState === null) model.setTiltTarget(0);
+        }, 1400);
+        break;
+      case "look-around":
+        model.anim_lookAround();
+        break;
+      case "wink":
+        model.anim_wink(Math.random() < 0.5);
+        break;
+      case "bounce":
+        model.anim_bounce();
+        break;
+      case "yawn":
+        model.anim_yawn();
+        break;
+      default:
+        break;
     }
+  }
+
+  // OPTIONAL Face method (face.js): look at a point on the screen, in
+  // window coordinates, for `ms`, then back to what the state wants.
+  // main.js calls it when something she should see appears: a message, a
+  // reminder, a tab she opened.
+  lookAt(clientX, clientY, ms = 1500) {
+    if (!this._model || this._lastState === "sleeping") return;
+    const rect = this._canvas.parentElement.getBoundingClientRect();
+    const model = this._model;
+    const gaze = gazeToward(clientX - rect.left, clientY - rect.top, rect.width, rect.height,
+      model.gazeRange);
+    model.setIdleMode(false);
+    model.setGazeTarget(gaze.x, gaze.y);
+    this._glanceUntil = performance.now() + ms;
+    clearTimeout(this._glanceTimer);
+    this._glanceTimer = setTimeout(() => {
+      this._glanceUntil = 0;
+      this._applyLook(this._lastState, false);
+    }, ms);
+  }
+
+  // OPTIONAL Face method (face.js): a one-off move, or music on/off.
+  // Unknown names are ignored. Nothing but sway-off happens while asleep.
+  react(name) {
+    if (!this._model) return;
+    if (name === "sway-on" || name === "sway-off") {
+      this._swayWanted = name === "sway-on" && !this._reducedMotion;
+      this._model.setSway(this._swayWanted && this._lastState !== "sleeping");
+      return;
+    }
+    if (this._lastState === "sleeping") return;
+    if (REACTIONS.includes(name)) this._flourish(name);
   }
 
   onState(state) {
@@ -545,6 +627,7 @@ export default class EyesFace {
     model.setSparkle(0.5);
     model.setBrightness(1);
     model.setAutoblinker(true, 3, 4);
+    model.setSway(this._swayWanted && state !== "sleeping");
 
     switch (state) {
       case "sleeping":
@@ -619,6 +702,8 @@ export default class EyesFace {
         model.setBrightness(1.05);
         model.setGazeTarget(0, 0);
         model.setSpeakingMotion(true);
+        // A small nod now and then, for emphasis, as people do talking.
+        model.setAttentiveNods(true, 3, 4);
         break;
       case "handoff":
         model.open();
@@ -710,6 +795,7 @@ export default class EyesFace {
     this._running = false;
     clearTimeout(this._untiltTimer);
     clearTimeout(this._emotionTimer);
+    clearTimeout(this._glanceTimer);
     window.removeEventListener("resize", this._resize);
     if (this._observer) this._observer.disconnect();
   }

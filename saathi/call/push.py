@@ -186,7 +186,7 @@ def ring_payload(call_id: str, caller: str, url: str) -> dict[str, Any]:
     return {
         "kind": "ring",
         "call_id": call_id,
-        "title": f"Kaki — {caller}",
+        "title": f"Melody — {caller}",
         "body": f"{caller} is calling you",
         "url": url,
     }
@@ -198,9 +198,16 @@ def cancel_payload(call_id: str, caller: str, missed: bool) -> dict[str, Any]:
     return {
         "kind": "missed" if missed else "cancel",
         "call_id": call_id,
-        "title": f"Kaki — {caller}",
+        "title": f"Melody — {caller}",
         "body": f"Missed call from {caller}" if missed else "",
     }
+
+
+def notice_payload(tag: str, title: str, body: str, url: str) -> dict[str, Any]:
+    """A notification that isn't a call (initiative/quiet_day.py: "Mum
+    hasn't talked to Melody yet today"). `tag` replaces an earlier notice
+    with the same tag instead of stacking a second one."""
+    return {"kind": "notice", "call_id": tag, "title": title, "body": body, "url": url}
 
 
 @dataclass(frozen=True)

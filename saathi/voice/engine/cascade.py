@@ -195,7 +195,7 @@ NAME_PROMPTS: dict[str, tuple[str, ...]] = {
 # Only while something plays -- a prompt nudges every transcript toward
 # its words, and "stop" is not what she usually means.
 MEDIA_STT_PROMPT = (
-    "Kaki, stop. Kaki, pause. Resume. Volume up. Volume down. "
+    "Melody, stop. Melody, pause. Resume. Volume up. Volume down. "
     "Louder. Softer. Next song."
 )
 
@@ -693,7 +693,7 @@ class CascadeSession:
         bias = {"prompt": MEDIA_STT_PROMPT} if self._media_playing_now() else {}
         # Never a hint with her name in it on a wake turn: tried
         # 2026-10-09, and Whisper answered unclear speech with the hint
-        # itself ("Kaki."), which read as her calling and opened the
+        # itself ("Melody."), which read as her calling and opened the
         # conversation to whoever spoke next.
         # Always the language she chose, never a guess (voice/language.py).
         bias["language"] = STT_LANGUAGE_CODES.get(

@@ -100,10 +100,12 @@ def build_family_app(
     *,
     app_dir: Path = APP_DIR,
     run_blocking: Callable[..., Any] | None = None,
+    hub: Any = None,
 ) -> web.Application:
     """`run_blocking(fn, *args)` runs a blocking call off the loop
     (default: the loop's executor). Registry calls are SQLite; small,
-    but still disk."""
+    but still disk. `hub` (call/family_hub.py) answers everything on the
+    socket that isn't a call: messages, reminders, call history, status."""
 
     @web.middleware
     async def headers(request: web.Request, handler):
@@ -155,6 +157,29 @@ def build_family_app(
         except PairingError as exc:
             return _json_error(400, str(exc))
         logger.info("family member paired: %s", member.label)
+        return web.json_response(
+            {
+                "ok": True,
+                "member_id": member.id,
+                "key": key,
+                "name": member.name,
+                "calls_her": member.calls_her or "",
+                "vapid_public_key": push.public_key if push is not None else None,
+            }
+        )
+
+    async def relink(request: web.Request) -> web.Response:
+        """A paired phone on a new address (the push after a quick
+        tunnel's hostname changed): spends the one-time link, returns a
+        new key, exactly as pairing does."""
+        data = await _read_json(request)
+        if data is None:
+            return _json_error(400, "Something went wrong. Please try again.")
+        try:
+            member, key = await blocking(registry.redeem_relink, data.get("token"))
+        except PairingError as exc:
+            return _json_error(400, str(exc))
+        logger.info("family member relinked on a new address: %s", member.label)
         return web.json_response(
             {
                 "ok": True,
@@ -220,6 +245,7 @@ def build_family_app(
                 loop.call_soon_threadsafe(deliver)
 
         conn = None
+        hub_token = None
         try:
             try:
                 first = await ws.receive(timeout=AUTH_TIMEOUT_SECONDS)
@@ -250,18 +276,31 @@ def build_family_app(
                         "name": conn.member.name,
                         "calls_her": conn.member.calls_her or "",
                         "can_call": conn.call_id is None,
+                        "extras": hub is not None and conn.call_id is None,
                     }
                 )
             )
             # attach() may have queued a "ringing" before the welcome;
             # the page handles either order.
+            # A page let in by a per-call token may answer that call and
+            # nothing else: no messages, no reminders.
+            if hub is not None and conn.call_id is None:
+                hub_token = hub.attach(conn.member.id, send)
             async for msg in ws:
                 payload = _parse(msg)
-                if payload is not None:
-                    calls.on_member_message(conn, payload)
+                if payload is None:
+                    continue
+                if hub is not None and hub.handles(payload):
+                    if conn.call_id is None:
+                        reply = await blocking(hub.handle, conn.member, payload)
+                        await ws.send_str(json.dumps(reply))
+                    continue
+                calls.on_member_message(conn, payload)
         finally:
             if conn is not None:
                 calls.detach(conn)
+            if hub_token is not None:
+                hub.detach(hub_token)
         return ws
 
     app.router.add_get("/", root)
@@ -270,6 +309,7 @@ def build_family_app(
     app.router.add_get("/family/sw.js", service_worker)
     app.router.add_get("/family/manifest.webmanifest", manifest)
     app.router.add_post("/family/api/pair", pair)
+    app.router.add_post("/family/api/relink", relink)
     app.router.add_post("/family/api/subscribe", subscribe)
     app.router.add_post("/family/api/me", whoami)
     app.router.add_post("/family/api/decline", decline)
@@ -390,9 +430,9 @@ def install_local_routes(
             "expires_in": int(PAIRING_TTL_SECONDS),
             "stable": stable,
             "note": "" if stable else (
-                "This address changes when Kaki restarts. A phone paired now can "
-                "answer calls, but will need pairing again after a restart to start "
-                "calls. Set SAATHI_PUBLIC_URL for a permanent address."
+                "This address changes when Melody restarts. Phones with alerts on "
+                "get a one-tap link to reconnect; others need pairing again. Set "
+                "SAATHI_PUBLIC_URL for a permanent address."
             ),
             "members": members,
         }

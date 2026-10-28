@@ -1,4 +1,4 @@
-"""The "Kaki" wake word: matching, cutting utterances, ending a
+"""The "Melody" wake word: matching, cutting utterances, ending a
 hands-free turn, and the listener gluing them -- all with fake speech
 decisions, so no model or microphone is needed."""
 
@@ -21,15 +21,15 @@ def _is_speech(chunk: bytes) -> bool:
 @pytest.mark.parametrize(
     "text, rest",
     [
-        # Spellings whisper actually produced for her name (2026-10-07).
-        ("Kaki", ""),
-        ("Kaki.", ""),
-        ("Hey Kaki!", ""),
-        ("Kaki, play a song.", "play a song"),
-        ("Khaki, call a Thai.", "call a thai"),
-        ("Ka ki, play a song.", "play a song"),
-        ("Kakki, what's the time?", "what s the time"),
-        ("Kaki?", ""),
+        # Spellings whisper actually produced for her name (2026-10-20).
+        ("Melody", ""),
+        ("Melody.", ""),
+        ("Hey Melody!", ""),
+        ("Melody, play a song.", "play a song"),
+        ("Melodie, call a Thai.", "call a thai"),
+        ("Mel ody, play a song.", "play a song"),
+        ("Melodie, what's the time?", "what s the time"),
+        ("Melody?", ""),
     ],
 )
 def test_her_name_is_heard_with_what_follows(text, rest):
@@ -44,10 +44,12 @@ def test_her_name_is_heard_with_what_follows(text, rest):
         "That's it!",
         "Hello there!",
         "Kai is here",  # 0.86 -- under the line
-        "My kopi kaki came today",  # a friend, not a call
-        "Mahjong kaki tonight",
-        "Khakis are on sale",  # 0.80
-        "I was telling my friend about kaki",  # the name, but not a call
+        "My melody is stuck in my head",  # a tune, not a call
+        "That nice melody again",
+        "Melodies from the radio",  # 0.86 -- under the line
+        "I was telling my friend about melody",  # the name, but not a call
+        "Melon very sweet",
+        "Cookie or cake?",  # what "Melody" made into the name (2026-10-09)
         "",
     ],
 )
@@ -140,7 +142,7 @@ def _listener(transcript, listening=True):
 
 
 def test_the_listener_wakes_on_her_name_and_passes_the_request_along():
-    listener, woke, _ = _listener("Kaki, play a song")
+    listener, woke, _ = _listener("Melody, play a song")
     listener.check(SPEECH)
     assert woke == [(SPEECH, "play a song")]
 
@@ -152,13 +154,13 @@ def test_the_listener_ignores_other_speech():
 
 
 def test_nothing_is_transcribed_while_the_device_is_busy():
-    listener, woke, calls = _listener("Kaki", listening=False)
+    listener, woke, calls = _listener("Melody", listening=False)
     listener.check(SPEECH)
     assert woke == [] and calls == []
 
 
 def test_the_listener_reads_vad_sized_chunks_from_the_mic():
-    listener, _, _ = _listener("Kaki")
+    listener, _, _ = _listener("Melody")
     listener.start()
     try:
         assert listener._capture.chunk_bytes == CHUNK_BYTES
@@ -167,9 +169,9 @@ def test_the_listener_reads_vad_sized_chunks_from_the_mic():
 
 
 def test_what_she_says_after_the_name_is_kept_for_the_turn():
-    listener, _, _ = _listener("Kaki")
+    listener, _, _ = _listener("Melody")
     listener._segmenter = UtteranceSegmenter(_is_speech, silence_seconds=0.064)
-    for chunk in [SPEECH, QUIET, QUIET]:  # "Kaki", then the pause ends it
+    for chunk in [SPEECH, QUIET, QUIET]:  # "Melody", then the pause ends it
         listener._on_chunk(chunk)
     assert listener.after() == b""
     listener._on_chunk(SPEECH)  # "play..." while the name is being checked
@@ -195,9 +197,9 @@ def test_audio_after_the_name_is_dropped_once_the_device_is_busy():
 # -- hearing the name early, and handing the mic to the turn (2026-10-07) ----
 
 
-def test_khaki_is_her_name():
-    # Spelled like the trousers, still her name (0.89, over the line).
-    assert match_wake_word("Khaki, call Udi.") == (True, "call udi")
+def test_melodie_is_her_name():
+    # tiny.en's spelling in Malay and Tamil sentences (0.77, listed by hand).
+    assert match_wake_word("Melodie, call Udi.") == (True, "call udi")
 
 
 def _drain(listener):
@@ -238,7 +240,7 @@ def _early_listener(transcripts, *, is_complete=None, early=(0.064,)):
 
 
 def test_the_name_is_heard_while_she_is_still_speaking():
-    listener, woke, _ = _early_listener(["Kaki call"])
+    listener, woke, _ = _early_listener(["Melody call"])
     listener._on_chunk(SPEECH)
     listener._on_chunk(SPEECH)  # 2 chunks since onset = 0.064 s: early check
     assert len(woke) == 0  # queued, not yet transcribed
@@ -249,7 +251,7 @@ def test_the_name_is_heard_while_she_is_still_speaking():
 
 
 def test_following_hands_over_every_chunk_after_the_name_in_order():
-    listener, woke, _ = _early_listener(["Kaki call"])
+    listener, woke, _ = _early_listener(["Melody call"])
     a, b, c, d = (bytes([1, n]) + b"\x00" * (CHUNK_BYTES - 2) for n in range(4))
     listener._on_chunk(a)
     listener._on_chunk(b)  # early check queued, covering a+b
@@ -267,7 +269,7 @@ def test_following_hands_over_every_chunk_after_the_name_in_order():
 
 
 def test_an_early_wake_is_not_repeated_when_the_utterance_ends():
-    listener, woke, state = _early_listener(["Kaki call", "Kaki call Udhi"])
+    listener, woke, state = _early_listener(["Melody call", "Melody call Udhi"])
     listener._on_chunk(SPEECH)
     listener._on_chunk(SPEECH)
     _drain(listener)
@@ -279,7 +281,7 @@ def test_an_early_wake_is_not_repeated_when_the_utterance_ends():
 
 
 def test_no_early_check_while_the_transcriber_is_busy():
-    listener, woke, _ = _early_listener(["Kaki"])
+    listener, woke, _ = _early_listener(["Melody"])
     listener._busy = True
     listener._on_chunk(SPEECH)
     listener._on_chunk(SPEECH)
@@ -287,7 +289,7 @@ def test_no_early_check_while_the_transcriber_is_busy():
 
 
 def test_a_name_heard_alone_is_not_part_of_the_turn():
-    listener, woke, _ = _early_listener(["Hello", "Kaki"], early=(1.0,))
+    listener, woke, _ = _early_listener(["Hello", "Melody"], early=(1.0,))
     for chunk in [SPEECH, SPEECH, QUIET, QUIET]:
         listener._on_chunk(chunk)
     _drain(listener)  # "Hello": no wake
@@ -307,7 +309,7 @@ def test_a_name_heard_alone_is_not_part_of_the_turn():
 def test_a_followed_turn_that_is_already_a_command_ends_at_the_short_pause():
     completed = []
     listener, woke, _ = _early_listener(
-        ["Kaki call", "Kaki call Udhi"], is_complete=lambda words: words == "call udhi"
+        ["Melody call", "Melody call Udhi"], is_complete=lambda words: words == "call udhi"
     )
     listener._on_chunk(SPEECH)
     listener._on_chunk(SPEECH)
@@ -322,7 +324,7 @@ def test_a_followed_turn_that_is_already_a_command_ends_at_the_short_pause():
 def test_a_followed_turn_that_is_not_a_command_waits_for_the_endpointer():
     completed = []
     listener, woke, _ = _early_listener(
-        ["Kaki call", "Kaki call my"], is_complete=lambda words: False
+        ["Melody call", "Melody call my"], is_complete=lambda words: False
     )
     listener._on_chunk(SPEECH)
     listener._on_chunk(SPEECH)
@@ -345,11 +347,11 @@ def test_the_endpointer_remembers_when_it_last_heard_her():
 @pytest.mark.parametrize(
     "text, stripped",
     [
-        ("Khaki, call Udhi.", "call Udhi."),
-        ("Kaki call Udi", "call Udi"),
-        ("Kakki Kaul Udi.", "Kaul Udi."),
-        ("Ka ki, play a song.", "play a song."),
-        ("call Kaki", "call Kaki"),  # her name as the object stays
+        ("Melodie, call Udhi.", "call Udhi."),
+        ("Melody call Udi", "call Udi"),
+        ("Melodie Kaul Udi.", "Kaul Udi."),
+        ("Mel ody, play a song.", "play a song."),
+        ("call Melody", "call Melody"),  # her name as the object stays
         ("Sorry about that", "Sorry about that"),
         ("", ""),
     ],
@@ -363,10 +365,10 @@ def test_a_leading_name_is_stripped(text, stripped):
 def test_mentions_name_confirms_the_cloud_heard_her_name():
     from saathi.audio.wake import mentions_name
 
-    assert mentions_name("Kaki, call my son.")
-    assert mentions_name("in love with your body, Kaki, stop.")  # lyrics first
-    assert mentions_name("Khaki, what time is it?")
-    assert mentions_name("卡奇，今天天气怎么样？")
+    assert mentions_name("Melody, call my son.")
+    assert mentions_name("in love with your body, Melody, stop.")  # lyrics first
+    assert mentions_name("Melodi, what time is it?")
+    assert mentions_name("美乐迪，今天天气怎么样？")
     assert not mentions_name("Then how? We need to finish the report.")
     assert not mentions_name("Cookie or cake?")
     assert not mentions_name("今天天气怎么样？")

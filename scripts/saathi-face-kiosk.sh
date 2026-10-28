@@ -17,7 +17,8 @@
 set -euo pipefail
 
 PORT="${SAATHI_SCREEN_PORT:-8765}"
-URL="http://127.0.0.1:${PORT}/"
+# localhost, not 127.0.0.1: YouTube refuses embeds to an IP address (index.html).
+URL="http://localhost:${PORT}/"
 
 # Retry until the engine actually answers, so the first thing on screen
 # is never a browser's own connection-error page — SPEC.md's "no status

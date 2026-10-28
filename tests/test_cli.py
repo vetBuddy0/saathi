@@ -94,7 +94,10 @@ def wired(seams):
 
 def test_every_tool_is_registered_with_a_schema_and_its_permission_granted(wired):
     names = {tool.name for tool in wired.registry}
-    assert names == {"set_language", "correct_memory", "play_music", "call_contact"}
+    assert names == {
+        "set_language", "correct_memory", "play_music", "call_contact", "going_away",
+        "set_reminder", "list_reminders", "cancel_reminder", "message_family", "read_messages",
+    }
     for tool in wired.registry:
         assert tool.permission in cli.GRANTED_PERMISSIONS, tool.name
     assert {schema["function"]["name"] for schema in wired.tool_schemas} == names
@@ -506,7 +509,10 @@ def test_remote_mode_builds_no_device_manager_and_listens_only_through_remote_au
     assert session.kwargs["language_preference"]() is None
     assert session.intent is runtime.handle_intent
     names = {tool.name for tool in runtime.registry}
-    assert {"set_language", "correct_memory", "play_music", "call_contact"} == names
+    assert {
+        "set_language", "correct_memory", "play_music", "call_contact", "going_away",
+        "set_reminder", "list_reminders", "cancel_reminder", "message_family", "read_messages",
+    } == names
 
 
 def test_remote_mode_adds_the_phones_voice_to_the_sessions_backends(remote_seams):

@@ -97,11 +97,11 @@ class Command:
 
 _PREFIXES = (
     "no", "yes", "ok", "okay", "oh", "um", "uh", "hmm", "well", "actually", "wait",
-    "please", "kaki", "hey kaki", "hey", "can you", "could you", "would you",
+    "please", "melody", "hey melody", "hey", "can you", "could you", "would you",
     "will you", "i want to", "i'd like to", "i would like to", "i want you to",
     "let's", "lets", "just", "now", "and", "then", "so",
 )
-_SUFFIXES = ("please", "now", "for me", "thank you", "thanks", "dear", "kaki")
+_SUFFIXES = ("please", "now", "for me", "thank you", "thanks", "dear", "melody")
 _PREFIX_RE = re.compile(r"^(?:%s)\b\s*" % "|".join(re.escape(p) for p in _PREFIXES))
 _SUFFIX_RE = re.compile(r"\s*\b(?:%s)$" % "|".join(re.escape(s) for s in _SUFFIXES))
 _CLAUSE_SPLIT = re.compile(r"[.,;:!?…—\-]+|\bno\b\s+(?=actually|wait)")

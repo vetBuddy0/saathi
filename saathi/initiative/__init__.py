@@ -15,4 +15,9 @@ here*. One pass looks like:
 `decisions` is exactly what got written to `initiatives` — read it (or
 query `store.read("initiatives")` later) to see what this pass decided
 and why, before anything is wired to speak it out loud.
+
+Since 2026-10-20 two things here do speak, through the screen server's
+`speak_first`: `reminders.py` (the reminder lane, reusing
+`scheduled_candidates()` and `reminder_may_fire()`) and `quiet_day.py`.
+The social lane ("noticed") still only decides.
 """
