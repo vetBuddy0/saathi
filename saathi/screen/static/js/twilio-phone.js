@@ -30,6 +30,63 @@ const AFTER_SPEECH_MS = 400;
 const MAX_WAIT_MS = 10000;
 const FREE_STATES = new Set(["idle", "attentive", "sleeping"]);
 
+// Louder both ways (2026-10-29, owner: "the calling volume is very low",
+// "microphone pickup should be more"). The tablet's call volume was
+// already at its maximum (voice call 11/11 on the speaker), so the
+// caller's voice is raised inside the call, and hers on the way out, each
+// through a limiter so a shout is flattened rather than clipped. Lost:
+// playing the call on the media stream (louder on some tablets) -- it
+// leaves the communication mode the platform's echo cancelling runs in.
+// Measured on the tablet with a quiet tone: x2 comes out x3.0 and x3 comes
+// out x4.4, because the limiter adds its own make-up gain (~x1.5) on top.
+export const REMOTE_GAIN = 3; // the caller: about x4.4, +13 dB, on quiet speech
+export const LOCAL_GAIN = 2; // her: about x3, +9.5 dB
+
+// A Twilio AudioProcessor: gain then limiter. Whatever goes wrong, the
+// call gets the stream it came with -- a quiet call beats a silent one.
+export function createBoost(gain, { remote = false } = {}) {
+  let context = null;
+  let sink = null;
+  return {
+    async createProcessedStream(stream) {
+      try {
+        context = new AudioContext();
+        if (context.state !== "running") await context.resume();
+        if (context.state !== "running") throw new Error("audio context " + context.state);
+        if (remote) {
+          // Chromium plays a remote WebRTC track into Web Audio only while
+          // a media element also holds it; this one stays muted.
+          sink = new Audio();
+          sink.muted = true;
+          sink.srcObject = stream;
+          sink.play().catch(() => {});
+        }
+        const amp = context.createGain();
+        amp.gain.value = gain;
+        const limiter = context.createDynamicsCompressor();
+        limiter.threshold.value = -6;
+        limiter.knee.value = 0;
+        limiter.ratio.value = 20;
+        limiter.attack.value = 0.003;
+        limiter.release.value = 0.25;
+        const out = context.createMediaStreamDestination();
+        context.createMediaStreamSource(stream).connect(amp).connect(limiter).connect(out);
+        return out.stream;
+      } catch (error) {
+        console.error("saathi: call audio left as it is", error);
+        this.destroyProcessedStream();
+        return stream;
+      }
+    },
+    async destroyProcessedStream() {
+      if (sink) sink.srcObject = null;
+      sink = null;
+      if (context) context.close().catch(() => {});
+      context = null;
+    },
+  };
+}
+
 function loadSdk() {
   if (window.Twilio && window.Twilio.Device) return Promise.resolve(window.Twilio);
   return new Promise((resolve, reject) => {
@@ -80,6 +137,12 @@ export function createTwilioPhone(send) {
       }
     });
     device.on("error", (error) => console.error("saathi: twilio device error", error));
+    try {
+      device.audio.addProcessor(createBoost(LOCAL_GAIN));
+      device.audio.addProcessor(createBoost(REMOTE_GAIN, { remote: true }), true);
+    } catch (error) {
+      console.error("saathi: calls stay at their own volume", error);
+    }
     return true;
   }
 

@@ -81,6 +81,77 @@ out.failed = sent.map((m) => [m.id, m.event, m.detail]);
 document.body.dataset.out = JSON.stringify(out);
 """
 
+# The boost, with a fake Web Audio: what gets wired, and that a context
+# that won't run (or any failure) hands the call its own stream back.
+_BOOST = """
+import { createTwilioPhone, createBoost, LOCAL_GAIN, REMOTE_GAIN } from "%(module)s";
+const out = {};
+const graph = [];
+let runs = true;
+const param = () => ({ value: null });
+class FakeContext {
+  constructor() { this.state = "suspended"; this.closed = false; }
+  async resume() { if (runs) this.state = "running"; }
+  async close() { this.closed = true; }
+  createGain() { const n = { kind: "gain", gain: param(), connect: (x) => (graph.push(["gain", x.kind]), x) }; return n; }
+  createDynamicsCompressor() {
+    return { kind: "limiter", threshold: param(), knee: param(), ratio: param(), attack: param(),
+             release: param(), connect: (x) => (graph.push(["limiter", x.kind]), x) };
+  }
+  createMediaStreamDestination() { return { kind: "out", stream: "processed" }; }
+  createMediaStreamSource(s) { return { connect: (x) => (graph.push([s, x.kind]), x) }; }
+}
+window.AudioContext = FakeContext;
+const played = [];
+window.Audio = class { play() { played.push({ muted: this.muted, src: this.srcObject }); return Promise.resolve(); } };
+
+out.local = await createBoost(LOCAL_GAIN).createProcessedStream("mic");
+out.remote = await createBoost(REMOTE_GAIN, { remote: true }).createProcessedStream("caller");
+out.graph = graph;
+out.played = played;
+runs = false;
+out.suspended = await createBoost(3).createProcessedStream("caller");
+
+// The device gets one local and one remote processor.
+const added = [];
+window.fetch = async () => ({ ok: true, json: async () => ({ token: "tok" }) });
+window.Twilio = { Device: class {
+  constructor() { this.audio = { addProcessor: (p, remote) => added.push(!!remote) }; }
+  on() {}
+} };
+await createTwilioPhone(() => {}).onConnected();
+out.added = added;
+
+// A device without the processor API still calls.
+const sent = [];
+window.Twilio = { Device: class { on() {} } };
+await createTwilioPhone((m) => sent.push(m)).onConnected();
+out.without_api = sent.map((m) => m.can_call);
+out.gains = [LOCAL_GAIN, REMOTE_GAIN];
+document.body.dataset.out = JSON.stringify(out);
+"""
+
+
+@pytest.fixture(scope="module")
+def boost() -> dict:
+    return run_module_script(_BOOST % {"module": module_url("twilio-phone.js")})
+
+
+def test_both_ends_of_a_call_are_raised_through_a_limiter(boost):
+    assert boost["local"] == "processed" and boost["remote"] == "processed"
+    assert boost["graph"] == [
+        ["mic", "gain"], ["gain", "limiter"], ["limiter", "out"],
+        ["caller", "gain"], ["gain", "limiter"], ["limiter", "out"],
+    ]
+    assert boost["gains"][0] > 1 and boost["gains"][1] > 1
+    assert boost["played"] == [{"muted": True, "src": "caller"}]  # remote only
+    assert boost["added"] == [False, True]
+
+
+def test_a_boost_that_cannot_run_leaves_the_call_its_own_stream(boost):
+    assert boost["suspended"] == "caller"
+    assert boost["without_api"] == [True]
+
 
 @pytest.fixture(scope="module")
 def results() -> dict:

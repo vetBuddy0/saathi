@@ -3843,3 +3843,18 @@ VOICE_COMMUNICATION's), and that needs the real clip. With
 is written to `<data dir>/debug/turn-<time>.wav`, the newest ten kept, off
 the hot path. Off by default: her voice is not kept on disk unless a
 developer asks.
+
+**2026-10-29 — Twilio calls from the tablet are raised in the page: the
+caller x3, her mic x2, each through a limiter.** The owner found calls very
+quiet and asked for more mic pickup. The tablet's voice-call volume was
+already at its maximum (11/11, speaker), so there was no setting left to
+turn up; the Twilio SDK's AudioProcessor hooks (local and remote) carry a
+Web Audio gain and a -6 dB limiter instead. Any failure (a context that
+won't run, an SDK without the hooks) leaves the call its own stream.
+Measured in the tablet's WebView on a quiet tone, the limiter's make-up
+gain adds ~x1.5: the caller comes out ~x4.4 (+13 dB), her mic ~x3
+(+9.5 dB); loud speech is held near -3 dBFS. Lost:
+playing calls on the media stream, which leaves the communication mode the
+platform's echo cancelling runs in. Saathi's own listening is untouched: a
+kept tablet turn was clean (background gated to zero, transcribed right),
+and boosting quiet audio was measured not to change Whisper's transcript.
