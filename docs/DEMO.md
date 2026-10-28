@@ -136,7 +136,9 @@ from the tablet's SIM, on speaker, after she hears "Calling Udhi.".
   Udhi's number, eight nine six one ..." and answer the read-back card.
   "Call the test number" uses `TWILIO_TEST_NUMBER` from the keys page.
 - Hang up on the phone's own in-call screen; the face comes back after.
-- No SIM (or the SIM not ready): she says this device can't place calls.
+- No SIM, the SIM not ready, or a data-only tablet (many LTE tablets
+  can't make voice calls -- check the tablet's own Phone app can ring a
+  number first): she says this device can't place calls.
 - Stop any song first ("stop") -- whether YouTube pauses on its own for
   the call hasn't been checked on the tablet.
 

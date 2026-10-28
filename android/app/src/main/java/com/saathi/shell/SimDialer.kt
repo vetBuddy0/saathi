@@ -8,6 +8,10 @@
  * falls back to the dialer with the number filled in, one tap from
  * ringing: a refused prompt must not make "call my son" do nothing.
  *
+ * [canCall] needs a ready SIM *and* a voice-capable device: many LTE
+ * tablets carry a SIM for data only, and saying "Calling Udhi." on one
+ * of those would be a call that never rings.
+ *
  * Lost: `Intent.ACTION_CALL` (no speakerphone extra; the call starts on
  * the earpiece and someone has to find the button).
  */
@@ -29,6 +33,12 @@ class SimDialer(private val activity: Activity) : PhoneCalls.Dialer {
     override fun canCall(): Boolean {
         if (!activity.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)) return false
         val telephony = activity.getSystemService(TelephonyManager::class.java) ?: return false
+        // Many SIM tablets are data-only: a ready SIM that can't ring
+        // anyone. isVoiceCapable is the device saying it can make calls.
+        if (!telephony.isVoiceCapable) {
+            Log.i(TAG, "SIM is data-only on this device; no calls")
+            return false
+        }
         return telephony.simState == TelephonyManager.SIM_STATE_READY
     }
 
