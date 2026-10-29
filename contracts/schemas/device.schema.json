@@ -36,7 +36,7 @@
     },
     "pairingCode": {
       "type": "string",
-      "pattern": "^[0-9]{6}$"
+      "pattern": "^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$"
     }
   }
 }

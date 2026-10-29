@@ -115,7 +115,9 @@ has said, not something the app shows (see `storage.rules`).
 
 ## Pairing
 
-1. The device creates `pairing/{code}`, where `code` is 6 random digits.
+1. The device creates `pairing/{code}`, where `code` is 8 random characters
+   from `23456789ABCDEFGHJKMNPQRSTVWXYZ` (no 0/O, 1/I/L, U). Shown as
+   `K7QM-4XHP`; stored without the dash.
    It holds `{deviceId, expiresAt}`, with `expiresAt` at most 10 minutes
    ahead (the rules allow up to 11, for the tablet's clock). If the code
    is already taken, the create is denied; pick another.
@@ -148,16 +150,12 @@ has said, not something the app shows (see `storage.rules`).
 contract**. A rule on `devices/{id}` has no other way to find the pairing
 doc that justifies the join. Only the claim writes it.
 
-**Open risk: brute force.** There are only 10^6 codes, and any signed-in
-user may `get` an open one. A script can try all of them within a code's
-10 minutes, learn the `deviceId` and claim it. Rules alone can't count
-attempts. The code is single-use, and the device shows everyone on
-`caregivers`, but that only limits the damage. The fixes all change the
-contract or cost money, so they are the owner's call:
-- App Check;
-- a Cloud Function that claims, with an attempt cap (needs Blaze);
-- a longer token carried in the QR, with the 6 digits only as a
-  fallback.
+**Brute force (closed 2026-10-29).** Any signed-in user may `get` an
+open code, anyone can sign up, and rules can't count attempts. So the
+code's size is the defence: 30^8 ≈ 6.6×10¹¹ codes against a 10-minute
+life. Six digits (10^6, tried in minutes) lost. So did a long token in
+the QR with six digits as a typed fallback, because the fallback is
+the hole. App Check is still worth adding later.
 
 ## Running the tests
 

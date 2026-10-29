@@ -1,7 +1,8 @@
 /**
  * Why this exists: the one-time step that connects a caregiver to her
- * device. The code is typed, not scanned: six digits are easy to read out
- * over the phone ("Ma, what numbers does it show?") when the caregiver
+ * device. The code is typed, not scanned: eight letters and numbers with
+ * no look-alikes are easy to read out over the phone ("Ma, what does it
+ * show?") when the caregiver
  * isn't in the room, which is most of the time. Scanning the tablet's QR
  * is optional in the brief and left for later (expo-camera, a permission
  * prompt, and a dev build for something typing already covers).
@@ -43,16 +44,17 @@ export default function Pair() {
       <Stack.Screen options={{ headerBackVisible: paired, headerLeft: paired ? undefined : () => null }} />
       <Title>Connect to her Saathi</Title>
       <Body>
-        Saathi’s console shows a 6-number code for adding family. Type it here. A code lasts 10 minutes; if it runs out,
+        Saathi’s console shows an 8-character code for adding family, like K7QM-4XHP. Type it here. A code lasts 10 minutes; if it runs out,
         the console makes a new one.
       </Body>
       <Card>
         <Field
           label="Pairing code"
-          placeholder="123 456"
+          placeholder="K7QM-4XHP"
           value={code}
           onChangeText={setCode}
-          keyboardType="number-pad"
+          autoCapitalize="characters"
+          autoCorrect={false}
           autoComplete="one-time-code"
           textContentType="oneTimeCode"
           maxLength={24}

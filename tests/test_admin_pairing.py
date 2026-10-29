@@ -51,7 +51,8 @@ async def test_pairing_writes_a_code_and_lists_who_claimed_it(store_path):
         made = await client.post("/admin/api/pairing", json={})
         assert made.status == 200
         data = await made.json()
-        assert re.fullmatch(r"\d{6}", data["code"])
+        # 8 characters, not 6 digits: the owner's call (2026-10-29, DECISIONS.md).
+        assert re.fullmatch(r"[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}", data["code"])
         assert data["seconds"] == 600 and data["caregivers"] == []
         assert "<svg" in data["qr_svg"]
         assert firestore.docs[f"pairing/{data['code']}"]["deviceId"] == "dev1"
@@ -144,7 +145,8 @@ async def test_the_pair_button_shows_the_code_its_qr_a_countdown_and_the_phones(
     )
     assert "error" not in out, out
     assert out["before"] == "" and out["hidden"] is True
-    assert out["code"] == posted["code"] and out["qr"] is True and out["shown"] is True
+    # Shown in halves to read aloud (2026-10-29); the stored code has no dash.
+    assert out["code"] == f"{posted['code'][:4]}-{posted['code'][4:]}" and out["qr"] is True and out["shown"] is True
     assert re.fullmatch(r"Expires in (10:00|9:[0-5]\d)", out["left"]), out["left"]
     assert out["listedFirst"] == ["uidPriya"] == out["phones"]
     assert posted["caregivers"] == ["uidPriya"]

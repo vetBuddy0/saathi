@@ -124,7 +124,7 @@ async function main() {
     await page.type('input[aria-label="Password"]', 'saathi-demo');
     await page.click('[role="button"][aria-label="Create account"]');
     await waitForText(page, 'Connect to her Saathi');
-    await page.type('input[aria-label="Pairing code"]', process.env.E2E_PAIR_CODE || '246 810');
+    await page.type('input[aria-label="Pairing code"]', process.env.E2E_PAIR_CODE || 'k7qm-4xhp');
     await shot(page, '8-pair');
     await page.click('[role="button"][aria-label="Pair"]');
     await waitForText(page, 'Taken');

@@ -26,7 +26,7 @@ console can't make a state the rest of the system doesn't understand:
 - **Keys** are shown as set/missing only, never a value. On the phone the
   shell owns them (encrypted prefs); the page writes them through the
   shell's bridge, not through here.
-- **Pairing a phone** (2026-10-29) writes a 6-digit code to the family
+- **Pairing a phone** (2026-10-29) writes an 8-character code to the family
   cloud (`cloud/pairing.py`) through the same client the inbox polls
   with; with no cloud on this run it answers 409 "Cloud is not set up"
   rather than a code nobody can claim.

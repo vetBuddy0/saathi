@@ -364,7 +364,7 @@ $("reminder-form").addEventListener("submit", (event) => {
 $("reminder-new").addEventListener("click", resetReminderForm);
 
 // -- Family phones (cloud/pairing.py) -------------------------------------------------
-// "Pair a phone" writes a 6-digit code to the family cloud; the caregiver's
+// "Pair a phone" writes an 8-character code to the family cloud; the caregiver's
 // app claims it. Shown with its QR and a countdown; while it is up, the
 // list of paired phones is re-read so a phone that just claimed it appears.
 // With no cloud on this run the server says so (409) and that is shown here,
@@ -396,7 +396,8 @@ async function loadCaregivers() {
 
 function showPairing(data) {
   stopPairing();
-  $("pair-code").textContent = data.code;
+  // Shown in two halves (K7QM-4XHP) to read aloud; typed either way.
+  $("pair-code").textContent = `${data.code.slice(0, 4)}-${data.code.slice(4)}`;
   // The QR is SVG the server drew from the code; parsed, never run.
   const svg = new DOMParser().parseFromString(data.qr_svg, "text/html").body.querySelector("svg");
   $("pair-qr").replaceChildren(...(svg ? [document.importNode(svg, true)] : []));

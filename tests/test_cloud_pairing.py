@@ -1,4 +1,4 @@
-"""cloud/pairing.py: a 6-digit code at pairing/{code} for this device,
+"""cloud/pairing.py: an 8-character code at pairing/{code} for this device,
 live 10 minutes; a collision is tried again with another code; who has
 paired is read from devices/{id}."""
 
@@ -12,30 +12,34 @@ from tests.fake_firestore import AlreadyExists, FakeFirestore
 NOW = datetime(2026, 10, 29, 1, 0, tzinfo=timezone.utc)
 
 
-def test_a_new_code_is_six_digits_for_this_device_and_lives_ten_minutes():
+# Was six digits: the owner chose (2026-10-29) a code too large to guess
+# within its 10 minutes, since rules can't count attempts (DECISIONS.md).
+def test_a_new_code_is_eight_unambiguous_characters_for_this_device_and_lives_ten_minutes():
     client = FakeFirestore()
     code, expires_at = pairing.new_code(client, "dev1", NOW)
-    assert len(code) == 6 and code.isdigit()
+    assert len(code) == 8 and set(code) <= set(pairing.CODE_ALPHABET)
     assert expires_at == NOW + timedelta(minutes=10)
     assert client.docs[f"pairing/{code}"] == {"deviceId": "dev1", "expiresAt": expires_at}
 
 
-def test_a_code_with_leading_zeros_keeps_them(monkeypatch):
-    monkeypatch.setattr(pairing.secrets, "randbelow", lambda _n: 42)
+def test_the_alphabet_has_no_look_alikes_and_codes_are_drawn_from_secrets(monkeypatch):
+    assert not set("01ILOU") & set(pairing.CODE_ALPHABET)
+    assert len(set(pairing.CODE_ALPHABET)) == len(pairing.CODE_ALPHABET) == 30
+    monkeypatch.setattr(pairing.secrets, "choice", lambda alphabet: alphabet[-1])
     code, _ = pairing.new_code(FakeFirestore(), "dev1", NOW)
-    assert code == "000042"
+    assert code == "ZZZZZZZZ"
 
 
 def test_a_collision_raises_and_issue_code_tries_another(monkeypatch):
     client = FakeFirestore()
-    client.put("pairing/000042", deviceId="other", expiresAt=NOW)
-    picks = iter([42, 42, 7])
-    monkeypatch.setattr(pairing.secrets, "randbelow", lambda _n: next(picks))
+    client.put("pairing/22222222", deviceId="other", expiresAt=NOW)
+    picks = iter("2" * 8 + "2" * 8 + "3" * 8)
+    monkeypatch.setattr(pairing.secrets, "choice", lambda _alphabet: next(picks))
     with pytest.raises(AlreadyExists):
         pairing.new_code(client, "dev1", NOW)
     code, _ = pairing.issue_code(client, "dev1", NOW)
-    assert code == "000007"
-    assert client.docs["pairing/000042"]["deviceId"] == "other"  # untouched
+    assert code == "33333333"
+    assert client.docs["pairing/22222222"]["deviceId"] == "other"  # untouched
 
 
 def test_issue_code_gives_up_after_its_tries():

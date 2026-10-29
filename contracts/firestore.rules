@@ -90,7 +90,7 @@ service cloud.firestore {
         && d.caregivers.size() <= 20
         && d.deviceUid is string
         && optional(d, 'pairingCode', d.get('pairingCode', '') is string
-                                      && d.get('pairingCode', '').matches('^[0-9]{6}$'));
+                                      && d.get('pairingCode', '').matches('^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$'));
     }
 
     // A caregiver joining through an unexpired, unclaimed pairing code that
@@ -105,7 +105,7 @@ service cloud.firestore {
       let after = request.resource.data;
       let code = after.get('pairingCode', '');
       return code is string
-        && code.matches('^[0-9]{6}$')
+        && code.matches('^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$')
         && !(uid in before.caregivers)
         && after.diff(before).affectedKeys().hasOnly(['caregivers', 'pairingCode'])
         && after.caregivers.toSet() == before.caregivers.toSet().union([uid].toSet())
@@ -302,10 +302,11 @@ service cloud.firestore {
             || resource.data.get('claimedBy', '') == request.auth.uid);
       allow list: if signedIn() && ownsPairing(resource.data);
 
-      // The device opens a code for itself: 6 digits, at most 10 minutes
+      // The device opens a code for itself: 8 characters from the 30 that
+      // can't be confused (cloud/pairing.py's CODE_ALPHABET), at most 10 minutes
       // out (plus one minute for the tablet's clock), unclaimed. On a
       // collision create fails and the device picks another code.
-      allow create: if code.matches('^[0-9]{6}$')
+      allow create: if code.matches('^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$')
         && validPairing(request.resource.data)
         && ownsPairing(request.resource.data)
         && !('claimedBy' in request.resource.data)

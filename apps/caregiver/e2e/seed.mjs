@@ -34,7 +34,7 @@ import { connectStorageEmulator, getStorage, ref, uploadBytes } from 'firebase/s
 export const CAREGIVER = { email: 'asha@example.com', password: 'saathi-demo', name: 'Asha' };
 // The rules want 16-64 unguessable characters; this one is a demo.
 export const DEVICE_ID = 'ma-saathi-demo-tablet';
-export const PAIR_CODE = '246810';
+export const PAIR_CODE = 'K7QM4XHP';
 const HOST = process.env.EMULATOR_HOST || '127.0.0.1';
 // The same bucket the app falls back to when none is configured.
 const config = { apiKey: 'demo-key', projectId: 'demo-saathi', appId: 'demo-app', storageBucket: 'demo-saathi.firebasestorage.app' };

@@ -4473,3 +4473,31 @@ Today, her conversations, messages and reminders. Calls come later.
 - **The QR scan was left out.** Six typed digits can be read out over
   the phone by someone who isn't in the room, and scanning needs
   expo-camera and a dev build. Adding it later is a small change.
+
+## 2026-10-29 — Pairing codes are 8 characters, not 6 digits
+
+The contracts unit raised it (PR #15): anyone can sign up, any signed-in
+user may `get` an open code, and rules can't count attempts. So a script
+could try all 10^6 six-digit codes within a code's 10 minutes. The owner
+chose to close it.
+- **The fix.** A code is 8 characters from
+  `23456789ABCDEFGHJKMNPQRSTVWXYZ` (no 0/O, 1/I/L, U), shown as
+  `K7QM-4XHP`. That's 30^8 ≈ 6.6×10¹¹ codes, far out of reach in 10
+  minutes. It is still readable over the phone, and the QR carries the
+  same code.
+- **Where it changed.** `cloud/pairing.py` makes the codes, the console
+  shows them, `contracts/firestore.rules` and the schemas enforce the
+  format, and the app's `normalizePairCode` accepts any case and drops
+  dashes.
+- **Lost.**
+  - A long token in the QR with six digits as a typed fallback, the
+    option first offered: the fallback stays guessable.
+  - A Cloud Function with an attempt cap: needs Blaze, and the size
+    alone is enough.
+  - App Check is still worth adding later.
+- **Tests changed.** The owner changed the format, so every test that
+  pinned six digits now pins the new one:
+  - `test_cloud_pairing` (three tests), `test_admin_pairing` (two
+    assertions);
+  - the contracts rules suite;
+  - the app's validation and emulator tests, and the e2e seed.

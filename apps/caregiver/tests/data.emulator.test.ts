@@ -88,7 +88,13 @@ const fail = (e: Error) => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let codeSeq = 0;
-const freshCode = () => String(100000 + ((Number.parseInt(run, 36) + codeSeq++ * 7919) % 900000));
+const freshCode = () => {
+  // 8 random characters from the pairing alphabet: 30^8 codes, so runs
+  // and calls don't collide.
+  const A = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
+  codeSeq += 1;
+  return Array.from({ length: 8 }, () => A[Math.floor(Math.random() * A.length)]).join('');
+};
 
 /** The tablet's console opening a pairing code. */
 async function openCode(ttlMs = 10 * 60 * 1000): Promise<string> {
@@ -197,7 +203,7 @@ describe('pairing', () => {
     await batch.commit();
     expect(await reason(claimPairing(taken))).toBe('unavailable');
 
-    expect(await reason(claimPairing('000000'))).toBe('unavailable'); // never opened
+    expect(await reason(claimPairing('ZZZZ2222'))).toBe('unavailable'); // never opened
     expect(await reason(claimPairing('12345'))).toBe('invalid');
     expect(new PairingError('unavailable').message).toMatch(/ask Saathi for a new one/);
   });

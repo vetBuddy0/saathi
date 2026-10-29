@@ -90,18 +90,22 @@ describe('validateReminder', () => {
 });
 
 describe('pairing codes', () => {
-  test('accepts typed and scanned forms', () => {
-    expect(normalizePairCode('123456')).toBe('123456');
-    expect(normalizePairCode(' 123 456 ')).toBe('123456');
-    expect(normalizePairCode('123-456')).toBe('123456');
-    expect(normalizePairCode('saathi-pair:654321')).toBe('654321');
+  // Was six digits; 8 unambiguous characters since 2026-10-29 (owner's
+  // call: six digits could be guessed within a code's 10 minutes).
+  test('accepts typed and scanned forms, in any case', () => {
+    expect(normalizePairCode('K7QM4XHP')).toBe('K7QM4XHP');
+    expect(normalizePairCode(' k7qm 4xhp ')).toBe('K7QM4XHP');
+    expect(normalizePairCode('K7QM-4XHP')).toBe('K7QM4XHP');
+    expect(normalizePairCode('saathi-pair:K7QM4XHP')).toBe('K7QM4XHP');
   });
 
-  test('rejects anything that is not six digits', () => {
-    expect(normalizePairCode('12345')).toBeNull();
-    expect(normalizePairCode('1234567')).toBeNull();
-    expect(normalizePairCode('12a456')).toBeNull();
-    expect(normalizePairCode('other:123456')).toBeNull();
+  test('rejects the old six digits, wrong lengths and look-alikes', () => {
+    expect(normalizePairCode('123456')).toBeNull();
+    expect(normalizePairCode('K7QM4XH')).toBeNull();
+    expect(normalizePairCode('K7QM4XHPP')).toBeNull();
+    expect(normalizePairCode('K7QM4XH0')).toBeNull(); // 0, not O
+    expect(normalizePairCode('K7QM4XHI')).toBeNull(); // I, not 1
+    expect(normalizePairCode('other:K7QM4XHP')).toBeNull();
   });
 });
 

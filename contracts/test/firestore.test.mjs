@@ -362,7 +362,7 @@ describe('collections outside the contract', () => {
 
 // ---------------------------------------------------------------------------
 describe('pairing/{code}', () => {
-  const CODE = '482913';
+  const CODE = 'K7QM4XHP';
   const open = (o = {}) => ({ deviceId: D1, expiresAt: inMinutes(10), ...o });
 
   // The claim, exactly as the app does it: one batch.
@@ -378,7 +378,7 @@ describe('pairing/{code}', () => {
   };
 
   describe('opening a code', () => {
-    it('the device opens a 6-digit code for itself, 10 minutes out', async () => {
+    it('the device opens an 8-character code for itself, 10 minutes out', async () => {
       await assertSucceeds(db('d1').doc(`pairing/${CODE}`).set(open()));
     });
 
@@ -397,9 +397,15 @@ describe('pairing/{code}', () => {
       await assertFails(db('d1').doc(`pairing/${CODE}`).set(open({ expiresAt: inMinutes(-1) })));
     });
 
-    it('a code is exactly 6 digits and opens unclaimed', async () => {
-      await assertFails(db('d1').doc('pairing/12345').set(open()));
-      await assertFails(db('d1').doc('pairing/abcdef').set(open()));
+    // Was "exactly 6 digits": too few to survive guessing (owner, 2026-10-29).
+    it('a code is exactly 8 unambiguous characters and opens unclaimed', async () => {
+      await assertFails(db('d1').doc('pairing/482913').set(open())); // the old 6 digits
+      await assertFails(db('d1').doc('pairing/K7QM4XH').set(open())); // 7
+      await assertFails(db('d1').doc('pairing/K7QM4XHPP').set(open())); // 9
+      await assertFails(db('d1').doc('pairing/k7qm4xhp').set(open())); // lower case
+      await assertFails(db('d1').doc('pairing/K7QM-4XH').set(open())); // a dash
+      await assertFails(db('d1').doc('pairing/K7QM4XH0').set(open())); // 0 looks like O
+      await assertFails(db('d1').doc('pairing/K7QM4XHI').set(open())); // I looks like 1
       await assertFails(db('d1').doc(`pairing/${CODE}`).set(open({ claimedBy: PRIYA })));
     });
 
@@ -416,7 +422,7 @@ describe('pairing/{code}', () => {
 
   describe('reading codes', () => {
     it('the device lists and deletes its own codes', async () => {
-      await seed(env, { [`pairing/${CODE}`]: open(), 'pairing/111111': open({ deviceId: D2 }) });
+      await seed(env, { [`pairing/${CODE}`]: open(), 'pairing/22222222': open({ deviceId: D2 }) });
       const snap = await assertSucceeds(db('d1').collection('pairing').where('deviceId', '==', D1).get());
       assert.deepEqual(snap.docs.map((d) => d.id), [CODE]);
       await assertSucceeds(db('d1').doc(`pairing/${CODE}`).delete());

@@ -51,21 +51,25 @@ export class PairingError extends Error {
 }
 
 const PAIRING_MESSAGES: Record<PairingFailure, string> = {
-  invalid: 'The code is the 6 numbers on Saathi’s screen.',
-  not_found: 'That code isn’t right. Check the numbers on Saathi’s screen.',
+  invalid: 'The code is the 8 letters and numbers on Saathi’s screen, like K7QM-4XHP.',
+  not_found: 'That code isn’t right. Check it against Saathi’s screen.',
   expired: 'That code has expired. Ask Saathi for a new one — they last 10 minutes.',
   claimed: 'That code has already been used. Ask Saathi for a new one.',
-  unavailable: 'That code doesn’t work — it may be mistyped, used, or older than 10 minutes. Check the numbers, or ask Saathi for a new one.',
+  unavailable: 'That code doesn’t work — it may be mistyped, used, or older than 10 minutes. Check it, or ask Saathi for a new one.',
   signed_out: 'Please sign in first.',
 };
 
 /**
- * The 6-digit code from whatever was typed or scanned: "123 456",
- * "123-456" or a QR's "saathi-pair:123456". Null if it isn't one.
+ * The 8-character code from whatever was typed or scanned: "k7qm 4xhp",
+ * "K7QM-4XHP" or a QR's "saathi-pair:K7QM4XHP". Upper-cased; null if it
+ * isn't one. The alphabet is the device's (cloud/pairing.py's
+ * CODE_ALPHABET) and the rules' (contracts/firestore.rules): no 0/O,
+ * 1/I/L or U, so nothing typed can be a look-alike of a real code.
  */
+export const PAIR_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
 export function normalizePairCode(input: string): string | null {
-  const s = input.trim().replace(/^saathi-pair:/i, '').replace(/[\s-]/g, '');
-  return /^\d{6}$/.test(s) ? s : null;
+  const s = input.trim().replace(/^saathi-pair:/i, '').replace(/[\s-]/g, '').toUpperCase();
+  return /^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$/.test(s) ? s : null;
 }
 
 /** Claim a code shown on her tablet. Resolves to the device id. */

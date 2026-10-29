@@ -1,4 +1,4 @@
-"""How a caregiver's phone is joined to her device: a 6-digit code.
+"""How a caregiver's phone is joined to her device: an 8-character code.
 
 Why it exists: the owner decided (2026-10-29) that caregivers use an
 app, on Firebase, to pair with her device, send messages Saathi reads
@@ -9,13 +9,18 @@ app adds their uid to `devices/{id}.caregivers`. The device only writes
 `pairing/{code}` and reads who has claimed it.
 
 A short code that expires, not a long token: it is read off a tablet and
-typed into a phone, sometimes over the telephone to a relative. Six
-digits from `secrets`, live 10 minutes. A guess has a one-in-a-million
-chance against one live code, and Firestore's rules (the backend unit's)
-are what stop a stream of guesses. Lost: a QR alone with a long random
-token (a code you can read out loud is what makes it work for a family
-spread across countries), and the device approving each phone (nobody
-is at the console to approve; whoever set it up is holding the code).
+typed into a phone, sometimes over the telephone to a relative. Eight
+characters from `secrets`, live 10 minutes, shown as `K7QM-4XHP`. The
+alphabet is the 30 letters and digits that can't be mistaken for one
+another (no 0/O, 1/I/L, U): about 6.6e11 codes. Anyone can sign up and
+Firestore's rules can't count attempts, so the code's size is the only
+thing between a script and her device; six digits (a million, tried in
+minutes) lost to that on 2026-10-29. Also lost: a QR alone with a long
+random token (a code you can read out loud is what makes it work for a
+family spread across countries), a long token in the QR with six digits
+as a typed fallback (the fallback is the hole), and the device approving
+each phone (nobody is at the console to approve; whoever set it up is
+holding the code).
 
 The client is injected and duck-typed (`cloud/firebase.py`, a separate
 unit, implements it); nothing here imports it, so tests use a fake.
@@ -31,11 +36,13 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 
 CODE_TTL = timedelta(minutes=10)
-CODE_DIGITS = 6
+CODE_LENGTH = 8
+# contracts/firestore.rules and the app's normalizePairCode use this same set.
+CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 QR_PREFIX = "saathi-pair:"
 # A fresh code that collides with one already in `pairing/` makes
 # `create_doc` fail (Firestore: ALREADY_EXISTS); this many tries before
-# giving up. At one live code per device in a million, more than one
+# giving up. At one live code per device in 6.6e11, more than one
 # retry means the network, not bad luck.
 ATTEMPTS = 3
 
@@ -71,7 +78,7 @@ def new_code(client: FirestoreClient, device_id: str, now: datetime) -> tuple[st
     """Writes `pairing/{code}` for this device and returns the code and
     when it expires. One attempt: a collision raises whatever the client
     raises, and the caller tries again (`issue_code`)."""
-    code = f"{secrets.randbelow(10**CODE_DIGITS):0{CODE_DIGITS}d}"
+    code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
     expires_at = now + CODE_TTL
     client.create_doc("pairing", {"deviceId": device_id, "expiresAt": expires_at}, doc_id=code)
     return code, expires_at

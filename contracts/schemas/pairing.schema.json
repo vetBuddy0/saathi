@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://saathi.invalid/contracts/pairing.schema.json",
   "title": "Pairing",
-  "description": "pairing/{code}, where code is 6 digits. Opened by the device for at most 10 minutes. Claimed once by a caregiver, in one batch that sets claimedBy to their uid, adds that uid to devices/{deviceId}.caregivers and sets devices/{deviceId}.pairingCode to this code.",
+  "description": "pairing/{code}, where code is 8 characters from 23456789ABCDEFGHJKMNPQRSTVWXYZ (no look-alikes). Opened by the device for at most 10 minutes. Claimed once by a caregiver, in one batch that sets claimedBy to their uid, adds that uid to devices/{deviceId}.caregivers and sets devices/{deviceId}.pairingCode to this code.",
   "type": "object",
   "required": [
     "deviceId",
