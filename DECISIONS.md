@@ -4017,3 +4017,114 @@ stopwatch etc".
   day after one "what time is it?".
 - **Tests changed.** test_cli's two pinned tool sets gained `clock`: the
   owner changed what the model may do.
+
+## 2026-10-29 — The caregiver app (`apps/caregiver`)
+
+The owner's call: Firebase for everything, and an app for her son, her
+daughter and a nurse in this repo. It pairs with her device, shows
+Today, her conversations, messages and reminders. Calls come later.
+- **Expo + TypeScript (strict) + expo-router.** One codebase for iPhone
+  and Android, plus a web build the e2e drives in headless Chromium.
+  File routes mean every screen is a file named after its URL, and
+  deep links need no table. Lost: **Flutter** (a second language next
+  to Python and Kotlin, and no Firebase JS SDK, so no code shared with
+  the web build or the Cloud Functions), **a PWA only** (iOS web push
+  needs the page added to the Home Screen first, and there's no path
+  to a native calling SDK later), and **a separate repo** (the Firestore
+  contract, the rules in `contracts/` and the tablet change together;
+  one PR should be able to move all three).
+- **The data layer is the seam.** `src/data/*.ts` holds every Firestore
+  and Storage call as a plain function (claimPairing, watchToday,
+  sendMessage, saveReminder, …); screens import only from there. Its
+  tests run in plain Node against the emulators, with no React Native.
+  Lost: calling the SDK from components through hooks
+  (react-firebase-hooks). That's quicker to write, but every screen
+  would then know collection paths and Timestamps, and none of it would
+  be testable without a renderer.
+- **Platform differences are file splits, not `Platform.OS`.** Auth
+  persistence, push and Google sign-in each have a `.native` file and a
+  web/Node file. This keeps expo-notifications, expo-auth-session and
+  AsyncStorage out of the web bundle and out of Jest. It also keeps
+  Firebase's popup, which doesn't exist on React Native, out of the
+  phone build.
+- **Sign-in: Google first, email second.** This is the owner's call,
+  made the same day. Web uses Firebase's `signInWithPopup`. Phones use
+  expo-auth-session's Google flow, which returns an ID token for
+  `signInWithCredential`. Both end at `signInWithGoogleIdToken` /
+  `ensureProfile` in the data layer, which the emulator tests drive
+  with fake Google tokens. Email/Password stays as the second option,
+  and Firebase needs it enabled regardless, for the device's own
+  account. Expo now marks its Google provider as deprecated in favour of
+  `@react-native-google-signin/google-signin` (Google's native SDK).
+  That option lost for now: it needs a dev build and per-platform
+  native config, while this flow needs only client IDs. It remains the
+  better long-term choice and only `ui/GoogleSignIn.native.tsx` would
+  change. Lost: `signInWithRedirect` on web, because browsers' blocking
+  of third-party storage breaks it unless the app is served from the
+  auth domain.
+- **Every sign-in ensures `users/{uid}`**, and push registration waits
+  until that doc exists. A Google account has no sign-up step, and the
+  rules reject a users doc without a name, so registering the token any
+  earlier either races the doc's creation or is denied. (Review found
+  the sign-up path could wipe a just-registered token.)
+- **Pairing is a batched write, not a Cloud Function.** In one batch the
+  app sets `claimedBy` and adds the caregiver to `caregivers`, and it
+  sets `devices/{id}.pairingCode`, which the contracts rules (PR #15)
+  need to find the code that justifies the join. The rules deny either
+  write on its own. Lost: a callable `claim` function (it needs the
+  Blaze plan for something rules can check). Claiming the same code
+  twice from the same account succeeds, so a retry after a dropped
+  connection doesn't show an error. Under the real rules, an unknown,
+  expired or used code can't even be read, so all three give one
+  message: "doesn't work, ask Saathi for a new one".
+- **Raised for the contracts unit: pairing codes can be guessed.** Any
+  signed-in account may `get` an open code, there are 10^6 codes, and
+  Email/Password sign-up is open to anyone. A script could therefore
+  try every code within one code's 10-minute life, and the batch it
+  then commits is exactly the legitimate claim. Rate-limiting isn't
+  possible in rules. Ways to close it: longer codes; claiming through a
+  Function behind App Check; or having the tablet confirm a new
+  caregiver on screen. That's a contract and rules decision, so it's
+  raised here and not changed. The app's code check
+  (`normalizePairCode`) is the one place that would need to change for
+  longer codes.
+- **Today never decides "missed" from the clock.** The status is the
+  latest of today's fired/acked/missed events for each reminder. The
+  device knows whether she was asked and when it gave up; the app only
+  reports that. An event today for a reminder that has since been
+  cancelled, or that has no doc, still shows, using the event's text.
+- **Reminders: cancel is `active:false`, and dates are filled in.** A
+  one-off with no date gets the next day its time comes round, and a
+  weekly one with no date gets today, so the caregiver sees which day
+  they set. An absent date is written as absent, never as `null`. Time
+  and date are typed and validated in the data layer. Lost for now:
+  native pickers, which behave differently on each platform.
+- **Push: the FCM device token, on Android only.** Expo push tokens
+  lost, because they add a second push vendor. On iPhone the device
+  token is an APNs token, which FCM can't use until the owner uploads an
+  APNs key and the app adds Firebase's iOS messaging. That's raised, not
+  done. On web it does nothing. Signing out removes the phone's token.
+- **Raised, not changed: the device has no timezone in the contract.**
+  "Today" is the caregiver's local day. That's right for family in her
+  timezone and wrong for a son abroad. The fix is a `tz` field on
+  `devices/{id}`, which is a contract change for the contracts unit.
+- **Emulator tests run under the real rules**, copied verbatim into
+  `apps/caregiver/rules/` from the contracts PR (#15). `contracts/`
+  isn't on this branch yet. After both merge, `firebase.test.json`
+  should point at `contracts/` and the copy should be deleted. Lost:
+  open test rules, which were the first draft here. They proved the
+  data layer only against a backend that accepts anything, and moving
+  to the real rules caught three things open rules allowed: the missing
+  `pairingCode`, a seed writing `spokenAt` as a caregiver, and a
+  message signed with someone else's uid.
+- **Review fixes worth remembering.** A failed device list shows an
+  error with a retry, never "no devices": that would send a paired son
+  to ask her for a new code. A one-off for a time already past today is
+  refused. Today rolls over on a once-a-minute check, not a single
+  midnight timer, because phones suspend timers in the background.
+  Replies are listened to only on messages already spoken. A rotated
+  FCM token replaces the stored one. `signOut()` itself removes the
+  phone's push token, so no sign-out button can skip it.
+- **The QR scan was left out.** Six typed digits can be read out over
+  the phone by someone who isn't in the room, and scanning needs
+  expo-camera and a dev build. Adding it later is a small change.
