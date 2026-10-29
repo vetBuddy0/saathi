@@ -1,0 +1,22 @@
+{
+  "functions": [
+    {
+      "source": ".",
+      "codebase": "default",
+      "ignore": ["node_modules", ".git", "test", ".test-build", "*.log", "firebase.test.json", "firestore.test.rules"]
+    }
+  ],
+  "firestore": {
+    "rules": "firestore.test.rules"
+  },
+  "emulators": {
+    "singleProjectMode": true,
+    "functions": { "port": 5004 },
+    "firestore": { "port": 8184 },
+    "auth": { "port": 9194 },
+    "hub": { "port": 4404 },
+    "logging": { "port": 4504 },
+    "eventarc": { "port": 9304 },
+    "ui": { "enabled": false }
+  }
+}
