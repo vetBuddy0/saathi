@@ -127,7 +127,12 @@ TABLES: dict[str, tuple[str, str, str]] = {
     ),
     "reminders": (
         "Things due at a time, optionally repeating.",
-        "Not written by the app yet.",
+        "set_reminder when she asks; cancel_reminder retires one.",
+        "Not sent; said in her own words when due.",
+    ),
+    "reminder_events": (
+        "What happened each time a reminder came due: said, done, or missed.",
+        "The reminder tick and her \"done\" (card or voice).",
         "Not sent.",
     ),
     "turns": (

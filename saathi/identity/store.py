@@ -151,6 +151,24 @@ _SCHEMA: dict[str, str] = {
             tts_cost_usd REAL
         )
     """,
+    # What happened to each occurrence of a reminder (2026-10-29): it was
+    # said (`fired`, once per attempt), she said it was done (`acked`),
+    # or it went unanswered (`missed`). Append-only, like everything
+    # here: a repeating reminder's next occurrence is computed from its
+    # first `due_at` and `recurrence`, never written back, and an
+    # occurrence's state is read from these rows
+    # (`initiative/reminders.py`). Lost: an `acked_at`/`next_due_at`
+    # column on `reminders`, which would need an update() this
+    # interface deliberately does not have.
+    "reminder_events": """
+        CREATE TABLE IF NOT EXISTS reminder_events (
+            id INTEGER PRIMARY KEY,
+            reminder_id INTEGER NOT NULL REFERENCES reminders(id),
+            due_at TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            kind TEXT NOT NULL
+        )
+    """,
     "initiatives": """
         CREATE TABLE IF NOT EXISTS initiatives (
             id INTEGER PRIMARY KEY,

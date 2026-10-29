@@ -156,8 +156,11 @@ def _test_resident(by: str) -> int:
 # belief, play_music is a song on her own screen (DECISIONS 2026-09-25),
 # "contacts" writes her memory and "calls" rings a phone (DECISIONS
 # 2026-09-25, calls in scope; wired on cloud/demo 2026-09-26 with S1
-# fixed and S2-S4 still open in TODO.md).
-GRANTED_PERMISSIONS = frozenset({"preferences", "memory", "music", "calls", "contacts"})
+# fixed and S2-S4 still open in TODO.md); "reminders" sets and clears her
+# own reminders (owner, 2026-10-29).
+GRANTED_PERMISSIONS = frozenset(
+    {"preferences", "memory", "music", "calls", "contacts", "reminders"}
+)
 
 # The quick tunnel's hostname took ~84 s to resolve on the first live
 # run, so the relay comes up at boot on its own thread, not at the
@@ -308,6 +311,7 @@ def build_runtime() -> Runtime:
     from saathi.tools.llm_schema import tool_to_openai_schema
     from saathi.tools.media import MEDIA_DESCRIPTION, make_media_tool
     from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
+    from saathi.tools.reminders import make_reminder_tools
     from saathi.voice.engine.cascade import CascadeSession
     from saathi.screen.emotion import EMOTIONS
     from saathi.voice.tts.registry import DEFAULT_PREFERRED_BACKEND_ID
@@ -320,7 +324,10 @@ def build_runtime() -> Runtime:
     set_language_tool = make_set_language_tool(store)
     correct_memory_tool = make_correct_memory_tool(store)
     media_tool = make_media_tool(media)
+    reminder_tools = make_reminder_tools(store, cards=cards)
     for tool in (set_language_tool, correct_memory_tool, media_tool):
+        registry.register(tool)
+    for tool, _description in reminder_tools:
         registry.register(tool)
 
     def handle_intent(name: str, arguments: dict) -> dict:
@@ -335,6 +342,7 @@ def build_runtime() -> Runtime:
         tool_to_openai_schema(set_language_tool, SET_LANGUAGE_DESCRIPTION),
         tool_to_openai_schema(correct_memory_tool, CORRECT_MEMORY_DESCRIPTION),
         tool_to_openai_schema(media_tool, MEDIA_DESCRIPTION),
+        *(tool_to_openai_schema(tool, description) for tool, description in reminder_tools),
     ]
     runtime.registry = registry
     runtime.tool_schemas = tool_schemas

@@ -1703,3 +1703,13 @@ def test_no_backends_at_all_is_a_configuration_error_not_a_key_error(no_real_pla
             backends={},
             backend_preference=lambda: "piper",
         )
+
+
+def test_a_line_said_first_is_in_the_window_her_next_turn_reads():
+    # A reminder (screen/server.py's reminder lane): her "done" next turn
+    # must read against it, so the model knows what was done.
+    session, _ = _session(FakeClient())
+    session.said_first("A reminder: take your tablet.", "a reminder; call reminder_done")
+    messages = session._conversation.messages()
+    assert messages[-1] == {"role": "assistant", "content": "A reminder: take your tablet."}
+    assert messages[-2]["content"] == "(nothing -- you spoke first: a reminder; call reminder_done)"

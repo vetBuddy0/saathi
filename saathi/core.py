@@ -72,6 +72,13 @@ is the same look for a turn that turned out to be only her name ("Saathi"
 and nothing else): no reply, eyes on her, still listening; and
 `(ATTENTIVE, "prompt") -> SPEAKING` is the short "Yes?" said when she
 then stays quiet.
+
+Speaking first (2026-10-29): `(IDLE|SLEEPING, "initiative") -> SPEAKING`
+is a due reminder said with nobody having called her (screen/server.py's
+reminder tick). SPEC.md's "after Saathi speaks unprompted, the mic opens
+for a window" is the ordinary `follow_up` edge from SPEAKING, so "done"
+needs no button. Lost: `wake` then `notice` then `prompt`, three
+broadcasts and the eyes going attentive to nobody before she speaks.
 """
 
 from __future__ import annotations
@@ -114,6 +121,8 @@ _TRANSITIONS: dict[tuple[State | None, str], State] = {
     (State.ATTENTIVE, "dismiss"): State.IDLE,
     (State.ATTENTIVE, "press"): State.LISTENING,
     (State.ATTENTIVE, "prompt"): State.SPEAKING,
+    (State.IDLE, "initiative"): State.SPEAKING,
+    (State.SLEEPING, "initiative"): State.SPEAKING,
     (State.LISTENING, "release"): State.THINKING,
     (State.THINKING, "response_ready"): State.SPEAKING,
     (State.THINKING, "no_response"): State.IDLE,

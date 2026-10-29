@@ -3930,3 +3930,48 @@ pinned to Hindi, Whisper writes the name in Devanagari (22 of 36 clips:
 those spellings now count and are cut like the Latin name (31 of 36 now
 pass, from 9). The persona and captions still call her "Kaki": renaming
 her changes what she hears, so it is the owner's call.
+
+**2026-10-29 — Reminders work: set by voice, said when due, repeated
+until done, then marked missed.** The owner asked for a reminder system
+("if I tell it anything it remembers", medicine first). Checkpoint 3 had
+the parts but nothing joined them. Nothing could create a reminder,
+nothing ticked or spoke one, a reminder fired once and was then resolved
+forever, and `recurrence` was never read.
+- **Tools.** `tools/reminders.py` (`set_reminder`, `list_reminders`,
+  `cancel_reminder`, `reminder_done`, under a new `reminders` permission)
+  resolves "at 9", "in 20 minutes", "tomorrow" and "every day" against the
+  real clock in the handler. Lost: putting today's time in the compiled
+  context for the model to compute from. It is compiled between turns, so
+  its clock can be hours stale.
+- **Occurrences.** `initiative/reminders.py` computes each occurrence on
+  her wall clock (the system zone, which the tablet's libc follows) and
+  reads its state from a new append-only `reminder_events` table. Lost:
+  `acked_at`/`next_due_at` columns, which would need an update the store
+  deliberately lacks. SPEC.md's schema needs the new table: proposed, not
+  applied.
+- **The tick.** `screen/server.py` checks every 30 s and speaks only
+  between turns (IDLE or SLEEPING; no call, no hold, no other card for
+  10 min). It uses a new `(IDLE|SLEEPING, "initiative") -> SPEAKING` edge
+  and her own words verbatim ("A reminder: ..."). A "Done?" card goes
+  with it, and every firing is logged through `policy.evaluate`.
+- **Done, repeats, missed.** Yes on the card, or "done" by voice, marks it
+  done. No answer repeats it after 10 minutes, three tries in all, then it
+  is `missed` (Batch 3 tells the family). A one-off that is done or missed
+  is retired.
+- **Presence and the social lane.** Presence is taken as confirmed: no
+  sensor exists, and "unknown" meaning "absent" would silence every
+  reminder. The social/"noticed" lane stays off, because unprompted
+  chatter changes what she hears and is the owner's call.
+- **Left as it was.** `scheduler.scheduled_candidates()` (fire once,
+  resolved forever) is no longer on the live path; it disagrees with
+  SPEC's "until acknowledged" and is kept only for its tests until the
+  owner agrees to retire it.
+- **Tests changed.** test_cli's two pinned tool sets gained the four
+  reminder tools: the owner changed what the model may do.
+- **Live on the tablet.**
+  - "Melody, remind me in two minutes to drink some water" was stored,
+    said at the due time, and said again ten minutes later.
+  - "I drank it, done" marked it done and retired it.
+  - The first "done" was answered warmly but did not mark it. The model
+    had only been told "you spoke first". The window note now says it was
+    a reminder and to call `reminder_done`.

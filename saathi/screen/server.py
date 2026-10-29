@@ -195,6 +195,7 @@ from aiohttp import WSCloseCode, WSMsgType, web
 from saathi.audio.capture import Capture
 from saathi.audio.wake import Endpointer, vad_is_speech
 from saathi.core import Core, Event, State
+from saathi.screen.cards import confirm
 from saathi.identity.preferences import (
     CAPTIONS_KEY,
     LANGUAGE_KEY,
@@ -233,6 +234,24 @@ _NAME_PROMPT_SECONDS = 3.5
 # Below this little of the wait left, "Yes?" is said at once rather
 # than opening a window too short to start a sentence in.
 _NAME_PROMPT_MIN_WAIT = 0.3
+# How often due reminders are looked for (initiative/reminders.py). A
+# reminder is said up to this late; its repeats are minutes apart.
+_REMINDER_TICK_SECONDS = 30.0
+# A card left up between turns (a song choice nobody answered) holds a
+# due reminder back this long, then the reminder takes the screen:
+# nothing on a card times out, and a forgotten one must not withhold a
+# dose.
+_STALE_CARD_SECONDS = 600.0
+
+# What the model is told about a reminder it just said, in the window.
+_REMINDER_NOTE = (
+    "a reminder she set. When she says she has done it, call reminder_done "
+    "before you reply"
+)
+
+# For tests: one tick of the reminder lane, run now.
+CHECK_REMINDERS = web.AppKey("check_reminders", object)
+_REMINDER_TASK = web.AppKey("reminder_task", asyncio.Task)
 
 # Robustness pass (checkpoint 2): a 401/429/timeout/connection-reset from
 # Groq used to be an uncaught exception with nowhere good to land — the
@@ -479,6 +498,7 @@ def build_app(
     name_prompt_seconds: float = _NAME_PROMPT_SECONDS,
     remote_audio=None,
     cloud=None,
+    reminder_tick_seconds: float | None = _REMINDER_TICK_SECONDS,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -1065,6 +1085,147 @@ def build_app(
                 on_done=lambda g: open_conversation(g, after_her_name=True),
             )
         )
+
+    # -- The reminder lane (initiative/reminders.py) --------------------
+    # Speaks first only between turns: IDLE or SLEEPING, no call, no
+    # hold, and no other card up (for long). The policy log records why
+    # each one fired (SPEC: every proactive utterance records why);
+    # presence is taken as confirmed, since nothing on the tablet can
+    # sense her yet and treating "unknown" as "absent" would mean no
+    # reminder ever fires. An empty room gets the repeats, then a
+    # `missed`. The noticed/social lane stays off: it changes what she
+    # hears unprompted, and is the owner's call.
+    reminder_cards: set[str] = set()
+    stale_card: dict[str, object] = {"id": None, "since": 0.0}
+
+    def _card_in_the_way() -> bool:
+        current = cards.current if cards is not None else None
+        if current is None or current.id in reminder_cards:
+            stale_card["id"] = None
+            return False
+        if stale_card["id"] != current.id:
+            stale_card["id"], stale_card["since"] = current.id, time.monotonic()
+        return time.monotonic() - float(stale_card["since"]) < _STALE_CARD_SECONDS
+
+    def check_reminders(now: datetime | None = None) -> list:
+        """One tick: say what is due, give up on what went unanswered.
+        Returns the reminder actions found (for tests and the log)."""
+        path = getattr(store, "path", None)
+        if session is None or path is None:
+            return []
+        if core.state not in (State.IDLE, State.SLEEPING):
+            return []
+        if calls is not None and calls.current_id is not None:
+            return []
+        if hold is not None and hold.active:
+            return []
+        if _card_in_the_way():
+            return []
+        from saathi.identity.store import IdentityStore
+        from saathi.initiative import reminders as reminder_rules
+        from saathi.initiative.policy import PolicyContext, evaluate
+        from saathi.initiative.scheduler import InitiativeCandidate
+
+        now = now or datetime.now(timezone.utc)
+        with IdentityStore(path) as own:
+            actions = reminder_rules.due(own, now)
+            for action in actions:
+                if action.kind == "miss":
+                    reminder_rules.record(own, action, "missed", now)
+                    logger.info(
+                        "reminder %d missed after %d tries: %r",
+                        action.reminder_id,
+                        action.attempt,
+                        action.text,
+                    )
+            by_reason = {
+                f"Reminder due: {action.text} [reminder_id={action.reminder_id}]": action
+                for action in actions
+                if action.kind == "fire"
+            }
+            if not by_reason:
+                return actions
+            candidates = [
+                InitiativeCandidate(kind="scheduled", reason=reason) for reason in by_reason
+            ]
+            rows = evaluate(own, candidates, PolicyContext(presence=True), now=now)
+            allowed = [
+                by_reason[row["reason"]]
+                for row in rows
+                if row["suppressed_by"] is None and row["reason"] in by_reason
+            ]
+            if not allowed or not core.handle(Event("initiative")):
+                return actions
+            for action in allowed:
+                reminder_rules.record(own, action, "fired", now)
+        line = reminder_rules.line(allowed)
+        logger.info("reminder said: %r", line)
+        if cards is not None:
+            reminder_cards.add(cards.show(confirm(reminder_rules.card_title(allowed), spoken=line)))
+        caption("saathi", line)
+        turn_generation["value"] += 1
+        generation = turn_generation["value"]
+
+        async def speak() -> None:
+            await _speak_and_finish(
+                session,
+                core,
+                generation,
+                turn_generation,
+                line,
+                None,  # not an exchange: no `turns` row
+                None,
+                # SPEC: after speaking unprompted, the mic opens without a
+                # press -- the same window as after "Yes?".
+                on_done=lambda g: open_conversation(g, after_her_name=True),
+            )
+            said_first = getattr(session, "said_first", None)
+            if said_first is not None:
+                said_first(line, _REMINDER_NOTE)
+
+        asyncio.get_running_loop().create_task(speak())
+        return actions
+
+    app[CHECK_REMINDERS] = check_reminders
+
+    def reminder_answered(result) -> None:
+        """The card's Yes is "done"; No or a dismissal leaves it to repeat."""
+        if result.card_id not in reminder_cards:
+            return
+        reminder_cards.discard(result.card_id)
+        path = getattr(store, "path", None)
+        if result.yes is not True or path is None:
+            return
+        from saathi.identity.store import IdentityStore
+        from saathi.initiative import reminders as reminder_rules
+
+        with IdentityStore(path) as own:
+            done = reminder_rules.acknowledge(own, datetime.now(timezone.utc))
+        logger.info("reminder done (%s): %s", result.source, [action.text for action in done])
+
+    if cards is not None:
+        cards.on_answer(reminder_answered)
+
+    if reminder_tick_seconds:
+
+        async def reminder_ticks() -> None:
+            while True:
+                await asyncio.sleep(reminder_tick_seconds)
+                try:
+                    check_reminders()
+                except Exception:
+                    logger.exception("reminder tick failed")
+
+        async def start_reminders(app_: web.Application) -> None:
+            app_[_REMINDER_TASK] = asyncio.get_running_loop().create_task(reminder_ticks())
+
+        async def stop_reminders(app_: web.Application) -> None:
+            task = app_.get(_REMINDER_TASK)
+            if task is not None:
+                task.cancel()
+
+        app.on_startup.append(start_reminders)
+        app.on_cleanup.append(stop_reminders)
 
     async def close_window_on_cleanup(_app: web.Application) -> None:
         close_window()

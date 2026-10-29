@@ -94,7 +94,16 @@ def wired(seams):
 
 def test_every_tool_is_registered_with_a_schema_and_its_permission_granted(wired):
     names = {tool.name for tool in wired.registry}
-    assert names == {"set_language", "correct_memory", "play_music", "call_contact"}
+    assert names == {
+        "set_language",
+        "correct_memory",
+        "play_music",
+        "call_contact",
+        "set_reminder",
+        "list_reminders",
+        "cancel_reminder",
+        "reminder_done",
+    }
     for tool in wired.registry:
         assert tool.permission in cli.GRANTED_PERMISSIONS, tool.name
     assert {schema["function"]["name"] for schema in wired.tool_schemas} == names
@@ -500,7 +509,16 @@ def test_remote_mode_builds_no_device_manager_and_listens_only_through_remote_au
     names = {tool.name for tool in runtime.registry}
     # No Twilio keys, so no calls (Twilio only, 2026-10-28): the calling
     # tool answers that it is unavailable, as on a laptop without Twilio.
-    assert {"set_language", "correct_memory", "play_music", "call_contact"} == names
+    assert {
+        "set_language",
+        "correct_memory",
+        "play_music",
+        "call_contact",
+        "set_reminder",
+        "list_reminders",
+        "cancel_reminder",
+        "reminder_done",
+    } == names
 
 
 def test_remote_mode_adds_the_phones_voice_to_the_sessions_backends(remote_seams):

@@ -1283,6 +1283,18 @@ class CascadeSession:
             # docstring for why "after every say()" is the right boundary.
             self._after_turn_in_background()
 
+    def said_first(self, text: str, why: str = "") -> None:
+        """Saathi spoke with nobody asking (a reminder): into the window
+        as an exchange whose user half says so, so her "done" or "what
+        reminder?" next turn reads against it. Outside the
+        `VoiceSession` Protocol, like `started_by_name`. Not an episode:
+        the reminder is already in `reminders`, and the digest would
+        only restate it. `why` goes in that user half: live, a bare
+        "you spoke first" left "I drank it, done" answered warmly with
+        no `reminder_done` call (2026-10-29)."""
+        note = f"(nothing -- you spoke first: {why})" if why else "(nothing -- you spoke first)"
+        self._conversation.record(note, text)
+
     def _after_turn_in_background(self) -> None:
         """Everything memory does once a turn is fully over, in order:
         record the exchange in the window (layer 1, synchronous -- no
