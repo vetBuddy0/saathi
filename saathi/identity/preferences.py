@@ -44,6 +44,12 @@ CAPTIONS_KEY = "captions"
 # ("Melody", the Android shell's keyword spotter) between turns. Off
 # leaves the button only, and the mic closed between holds.
 WAKE_WORD_KEY = "wake_word"
+# How long an unanswered reminder waits before it is said again, in
+# minutes, and how many times it is said before it counts as missed
+# (initiative/reminders.py; set in the console, 2026-10-29). Absent means
+# that module's defaults.
+REMINDER_REPEAT_KEY = "reminder_repeat_minutes"
+REMINDER_TRIES_KEY = "reminder_tries"
 VOICE_KEY = "voice"
 
 

@@ -1128,7 +1128,8 @@ def build_app(
 
         now = now or datetime.now(timezone.utc)
         with IdentityStore(path) as own:
-            actions = reminder_rules.due(own, now)
+            repeat_after, attempts = reminder_rules.settings(own)
+            actions = reminder_rules.due(own, now, repeat_after=repeat_after, attempts=attempts)
             for action in actions:
                 if action.kind == "miss":
                     reminder_rules.record(own, action, "missed", now)

@@ -301,6 +301,68 @@ $("contact-form").addEventListener("submit", (event) => {
   act(api("contacts", { json }), `${f.name.value} saved`).then(() => f.reset());
 });
 
+// -- Reminders ----------------------------------------------------------------------
+
+const REPEAT_WORDS = { none: "Once", daily: "Every day", weekdays: "Weekdays", weekly: "Every week" };
+const HAPPENED = { fired: "said", acked: "done", missed: "missed" };
+
+function resetReminderForm() {
+  const f = $("reminder-form");
+  f.reset();
+  f.replaces.value = "";
+  $("reminder-save").textContent = "Add reminder";
+  $("reminder-new").hidden = true;
+}
+
+function fillChoices(select, choices, value, unit) {
+  select.replaceChildren(...choices.map((c) => h("option", { value: String(c) }, unit(c))));
+  select.value = String(value);
+}
+
+function drawReminders(data) {
+  fillChoices($("reminder-repeat"), data.repeat_choices, data.repeat_minutes, (c) => `${c} minutes`);
+  fillChoices($("reminder-tries"), data.tries_choices, data.tries, (c) => (c === 1 ? "once" : `${c} times`));
+  const f = $("reminder-form");
+  $("reminders").replaceChildren(
+    h("thead", {}, h("tr", {}, ["Say", "Repeat", "Next", ""].map((t) => h("th", {}, t)))),
+    h("tbody", {}, data.reminders.length ? data.reminders.map((r) => h("tr", {},
+      h("td", {}, r.text),
+      h("td", {}, `${REPEAT_WORDS[r.repeat] || r.repeat}, ${r.time}`),
+      h("td", {}, r.next),
+      h("td", {}, h("div", { class: "row__actions" },
+        h("button", { class: "btn btn--ghost btn--small", type: "button", onclick: () => {
+          f.replaces.value = String(r.id);
+          f.text.value = r.text;
+          f.time.value = r.time;
+          f.date.value = "";
+          f.repeat.value = r.repeat;
+          $("reminder-save").textContent = "Save changes";
+          $("reminder-new").hidden = false;
+          f.text.focus();
+        } }, "Edit"),
+        h("button", { class: "btn btn--danger btn--small", type: "button", onclick: () => {
+          if (confirm(`Stop reminding her to "${r.text}"?`)) {
+            act(api(`reminders/${r.id}/cancel`, { json: {} }), "Reminder cancelled");
+          }
+        } }, "Cancel"),
+      )),
+    )) : h("tr", {}, h("td", { colspan: 4, class: "empty" }, "No reminders yet."))),
+  );
+  $("reminder-history").replaceChildren(...(data.history.length
+    ? data.history.map((e) => h("li", {}, `${when(e.ts)} · ${HAPPENED[e.kind] || e.kind} · ${e.text}`))
+    : [empty("Nothing yet.")]));
+}
+
+$("reminder-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const f = event.target;
+  const json = { text: f.text.value, time: f.time.value, date: f.date.value, repeat: f.repeat.value };
+  if (f.replaces.value) json.replaces = Number(f.replaces.value);
+  act(api("reminders", { json }), f.replaces.value ? "Reminder changed" : "Reminder added")
+    .then(resetReminderForm);
+});
+$("reminder-new").addEventListener("click", resetReminderForm);
+
 // -- Keys & settings ----------------------------------------------------------------
 
 function drawKeys(serverKeys) {
@@ -357,7 +419,10 @@ for (const select of document.querySelectorAll("[data-pref]")) {
 }
 
 function drawSettings(prefs) {
-  const defaults = { language: "english", tts_backend: "google-chirp3-hd", captions: "off", wake_word: "on" };
+  const defaults = {
+    language: "english", tts_backend: "google-chirp3-hd", captions: "off", wake_word: "on",
+    reminder_repeat_minutes: "10", reminder_tries: "3",
+  };
   for (const select of document.querySelectorAll("[data-pref]")) {
     const value = prefs[select.dataset.pref] ?? defaults[select.dataset.pref];
     if ([...select.options].some((o) => o.value === value)) select.value = value;
@@ -415,8 +480,9 @@ function drawLayout(data, overview, prompt) {
 
 async function loadAll() {
   try {
-    const [overview, memory, prompt, people, keys, layout] = await Promise.all([
+    const [overview, memory, prompt, people, keys, layout, reminders] = await Promise.all([
       api("overview"), api("memory"), api("prompt"), api("contacts"), api("keys"), api("layout"),
+      api("reminders"),
     ]);
     drawOverview(overview);
     drawLayout(layout, overview, prompt);
@@ -424,6 +490,7 @@ async function loadAll() {
     drawPrompt(prompt);
     drawContacts(people);
     drawKeys(keys);
+    drawReminders(reminders);
     drawSettings(memory.preferences);
   } catch (error) {
     toast(`Couldn't load: ${error.message}`, true);

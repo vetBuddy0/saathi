@@ -183,7 +183,29 @@
           <select data-pref="captions"><option value="off">Off</option><option value="on">On</option></select></label>
         <label>Wake word &ldquo;Melody&rdquo; (tablet)
           <select data-pref="wake_word"><option value="on">On</option><option value="off">Off</option></select></label>
+        <label>Say an unanswered reminder again after
+          <select data-pref="reminder_repeat_minutes" id="reminder-repeat"></select></label>
+        <label>Times to say it before it counts as missed
+          <select data-pref="reminder_tries" id="reminder-tries"></select></label>
       </div>
+
+      <h2>Reminders</h2>
+      <p class="lead">What she is reminded of and when, set here or by asking Saathi ("remind me at 9 to take my
+        tablet"). Each is said in these words; she answers on the card or says it's done.</p>
+      <form class="contact-form" id="reminder-form">
+        <input type="hidden" name="replaces">
+        <label>Say <input name="text" required maxlength="200" placeholder="take your blood pressure tablet"></label>
+        <label>Time <input name="time" type="time" required></label>
+        <label>Date <input name="date" type="date"></label>
+        <label>Repeat <select name="repeat">
+          <option value="none">Once</option><option value="daily">Every day</option>
+          <option value="weekdays">Weekdays</option><option value="weekly">Every week</option></select></label>
+        <button class="btn" type="submit" id="reminder-save">Add reminder</button>
+        <button class="btn btn--ghost" type="button" id="reminder-new" hidden>Cancel edit</button>
+      </form>
+      <p class="muted small">No date: the next time it comes round. Every week repeats on the date's weekday.</p>
+      <div class="table-wrap"><table class="table" id="reminders"></table></div>
+      <details><summary>Recently said, done or missed</summary><ul class="rows" id="reminder-history"></ul></details>
     </section>
   </main>
 

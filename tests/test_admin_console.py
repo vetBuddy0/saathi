@@ -221,3 +221,117 @@ async def _next_settings(ws) -> dict:
         message = await asyncio.wait_for(ws.receive_json(), 5)
         if message.get("type") == "settings":
             return message
+
+
+async def test_reminders_are_listed_added_edited_and_cancelled(console, store_path):
+    client, _, _ = console
+    made = await client.post("/admin/api/reminders",
+                             json={"text": "take your tablet", "time": "09:00", "repeat": "daily"})
+    assert made.status == 200
+    first = (await made.json())["id"]
+    listed = await (await client.get("/admin/api/reminders")).json()
+    (row,) = listed["reminders"]
+    assert (row["text"], row["repeat"], row["time"]) == ("take your tablet", "daily", "09:00")
+    assert row["next"].endswith("at 09:00")
+    assert (listed["repeat_minutes"], listed["tries"]) == (10, 3)
+
+    # Editing replaces it: the old row is retired, not rewritten.
+    edited = await client.post("/admin/api/reminders", json={
+        "text": "take two tablets", "time": "08:30", "repeat": "weekdays", "replaces": first})
+    second = (await edited.json())["id"]
+    with IdentityStore(store_path) as store:
+        assert store.read("reminders", id=first)[0]["active"] == 0
+        assert store.read("reminders", id=second)[0]["recurrence"] == "weekdays"
+
+    # No time, a date in the past, an unknown repeat, a stale edit: refused.
+    for bad in ({"text": "x", "time": ""}, {"text": "x", "time": "09:00", "date": "2020-01-01"},
+                {"text": "x", "time": "09:00", "repeat": "hourly"}):
+        assert (await client.post("/admin/api/reminders", json=bad)).status == 400
+    stale = {"text": "x", "time": "09:00", "replaces": first}
+    assert (await client.post("/admin/api/reminders", json=stale)).status == 404
+
+    assert (await client.post(f"/admin/api/reminders/{second}/cancel", json={})).status == 200
+    assert (await client.post(f"/admin/api/reminders/{second}/cancel", json={})).status == 404
+    assert (await (await client.get("/admin/api/reminders")).json())["reminders"] == []
+
+
+async def test_how_often_a_reminder_repeats_is_a_setting(console, store_path):
+    from saathi.initiative import reminders
+
+    client, _, _ = console
+    for key, good, bad in (("reminder_repeat_minutes", "15", "7"), ("reminder_tries", "5", "9")):
+        for value, status in ((bad, 400), (good, 200)):
+            sent = await client.post("/admin/api/preferences", json={"key": key, "value": value})
+            assert sent.status == status
+    with IdentityStore(store_path) as store:
+        assert reminders.settings(store) == (reminders.timedelta(minutes=15), 5)
+    listed = await (await client.get("/admin/api/reminders")).json()
+    assert (listed["repeat_minutes"], listed["tries"]) == (15, 5)
+
+
+async def test_the_reminders_section_draws_and_sends_what_was_edited(console):
+    """admin.js in headless Chromium, fed the console's own JSON."""
+    import json
+    import re
+
+    from saathi.screen.admin import STATIC_DIR
+    from tests.chromium_harness import run_module_script
+
+    client, _, _ = console
+    await client.post("/admin/api/reminders",
+                      json={"text": "take your tablet", "time": "09:00", "repeat": "daily"})
+    data = {}
+    for name in ("overview", "memory", "prompt", "contacts", "keys", "layout", "reminders"):
+        data[name] = await (await client.get(f"/admin/api/{name}")).json()
+    page = (STATIC_DIR / "index.html").read_text()
+    body = re.search(r"<body>(.*)<script", page, re.S).group(1)
+    script = """
+    const fail = (why) => { document.body.dataset.out = JSON.stringify({ error: String(why) }); };
+    window.addEventListener("error", (e) => fail(e.message));
+    window.addEventListener("unhandledrejection", (e) => fail(e.reason));
+    const data = %(data)s;
+    const posts = [];
+    window.fetch = async (url, init = {}) => {
+      const path = url.replace("/admin/api/", "");
+      if (init.method === "POST") {
+        posts.push([path, JSON.parse(init.body)]);
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return { ok: true, json: async () => data[path] };
+    };
+    window.confirm = () => true;
+    await import("%(admin)s");
+    const wait = () => new Promise((r) => setTimeout(r, 300));
+    await wait();
+    const $ = (id) => document.getElementById(id);
+    const out = {};
+    out.rows = [...document.querySelectorAll("#reminders tbody tr")]
+      .map((tr) => [...tr.children].slice(0, 2).map((td) => td.textContent));
+    const repeat = $("reminder-repeat");
+    out.repeat = [repeat.value, repeat.options.length, $("reminder-tries").value];
+    document.querySelector("#reminders tbody button").click();  // Edit
+    const f = $("reminder-form");
+    out.form = [f.text.value, f.time.value, f.repeat.value, f.replaces.value !== "",
+                $("reminder-save").textContent];
+    f.text.value = "take two tablets";
+    f.requestSubmit();
+    await wait();
+    document.querySelectorAll("#reminders tbody button")[1].click();  // Cancel
+    $("reminder-repeat").value = "15";
+    $("reminder-repeat").dispatchEvent(new Event("change"));
+    await wait();
+    out.posts = posts;
+    document.body.dataset.out = JSON.stringify(out);
+    """ % {
+        "data": json.dumps(data).replace("</", "<\\/"),
+        "admin": (STATIC_DIR / "admin.js").resolve().as_uri(),
+    }
+    out = run_module_script(script, body_html=body)
+    assert "error" not in out, out
+    assert out["rows"] == [["take your tablet", "Every day, 09:00"]]
+    assert out["repeat"] == ["10", 4, "3"]
+    assert out["form"] == ["take your tablet", "09:00", "daily", True, "Save changes"]
+    (save, cancel, setting) = out["posts"]
+    assert save[0] == "reminders" and save[1]["text"] == "take two tablets" and save[1]["replaces"]
+    assert cancel[0].endswith("/cancel")
+    assert setting == ["preferences", {"key": "reminder_repeat_minutes", "value": "15"}]

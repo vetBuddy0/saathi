@@ -15,7 +15,8 @@ to an occurrence lives in `reminder_events`: said (`fired`, once per
 attempt), done (`acked`), or unanswered after every attempt (`missed`).
 
 An occurrence is said, then said again after `REPEAT_AFTER` until she
-says it is done, `ATTEMPTS` times in all; after that it is `missed`
+says it is done, `ATTEMPTS` times in all (both adjustable in the
+console's settings, `settings()`); after that it is `missed`
 (Batch 3 tells the family). A one-off reminder that is done or missed is
 retired, so it stops being listed. Lost: one attempt and done (a
 medicine reminder she did not hear is the failure that matters) and
@@ -43,6 +44,11 @@ RECURRENCES = ("none", "daily", "weekdays", "weekly")
 REPEAT_AFTER = timedelta(minutes=10)
 ATTEMPTS = 3
 
+# What the console offers for those two (identity/preferences.py's
+# REMINDER_REPEAT_KEY and REMINDER_TRIES_KEY).
+REPEAT_CHOICES = (5, 10, 15, 30)
+TRIES_CHOICES = (1, 2, 3, 4, 5)
+
 # How long after it was said a reminder can still be marked done by
 # voice ("I took it"): long enough for her to go and do it.
 DONE_WITHIN = timedelta(hours=3)
@@ -58,7 +64,7 @@ class Action:
     reminder_id: int
     text: str
     due_at: datetime  # this occurrence, UTC
-    attempt: int  # 1..ATTEMPTS for "fire"; ATTEMPTS for "miss"
+    attempt: int  # which saying this is ("fire"); how many there were ("miss")
     one_off: bool
 
 
@@ -137,10 +143,37 @@ def _events(store: IdentityStore, reminder_id: int, due_at: datetime) -> list[di
     return store.read("reminder_events", reminder_id=reminder_id, due_at=due_at.isoformat())
 
 
-def due(store: IdentityStore, now: datetime, tz: tzinfo | None = None) -> list[Action]:
+def settings(store: IdentityStore) -> tuple[timedelta, int]:
+    """The repeat gap and the number of tries, as set in the console,
+    else the defaults. A stored value outside the choices is ignored."""
+    from saathi.identity.preferences import (
+        REMINDER_REPEAT_KEY,
+        REMINDER_TRIES_KEY,
+        read_preference,
+    )
+
+    def number(key: str, choices: tuple[int, ...], default: int) -> int:
+        try:
+            value = int(read_preference(store, key) or default)
+        except ValueError:
+            return default
+        return value if value in choices else default
+
+    minutes = number(REMINDER_REPEAT_KEY, REPEAT_CHOICES, int(REPEAT_AFTER.total_seconds() // 60))
+    return timedelta(minutes=minutes), number(REMINDER_TRIES_KEY, TRIES_CHOICES, ATTEMPTS)
+
+
+def due(
+    store: IdentityStore,
+    now: datetime,
+    tz: tzinfo | None = None,
+    *,
+    repeat_after: timedelta = REPEAT_AFTER,
+    attempts: int = ATTEMPTS,
+) -> list[Action]:
     """What to do this tick: say a reminder (first time, or again), or
     give up on one. Nothing for an occurrence that is done, missed, or
-    was said less than `REPEAT_AFTER` ago."""
+    was said less than `repeat_after` ago."""
     actions = []
     for reminder in store.read("reminders", active=1):
         moment = occurrence(reminder, now, tz)
@@ -150,11 +183,11 @@ def due(store: IdentityStore, now: datetime, tz: tzinfo | None = None) -> list[A
         if any(event["kind"] in ("acked", "missed") for event in events):
             continue
         fired = [parse_utc(event["ts"]) for event in events if event["kind"] == "fired"]
-        if fired and now - max(fired) < REPEAT_AFTER:
+        if fired and now - max(fired) < repeat_after:
             continue
         one_off = _recurrence(reminder) == "none"
-        if len(fired) >= ATTEMPTS:
-            kind, attempt = "miss", ATTEMPTS
+        if len(fired) >= attempts:
+            kind, attempt = "miss", len(fired)
         else:
             kind, attempt = "fire", len(fired) + 1
         actions.append(Action(kind, reminder["id"], reminder["text"], moment, attempt, one_off))

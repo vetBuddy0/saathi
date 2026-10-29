@@ -3975,3 +3975,19 @@ forever, and `recurrence` was never read.
   - The first "done" was answered warmly but did not mark it. The model
     had only been told "you spoke first". The window note now says it was
     a reminder and to call `reminder_done`.
+
+## 2026-10-29 — Reminders in the console's settings
+
+The owner asked to "keep reminders also adjustable in settings".
+- **Settings.** Two preferences, `reminder_repeat_minutes` (5, 10, 15 or
+  30) and `reminder_tries` (1 to 5), are read by the tick on every check
+  (`initiative/reminders.settings()`). Anything else stored falls back
+  to 10 minutes and 3 tries, and the console refuses it with a 400.
+  Lost: free numbers. A 1-minute repeat would nag, and 0 tries would
+  never say it.
+- **The list.** A Reminders section on the Keys & settings tab lists,
+  adds, edits and cancels reminders. Editing retires the old row and
+  appends a new one (the store has no update). Times resolve through the
+  same `tools/reminders.resolve` the voice tool uses, so "09:00" with no
+  date means the next 09:00. The last 20 said/done/missed events are
+  listed under it.

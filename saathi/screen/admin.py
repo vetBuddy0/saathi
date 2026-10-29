@@ -55,6 +55,8 @@ from saathi.identity.preferences import (
     CAPTIONS_KEY,
     LANGUAGE_KEY,
     TTS_BACKEND_KEY,
+    REMINDER_REPEAT_KEY,
+    REMINDER_TRIES_KEY,
     WAKE_WORD_KEY,
     write_preference,
 )
@@ -88,7 +90,14 @@ KEYS: list[tuple[str, str]] = [
     ("AWS_REGION", "The bucket's region, e.g. ap-southeast-1."),
     ("AWS_S3_BUCKET", "The S3 bucket name."),
 ]
-PREFERENCE_KEYS = (LANGUAGE_KEY, TTS_BACKEND_KEY, CAPTIONS_KEY, WAKE_WORD_KEY)
+PREFERENCE_KEYS = (
+    LANGUAGE_KEY,
+    TTS_BACKEND_KEY,
+    CAPTIONS_KEY,
+    WAKE_WORD_KEY,
+    REMINDER_REPEAT_KEY,
+    REMINDER_TRIES_KEY,
+)
 
 # What each table in identity.sqlite3 is for, who writes it, and whether
 # any of it reaches the model -- the "Under the hood" tab. The columns
@@ -441,9 +450,95 @@ class Console:
                 notes=json.dumps({"phone": None, "removed": True}), created_at=_now(),
             )
 
+    # -- reminders (owner, 2026-10-29: "adjustable in settings") ---------
+    # The same rows and rules her voice uses (tools/reminders.py,
+    # initiative/reminders.py). Editing retires the old reminder and adds
+    # the new one -- the store has no update -- so its history stays.
+
+    def reminder_list(self) -> dict[str, Any]:
+        from saathi.initiative import reminders as rules
+        from saathi.tools.reminders import describe
+
+        now = datetime.now(timezone.utc)
+        with IdentityStore(self.store_path) as store:
+            store.create()
+            rows = store.read("reminders", active=1)
+            texts = {row["id"]: row["text"] for row in store.read("reminders")}
+            events = store.read("reminder_events")
+            repeat_after, tries = rules.settings(store)
+        listed = []
+        for row in rows:
+            first = rules.local(rules.parse_utc(row["due_at"]))
+            upcoming = rules.next_occurrence(row, now)
+            listed.append(
+                {
+                    "id": row["id"],
+                    "text": row["text"],
+                    "repeat": row["recurrence"] or "none",
+                    "time": first.strftime("%H:%M"),
+                    "date": first.date().isoformat(),
+                    "next": describe(upcoming, now) if upcoming else "due now",
+                }
+            )
+        history = [
+            {"ts": e["ts"], "kind": e["kind"], "text": texts.get(e["reminder_id"], "")}
+            for e in sorted(events, key=lambda e: e["ts"], reverse=True)[:20]
+        ]
+        return {
+            "reminders": listed,
+            "history": history,
+            "repeat_minutes": int(repeat_after.total_seconds() // 60),
+            "tries": tries,
+            "repeat_choices": list(rules.REPEAT_CHOICES),
+            "tries_choices": list(rules.TRIES_CHOICES),
+        }
+
+    def save_reminder(
+        self, text: str, time_text: str, day: str | None, repeat: str, replaces: int | None
+    ) -> int:
+        from saathi.initiative import reminders as rules
+        from saathi.tools.reminders import resolve
+
+        if repeat not in rules.RECURRENCES:
+            raise web.HTTPBadRequest(text=f"repeat is one of {', '.join(rules.RECURRENCES)}")
+        now = datetime.now(timezone.utc)
+        first = resolve(now, time_text=time_text, day=day or None)
+        if first is None:
+            raise web.HTTPBadRequest(
+                text="Pick a time (HH:MM) and, if you give a date, one not in the past."
+            )
+        with IdentityStore(self.store_path) as store:
+            store.create()
+            if replaces is not None:
+                if not store.read("reminders", id=replaces, active=1):
+                    raise web.HTTPNotFound(text=f"no active reminder {replaces}")
+                store.retire("reminders", replaces, now)
+            return store.append(
+                "reminders",
+                due_at=first.isoformat(),
+                text=text,
+                recurrence=None if repeat == "none" else repeat,
+                active=1,
+            )
+
+    def cancel_reminder(self, reminder_id: int) -> None:
+        with IdentityStore(self.store_path) as store:
+            store.create()
+            if not store.read("reminders", id=reminder_id, active=1):
+                raise web.HTTPNotFound(text=f"no active reminder {reminder_id}")
+            store.retire("reminders", reminder_id, datetime.now(timezone.utc))
+
     def set_preference(self, key: str, value: str) -> None:
+        from saathi.initiative import reminders as rules
+
         if key not in PREFERENCE_KEYS:
             raise web.HTTPBadRequest(text=f"{key} is not a setting the console changes")
+        choices = {
+            REMINDER_REPEAT_KEY: rules.REPEAT_CHOICES,
+            REMINDER_TRIES_KEY: rules.TRIES_CHOICES,
+        }.get(key)
+        if choices is not None and value not in {str(c) for c in choices}:
+            raise web.HTTPBadRequest(text=f"{key} is one of {', '.join(map(str, choices))}")
         with IdentityStore(self.store_path) as store:
             store.create()
             write_preference(store, key, value)
@@ -560,6 +655,35 @@ def add_routes(app: web.Application, console: Console) -> None:
         console.settings_changed()
         return web.json_response({"ok": True})
 
+    def reminder_id(request: web.Request) -> int:
+        try:
+            return int(request.match_info["reminder_id"])
+        except ValueError:
+            raise web.HTTPNotFound() from None
+
+    @loopback
+    async def save_reminder(request):
+        data = await body(request)
+        replaces = data.get("replaces")
+        if replaces is not None and not isinstance(replaces, int):
+            raise web.HTTPBadRequest(text="replaces is a reminder id")
+        day = data.get("date") if isinstance(data.get("date"), str) else None
+        repeat = data.get("repeat") if isinstance(data.get("repeat"), str) else "none"
+        new_id = await run(
+            console.save_reminder,
+            _text(data.get("text"), "text"),
+            _text(data.get("time"), "time"),
+            (day or "").strip() or None,
+            repeat,
+            replaces,
+        )
+        return web.json_response({"id": new_id})
+
+    @loopback
+    async def cancel_reminder(request):
+        await run(console.cancel_reminder, reminder_id(request))
+        return web.json_response({"ok": True})
+
     app.router.add_get("/admin", page)
     app.router.add_get("/admin/api/overview", getter(console.overview))
     app.router.add_get("/admin/api/memory", getter(console.memory))
@@ -576,4 +700,7 @@ def add_routes(app: web.Application, console: Console) -> None:
     app.router.add_post("/admin/api/contacts", save_contact)
     app.router.add_post("/admin/api/contacts/remove", remove_contact)
     app.router.add_post("/admin/api/preferences", set_preference)
+    app.router.add_get("/admin/api/reminders", getter(console.reminder_list))
+    app.router.add_post("/admin/api/reminders", save_reminder)
+    app.router.add_post("/admin/api/reminders/{reminder_id}/cancel", cancel_reminder)
     app.router.add_static("/admin/static/", STATIC_DIR)
