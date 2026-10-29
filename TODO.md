@@ -7,6 +7,14 @@ in `DECISIONS.md` and strike it here.
 
 ## Known problems
 
+**2026-10-29 — `test_a_due_reminder_is_said_with_a_done_card_and_a_reason_on_record`
+goes red after 04:00 UTC on 2026-10-29.** The reminder is fired at the
+test's fixed `NOW` (01:00 UTC), but the card's Yes calls `acknowledge()`
+with the real clock, which only finds reminders said in the last 3 hours
+(`DONE_WITHIN`). The test passes with `screen/server.py`'s clock pinned
+near `NOW`. It was found while building the in-call card and is not
+changed here. Fix: have the test pin the server's clock.
+
 **2026-10-09 — `test_every_google_call_carries_a_deadline` is red.**
 Commit `5fb6c34` lowered the Google TTS per-sentence deadline
 (`_REQUEST_TIMEOUT_S` in `voice/tts/google_backend.py`) from 10 s to
