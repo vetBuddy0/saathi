@@ -42,7 +42,7 @@ src/
   state/session.tsx  signed-in user, paired devices, the chosen device
   ui/                theme (large type, AA contrast), a small kit, and
                      GoogleSignIn (web popup / native OAuth)
-rules/               copies of contracts/ rules the tests run under
+rules/               symlink to ../../contracts: the rules the tests run under
   app/               expo-router screens; they call src/data and nothing else
 tests/               Jest: pure logic + the data layer against the emulators
 e2e/                 seed the emulators; drive the web build; screenshots
@@ -85,12 +85,9 @@ npm run test:emulators   # = firebase emulators:exec … "npm test"
 
 `npm test` on its own needs the emulators running and says so if they
 aren't. The emulator tests run under the project's **real** security
-rules. `rules/firestore.rules` and `rules/storage.rules` are verbatim
-copies of `contracts/` from the contracts PR (#15), because that
-directory isn't on this branch yet. Once both are merged,
-`firebase.test.json` should point at `../../contracts/*.rules` and
-`rules/` should be deleted, so there is one copy. Until then, `diff`
-the two after any rules change.
+rules: `rules/` is a symlink to `contracts/`, so there is one copy.
+A link, not a `../../contracts` path in `firebase.test.json`: the
+Firebase CLI refuses rules from outside the config's directory.
 
 The tests act as the real parties: the caregiver goes through
 `src/data`, "the device" is its own `device-{id}@saathi.invalid`
