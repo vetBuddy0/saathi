@@ -380,6 +380,8 @@ async def _serve_until_stopped(engine: _Engine) -> None:
             calls=runtime.call_panel,
             admin_info=lambda: cli.console_info(runtime),
             cloud=runtime.cloud,
+            # Timers and a stopwatch beside the face (tools/clock.py).
+            clock=runtime.clock,
         )
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_SECONDS)
         await runner.setup()

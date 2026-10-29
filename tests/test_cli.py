@@ -103,6 +103,7 @@ def test_every_tool_is_registered_with_a_schema_and_its_permission_granted(wired
         "list_reminders",
         "cancel_reminder",
         "reminder_done",
+        "clock",
     }
     for tool in wired.registry:
         assert tool.permission in cli.GRANTED_PERMISSIONS, tool.name
@@ -518,6 +519,7 @@ def test_remote_mode_builds_no_device_manager_and_listens_only_through_remote_au
         "list_reminders",
         "cancel_reminder",
         "reminder_done",
+        "clock",
     } == names
 
 

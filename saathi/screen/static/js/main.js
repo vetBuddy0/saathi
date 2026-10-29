@@ -36,6 +36,9 @@
 // (face.js), and the phone panel (call-panel.js) draws a call on the
 // right with an End call button whose tap goes back to the server —
 // the server, not this page, decides whether it hangs anything up.
+//
+// 2026-10-29: the clock (clock-panel.js) draws the time, her timers and
+// a stopwatch on the right when tools/clock.py says so.
 
 import { FACE_MODULES, DEFAULT_FACE } from "./face.js";
 import { createSettingsPanel } from "./settings-panel.js";
@@ -43,6 +46,7 @@ import { createMediaPanel } from "./media-panel.js";
 import { createCards } from "./cards.js";
 import { createCaptions } from "./captions.js";
 import { createCallPanel } from "./call-panel.js";
+import { createClockPanel } from "./clock-panel.js";
 // Family-app calls (call/webrtc.py): this page is the device's WebRTC
 // end; Ctrl+P shows the pairing QR. See family-call.js.
 import { createFamilyCall } from "./family-call.js";
@@ -167,6 +171,7 @@ async function main() {
   const cards = createCards(sendLater, { demo });
   // `?demo=call-calling|call-connected` draws the phone panel locally.
   const callPanel = createCallPanel(sendLater, { demo });
+  const clockPanel = createClockPanel(sendLater);
   const familyCall = createFamilyCall(sendLater);
   const twilioPhone = createTwilioPhone(sendLater);
   // `?demo=emotion-blush` (any EMOTION_NAMES entry) or `?demo=sleeping`
@@ -192,6 +197,7 @@ async function main() {
       cards.onMessage(message);
       captions.onMessage(message);
       callPanel.onMessage(message);
+      clockPanel.onMessage(message);
       familyCall.onMessage(message);
       twilioPhone.onMessage(message);
     },

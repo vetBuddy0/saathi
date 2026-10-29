@@ -253,6 +253,17 @@ _REMINDER_NOTE = (
 CHECK_REMINDERS = web.AppKey("check_reminders", object)
 _REMINDER_TASK = web.AppKey("reminder_task", asyncio.Task)
 
+# The clock's timers (tools/clock.py) are looked at this often: "your
+# tea timer is done" is said within a second of it, when she is free.
+_CLOCK_TICK_SECONDS = 1.0
+# A timer that ran out during a call or a long turn is still said once
+# she is free, up to this long after; later than that, the screen has
+# shown it and the words would only puzzle her.
+_TIMER_SAY_WITHIN = 300.0
+_TIMER_NOTE = "the timer she set has run out; the clock beside you shows it"
+CHECK_CLOCK = web.AppKey("check_clock", object)
+_CLOCK_TASK = web.AppKey("clock_task", asyncio.Task)
+
 # Robustness pass (checkpoint 2): a 401/429/timeout/connection-reset from
 # Groq used to be an uncaught exception with nowhere good to land — the
 # turn's own try/except caught it and went straight to IDLE, silently.
@@ -499,6 +510,8 @@ def build_app(
     remote_audio=None,
     cloud=None,
     reminder_tick_seconds: float | None = _REMINDER_TICK_SECONDS,
+    clock=None,
+    clock_tick_seconds: float | None = _CLOCK_TICK_SECONDS,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -652,7 +665,9 @@ def build_app(
     # `family` (call/family_runtime.py): the family-app call's device
     # end -- `{"type": "rtc", ...}` both ways between this page and
     # call/webrtc.py; the server only carries it.
-    seams = [obj for obj in (media, cards, emotions, calls, family, phone) if obj is not None]
+    seams = [
+        obj for obj in (media, cards, emotions, calls, family, phone, clock) if obj is not None
+    ]
     if seams:
 
         async def install_seams(_app: web.Application) -> None:
@@ -1107,17 +1122,46 @@ def build_app(
             stale_card["id"], stale_card["since"] = current.id, time.monotonic()
         return time.monotonic() - float(stale_card["since"]) < _STALE_CARD_SECONDS
 
+    def free_to_speak_first() -> bool:
+        return (
+            session is not None
+            and core.state in (State.IDLE, State.SLEEPING)
+            and not (calls is not None and calls.current_id is not None)
+            and not (hold is not None and hold.active)
+        )
+
+    def say_first(line: str, why: str) -> None:
+        """Says `line` unprompted, once `core` has taken the "initiative"
+        event, then opens the mic as after "Yes?". Shared by reminders
+        and the clock's timers."""
+        caption("saathi", line)
+        turn_generation["value"] += 1
+        generation = turn_generation["value"]
+
+        async def speak() -> None:
+            await _speak_and_finish(
+                session,
+                core,
+                generation,
+                turn_generation,
+                line,
+                None,  # not an exchange: no `turns` row
+                None,
+                # SPEC: after speaking unprompted, the mic opens without a
+                # press -- the same window as after "Yes?".
+                on_done=lambda g: open_conversation(g, after_her_name=True),
+            )
+            said_first = getattr(session, "said_first", None)
+            if said_first is not None:
+                said_first(line, why)
+
+        asyncio.get_running_loop().create_task(speak())
+
     def check_reminders(now: datetime | None = None) -> list:
         """One tick: say what is due, give up on what went unanswered.
         Returns the reminder actions found (for tests and the log)."""
         path = getattr(store, "path", None)
-        if session is None or path is None:
-            return []
-        if core.state not in (State.IDLE, State.SLEEPING):
-            return []
-        if calls is not None and calls.current_id is not None:
-            return []
-        if hold is not None and hold.active:
+        if path is None or not free_to_speak_first():
             return []
         if _card_in_the_way():
             return []
@@ -1163,28 +1207,7 @@ def build_app(
         logger.info("reminder said: %r", line)
         if cards is not None:
             reminder_cards.add(cards.show(confirm(reminder_rules.card_title(allowed), spoken=line)))
-        caption("saathi", line)
-        turn_generation["value"] += 1
-        generation = turn_generation["value"]
-
-        async def speak() -> None:
-            await _speak_and_finish(
-                session,
-                core,
-                generation,
-                turn_generation,
-                line,
-                None,  # not an exchange: no `turns` row
-                None,
-                # SPEC: after speaking unprompted, the mic opens without a
-                # press -- the same window as after "Yes?".
-                on_done=lambda g: open_conversation(g, after_her_name=True),
-            )
-            said_first = getattr(session, "said_first", None)
-            if said_first is not None:
-                said_first(line, _REMINDER_NOTE)
-
-        asyncio.get_running_loop().create_task(speak())
+        say_first(line, _REMINDER_NOTE)
         return actions
 
     app[CHECK_REMINDERS] = check_reminders
@@ -1227,6 +1250,72 @@ def build_app(
 
         app.on_startup.append(start_reminders)
         app.on_cleanup.append(stop_reminders)
+
+    # The clock's timers. Unlike a reminder, a timer is said with a card
+    # up: she asked for it seconds or minutes ago, and the egg does not
+    # wait for a forgotten song choice. A call or a turn in progress
+    # still holds it back (`_TIMER_SAY_WITHIN`).
+    timers_to_say: list = []
+
+    def check_clock() -> list:
+        """One tick: lets the clock mark what ran out (the face draws
+        it), and says the finished timers if she is free. Returns the
+        timers said."""
+        if clock is None:
+            return []
+        from saathi.tools.clock import done_line
+
+        now = clock.now()
+        timers_to_say.extend(clock.finished())
+        timers_to_say[:] = [t for t in timers_to_say if now - t.ends_at < _TIMER_SAY_WITHIN]
+        if not timers_to_say or not free_to_speak_first():
+            return []
+        if not core.handle(Event("initiative")):
+            return []
+        said = list(timers_to_say)
+        timers_to_say.clear()
+        line = done_line(said)
+        path = getattr(store, "path", None)
+        if path is not None:
+            from saathi.identity.store import IdentityStore
+            from saathi.initiative.policy import PolicyContext, evaluate
+            from saathi.initiative.scheduler import InitiativeCandidate
+
+            # Logged in the reminder lane: every unprompted utterance
+            # records why (SPEC). Her own timer is never withheld.
+            with IdentityStore(path) as own:
+                evaluate(
+                    own,
+                    [InitiativeCandidate(kind="scheduled", reason=f"Timer done: {line}")],
+                    PolicyContext(presence=True),
+                    now=datetime.now(timezone.utc),
+                )
+        logger.info("timer said: %r", line)
+        say_first(line, _TIMER_NOTE)
+        return said
+
+    app[CHECK_CLOCK] = check_clock
+
+    if clock is not None and clock_tick_seconds:
+
+        async def clock_ticks() -> None:
+            while True:
+                await asyncio.sleep(clock_tick_seconds)
+                try:
+                    check_clock()
+                except Exception:
+                    logger.exception("clock tick failed")
+
+        async def start_clock(app_: web.Application) -> None:
+            app_[_CLOCK_TASK] = asyncio.get_running_loop().create_task(clock_ticks())
+
+        async def stop_clock(app_: web.Application) -> None:
+            task = app_.get(_CLOCK_TASK)
+            if task is not None:
+                task.cancel()
+
+        app.on_startup.append(start_clock)
+        app.on_cleanup.append(stop_clock)
 
     async def close_window_on_cleanup(_app: web.Application) -> None:
         close_window()
@@ -1291,6 +1380,9 @@ def build_app(
             call_message = calls.message()
             if call_message is not None:
                 await ws.send_str(json.dumps(call_message))
+        if clock is not None:
+            # Timers keep running across a reload; the page only counts.
+            await ws.send_str(json.dumps(clock.message()))
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -1376,6 +1468,17 @@ def build_app(
                                     )
                             else:
                                 logger.info("tap on %s dropped: not the current card", card_id)
+                    continue
+                if payload.get("type") == "clock_event":
+                    # The clock's own buttons: close it, or stop a timer
+                    # that has run out. Taps, like a card's.
+                    if clock is not None:
+                        if payload.get("action") == "hide":
+                            clock.hide()
+                        elif payload.get("action") == "dismiss" and isinstance(
+                            payload.get("id"), str
+                        ):
+                            clock.dismiss(payload["id"])
                     continue
                 if payload.get("type") == "phone_status":
                     can_call = payload.get("can_call")
@@ -1571,6 +1674,7 @@ def run(
     open_after_reply: bool = True,
     remote_audio=None,
     cloud=None,
+    clock=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
@@ -1592,6 +1696,7 @@ def run(
             open_after_reply=open_after_reply,
             remote_audio=remote_audio,
             cloud=cloud,
+            clock=clock,
         ),
         host=host,
         port=port,

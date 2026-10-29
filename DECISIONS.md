@@ -3991,3 +3991,29 @@ The owner asked to "keep reminders also adjustable in settings".
   same `tools/reminders.resolve` the voice tool uses, so "09:00" with no
   date means the next 09:00. The last 20 said/done/missed events are
   listed under it.
+
+## 2026-10-29 — A clock with timers and a stopwatch
+
+The owner asked for "a small clock Saathi can pull up for timers,
+stopwatch etc".
+- **One tool, `clock`** (`tools/clock.py`, new `clock` permission), with
+  the actions show, hide, start_timer, cancel_timer and
+  stopwatch_start/stop/reset. `ClockController` broadcasts
+  `{"type": "clock"}` through the same seam as the media panel, and
+  `static/js/clock-panel.js` counts the seconds on the page. Lost:
+  ticking over the socket (traffic every second for nothing) and
+  alarms at a time of day (those are reminders).
+- **Saying "done".** The server checks once a second and says "The tea
+  timer is done" through the same speak-first path as reminders (now a
+  shared `say_first`). It waits for her turn and for a call, not for a
+  card, and gives up after 5 minutes (the screen has shown it by
+  then). Each one is logged through `policy.evaluate` in the reminder
+  lane. The page chimes, and chimes again every 15 s until Stop.
+- **Layout.** Right 40%, like the phone panel. A card, a call or the
+  media panel takes the right instead and the clock is hidden behind
+  it, still counting. A finished timer brings a closed clock back up.
+  The clock hides itself 2 minutes after nothing is left running.
+  Lost: staying up until told, which would hold half the screen all
+  day after one "what time is it?".
+- **Tests changed.** test_cli's two pinned tool sets gained `clock`: the
+  owner changed what the model may do.

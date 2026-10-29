@@ -157,9 +157,10 @@ def _test_resident(by: str) -> int:
 # "contacts" writes her memory and "calls" rings a phone (DECISIONS
 # 2026-09-25, calls in scope; wired on cloud/demo 2026-09-26 with S1
 # fixed and S2-S4 still open in TODO.md); "reminders" sets and clears her
-# own reminders (owner, 2026-10-29).
+# own reminders (owner, 2026-10-29); "clock" shows the clock and runs
+# her timers and stopwatch (owner, 2026-10-29).
 GRANTED_PERMISSIONS = frozenset(
-    {"preferences", "memory", "music", "calls", "contacts", "reminders"}
+    {"preferences", "memory", "music", "calls", "contacts", "reminders", "clock"}
 )
 
 # The quick tunnel's hostname took ~84 s to resolve on the first live
@@ -205,6 +206,8 @@ class Runtime:
     # and the phone panel the call controller reports to.
     emotions: Any = None
     call_panel: Any = None
+    # The clock beside the face (tools/clock.py): timers and a stopwatch.
+    clock: Any = None
     # Remote mode's calls over the device's own SIM (call/device_phone.py):
     # the shell says it can, the engine says whom.
     device_phone: Any = None
@@ -244,6 +247,7 @@ def build_runtime() -> Runtime:
     from saathi.screen.call_panel import CallPanel
     from saathi.screen.cards import CardController, HoldController
     from saathi.screen.emotion import EmotionController
+    from saathi.tools.clock import ClockController
     from saathi.tools.media import MediaController
 
     config = Config.load()
@@ -280,6 +284,7 @@ def build_runtime() -> Runtime:
         emotions=EmotionController(),
         call_panel=CallPanel(),
         remote_audio=remote_audio,
+        clock=ClockController(),
     )
     runtime.cloud = _cloud(runtime)
 
@@ -311,6 +316,7 @@ def build_runtime() -> Runtime:
     from saathi.tools.llm_schema import tool_to_openai_schema
     from saathi.tools.media import MEDIA_DESCRIPTION, make_media_tool
     from saathi.tools.registry import PermissionDenied, Registry, UnknownTool
+    from saathi.tools.clock import CLOCK_DESCRIPTION, make_clock_tool
     from saathi.tools.reminders import make_reminder_tools
     from saathi.voice.engine.cascade import CascadeSession
     from saathi.screen.emotion import EMOTIONS
@@ -325,7 +331,8 @@ def build_runtime() -> Runtime:
     correct_memory_tool = make_correct_memory_tool(store)
     media_tool = make_media_tool(media)
     reminder_tools = make_reminder_tools(store, cards=cards)
-    for tool in (set_language_tool, correct_memory_tool, media_tool):
+    clock_tool = make_clock_tool(runtime.clock)
+    for tool in (set_language_tool, correct_memory_tool, media_tool, clock_tool):
         registry.register(tool)
     for tool, _description in reminder_tools:
         registry.register(tool)
@@ -343,6 +350,7 @@ def build_runtime() -> Runtime:
         tool_to_openai_schema(correct_memory_tool, CORRECT_MEMORY_DESCRIPTION),
         tool_to_openai_schema(media_tool, MEDIA_DESCRIPTION),
         *(tool_to_openai_schema(tool, description) for tool, description in reminder_tools),
+        tool_to_openai_schema(clock_tool, CLOCK_DESCRIPTION),
     ]
     runtime.registry = registry
     runtime.tool_schemas = tool_schemas
@@ -925,6 +933,7 @@ def _run() -> int:
         open_after_reply=open_after_reply(),
         remote_audio=runtime.remote_audio,
         cloud=runtime.cloud,
+        clock=runtime.clock,
     )
     if runtime.cloud is not None:
         runtime.cloud.stop()

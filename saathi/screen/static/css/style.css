@@ -604,3 +604,126 @@ body.media--fullscreen.call--open #face-container {
     animation: none;
   }
 }
+
+/* The clock (clock-panel.js, 2026-10-29): the time and date in big
+   figures, her timers counting down and a stopwatch, on the right 40%
+   like the phone panel; the face fits the left 60%. A card, a call or
+   the media panel is what she is answering or watching, so the clock
+   steps aside for them (hidden, still counting) and the face follows
+   their layout instead. */
+#clock-panel {
+  position: fixed;
+  inset: 0 0 0 60%;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2.5vh;
+  padding: 6vh 3vw;
+  box-sizing: border-box;
+  background: linear-gradient(180deg, #1d1814 0%, #120f0d 100%);
+  border-left: 1px solid rgba(255, 206, 133, 0.12);
+  color: var(--card-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK SC",
+    sans-serif;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+#clock-panel[hidden],
+body.card--open #clock-panel,
+body.call--open #clock-panel,
+body.media--panel #clock-panel,
+body.media--fullscreen #clock-panel {
+  display: none;
+}
+body.clock--open:not(.card--open):not(.call--open):not(.media--panel):not(.media--fullscreen)
+  #face-container {
+  inset: 0 40% 0 0;
+}
+.clock-panel__close {
+  position: absolute;
+  top: 2vh;
+  right: 2vw;
+  min-width: 100px;
+  min-height: 100px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--card-dismiss-bg);
+  color: var(--card-dismiss-fg);
+  font: inherit;
+  font-size: 56px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.clock-panel__time {
+  font-size: clamp(72px, 7vw, 160px);
+  font-weight: 600;
+  line-height: 1;
+}
+.clock-panel__date {
+  font-size: clamp(32px, 2.2vw, 52px);
+  color: #d9cfc0;
+}
+.clock-panel__timers {
+  list-style: none;
+  margin: 2vh 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2vh;
+  width: 100%;
+}
+.clock-panel__timer,
+.clock-panel__stopwatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5vh;
+}
+.clock-panel__stopwatch[hidden] {
+  display: none;
+}
+.clock-panel__label {
+  font-size: clamp(32px, 2vw, 46px);
+  color: var(--card-accent);
+}
+.clock-panel__count {
+  font-size: clamp(56px, 4.8vw, 110px);
+  font-weight: 500;
+  line-height: 1.1;
+}
+.clock-panel__timer--done .clock-panel__count {
+  color: var(--card-accent);
+  animation: clock-done 1.2s ease-in-out infinite;
+}
+.clock-panel__stopwatch[data-running="no"] .clock-panel__count {
+  color: #d9cfc0;
+}
+@keyframes clock-done {
+  50% { opacity: 0.55; }
+}
+.clock-panel__stop {
+  min-height: 110px;
+  min-width: min(100%, 320px);
+  padding: 0 3vw;
+  border: 0;
+  border-radius: 999px;
+  background: var(--card-accent);
+  color: var(--card-bg);
+  font: inherit;
+  font-size: clamp(36px, 2.4vw, 56px);
+  font-weight: 650;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.clock-panel__stop[hidden] {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .clock-panel__timer--done .clock-panel__count {
+    animation: none;
+  }
+}
