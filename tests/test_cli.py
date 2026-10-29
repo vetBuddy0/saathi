@@ -668,3 +668,31 @@ def test_cloud_backup_needs_all_three_firebase_names_and_says_which_are_missing(
     assert isinstance(runtime.firebase, FirebaseClient) and cloud.client is runtime.firebase
     assert runtime.firebase.config.project_id == "saathi-family" and "saathi-family" in cloud.status()
     assert "AIza1" not in cloud.status() and "AIza1" not in repr(runtime.firebase)
+
+
+def test_the_family_inbox_shares_the_copys_client_and_device(tmp_path, monkeypatch):
+    """cloud/inbox.py polls as the same device account the sync thread
+    signs in, under the same device id; no cloud, no inbox."""
+    from types import SimpleNamespace
+
+    from saathi.cloud.inbox import Inbox
+    from saathi.cloud.sync import CloudSync
+
+    runtime = SimpleNamespace(
+        notes=[],
+        config=SimpleNamespace(data_dir=tmp_path),
+        store=SimpleNamespace(path=tmp_path / "identity.sqlite3"),
+        cloud=None,
+        firebase=None,
+    )
+    assert cli._inbox(runtime) is None
+    monkeypatch.setenv("FIREBASE_API_KEY", "AIza1")
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "saathi-family")
+    monkeypatch.setenv("FIREBASE_STORAGE_BUCKET", "saathi-family.firebasestorage.app")
+    monkeypatch.setattr(CloudSync, "start", lambda self: None)
+    runtime.cloud = cli._cloud(runtime)
+    inbox = cli._inbox(runtime)
+    assert isinstance(inbox, Inbox)
+    assert inbox.client is runtime.firebase
+    assert inbox.device_id == runtime.cloud.device
+    assert inbox.store_path == tmp_path / "identity.sqlite3"

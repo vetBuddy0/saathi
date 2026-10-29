@@ -1979,6 +1979,7 @@ def run(
     remote_audio=None,
     cloud=None,
     clock=None,
+    inbox=None,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     web.run_app(
@@ -2001,6 +2002,7 @@ def run(
             remote_audio=remote_audio,
             cloud=cloud,
             clock=clock,
+            inbox=inbox,
         ),
         host=host,
         port=port,

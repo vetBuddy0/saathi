@@ -4335,3 +4335,18 @@ sample of each, the rules and the rules tests.
   can't silently outgrow it.
 - **Mocha 11, not 12.** Mocha 12 needs `require(esm)`, which the
   installed Node 22.11 lacks.
+
+## 2026-10-29 — Batch merged; the family inbox wired in
+
+PRs #11–#15 merged into `android-app`.
+- **Wiring.** `cli._inbox` builds `cloud/inbox.py`'s `Inbox` on the
+  same Firebase client and device id as the copy (`cloud/sync.py`), and
+  `saathi run` and the tablet hand it to `build_app(inbox=)`. So
+  messages, caregiver reminders and pairing all act as the one device
+  account the sync thread signs in. Lost: a second client signing in
+  separately, which would be two sessions and two token refreshes for one
+  device.
+- **Test timing.** `test_the_reminders_section_draws_and_sends_what_was_edited`
+  waited 3 × 300 ms of the harness's 3 s virtual-time budget. With the
+  pairing section's timers it ran out about 1 in 5 times under load. It
+  now waits for what it asserts. The assertions are unchanged.

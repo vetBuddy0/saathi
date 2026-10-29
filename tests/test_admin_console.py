@@ -301,8 +301,12 @@ async def test_the_reminders_section_draws_and_sends_what_was_edited(console):
     };
     window.confirm = () => true;
     await import("%(admin)s");
-    const wait = () => new Promise((r) => setTimeout(r, 300));
-    await wait();
+    // Waits for what is being asserted, not a fixed time: the harness's
+    // virtual-time budget is shared with the console's own timers.
+    const until = async (ok) => {
+      for (let i = 0; i < 100 && !ok(); i += 1) await new Promise((r) => setTimeout(r, 10));
+    };
+    await until(() => document.querySelector("#reminders tbody tr"));
     const $ = (id) => document.getElementById(id);
     const out = {};
     out.rows = [...document.querySelectorAll("#reminders tbody tr")]
@@ -315,11 +319,11 @@ async def test_the_reminders_section_draws_and_sends_what_was_edited(console):
                 $("reminder-save").textContent];
     f.text.value = "take two tablets";
     f.requestSubmit();
-    await wait();
+    await until(() => posts.length >= 1);
     document.querySelectorAll("#reminders tbody button")[1].click();  // Cancel
     $("reminder-repeat").value = "15";
     $("reminder-repeat").dispatchEvent(new Event("change"));
-    await wait();
+    await until(() => posts.length >= 3);
     out.posts = posts;
     document.body.dataset.out = JSON.stringify(out);
     """ % {

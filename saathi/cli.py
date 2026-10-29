@@ -225,6 +225,9 @@ class Runtime:
     # The Firebase client that copy signs in with (cloud/firebase.py),
     # shared with pairing and the caregiver inbox; None when not set up.
     firebase: Any = None
+    # Family messages and caregiver reminders from that project
+    # (cloud/inbox.py), polled between turns; None when there is no cloud.
+    inbox: Any = None
 
 
 @dataclass
@@ -290,6 +293,7 @@ def build_runtime() -> Runtime:
         clock=ClockController(),
     )
     runtime.cloud = _cloud(runtime)
+    runtime.inbox = _inbox(runtime)
 
     # The voice engine needs a speech-to-text + chat provider: OpenAI if
     # OPENAI_API_KEY is set (the demo choice), else Groq. See
@@ -728,6 +732,19 @@ def _cloud(runtime: Runtime):
     return cloud
 
 
+def _inbox(runtime: Runtime):
+    """The family inbox (cloud/inbox.py) on the same client and device id
+    as the copy, so messages, caregiver reminders and pairing all act as
+    the one device account the sync thread signs in. None with no cloud.
+    It polls through that client; until the sync thread has signed in,
+    a poll fails, is logged, and the next tick tries again."""
+    if runtime.cloud is None or runtime.firebase is None:
+        return None
+    from saathi.cloud.inbox import Inbox
+
+    return Inbox(runtime.firebase, runtime.cloud.device, runtime.store.path)
+
+
 def _remote_phone(runtime: Runtime):
     """Remote mode's calling route: Twilio from the face page
     (call/web_phone.py) when the Twilio keys and a TwiML App are set,
@@ -943,6 +960,7 @@ def _run() -> int:
         open_after_reply=open_after_reply(),
         remote_audio=runtime.remote_audio,
         cloud=runtime.cloud,
+        inbox=runtime.inbox,
         clock=runtime.clock,
     )
     if runtime.cloud is not None:

@@ -385,6 +385,8 @@ async def _serve_until_stopped(engine: _Engine) -> None:
             calls=runtime.call_panel,
             admin_info=lambda: cli.console_info(runtime),
             cloud=runtime.cloud,
+            # Family messages, caregiver reminders and pairing (cloud/inbox.py).
+            inbox=runtime.inbox,
             # Timers and a stopwatch beside the face (tools/clock.py).
             clock=runtime.clock,
         )
