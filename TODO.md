@@ -35,6 +35,11 @@ youtube.com. The media tool handles it (drops the video, re-offers the
 rest), but for popular artists the first result is often unplayable. To
 try: filter results with a `videos.list` status check before offering
 them, or prefer lyric / fan uploads; measure how often 150 happens.
+2026-10-29: on the laptop, *every* song failed with 150 while the face
+was open at `http://127.0.0.1:8765`; the same videos load from
+`http://localhost:8765`. YouTube refuses embeds on a bare-IP origin.
+The kiosk script and DEMO.md now use localhost. Re-measure 150 from
+localhost before acting on the item above.
 
 **2026-09-25 — Revisit the OpenAI switch for cost and speed.** Speech-to-
 text and replies moved to OpenAI for the demo (`gpt-transcribe`,

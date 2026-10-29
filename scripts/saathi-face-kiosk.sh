@@ -17,7 +17,11 @@
 set -euo pipefail
 
 PORT="${SAATHI_SCREEN_PORT:-8765}"
-URL="http://127.0.0.1:${PORT}/"
+# localhost, not 127.0.0.1: YouTube refuses to embed any video (error
+# 150) on a page whose origin is a bare IP; the same songs play from
+# http://localhost (checked 2026-10-29 in Chrome, official video and
+# lyric uploads alike). Same server, same machine.
+URL="http://localhost:${PORT}/"
 
 # Retry until the engine actually answers, so the first thing on screen
 # is never a browser's own connection-error page — SPEC.md's "no status

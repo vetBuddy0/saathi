@@ -31,8 +31,11 @@ set -a; . ~/.saathi/env; set +a
 ```sh
 uv run saathi smoke          # mic/speaker found, AI key accepted
 uv run saathi voice          # should say google-chirp3-hd, available now: yes
-uv run saathi run            # face on http://127.0.0.1:8765
+uv run saathi run            # face on http://localhost:8765
 ```
+
+Open the face at `localhost`, not `127.0.0.1`: YouTube refuses every
+embed (error 150) on a page whose address is a bare IP (2026-10-29).
 
 Open the page in Chrome (or `scripts/saathi-face-kiosk.sh`). Tests:
 `env PYTHONPATH= uv run pytest -q` (PYTHONPATH must be cleared on this
@@ -93,7 +96,7 @@ released (Groq was ~1.3 s but rate-limited; see TODO.md).
 ## Developer console
 
 Memory, personality, contacts and keys, for whoever sets Saathi up (not
-her screen). Laptop: open `http://127.0.0.1:8765/admin` on the same
+her screen). Laptop: open `http://localhost:8765/admin` on the same
 machine. Tablet: hold the face 5 s → setup dialog → **Developer console**.
 "How it works" shows one turn end to end; "Personality" shows the exact
 text the model receives. Edits apply from the next turn.
