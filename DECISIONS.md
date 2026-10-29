@@ -4350,3 +4350,15 @@ PRs #11–#15 merged into `android-app`.
   waited 3 × 300 ms of the harness's 3 s virtual-time budget. With the
   pairing section's timers it ran out about 1 in 5 times under load. It
   now waits for what it asserts. The assertions are unchanged.
+
+## 2026-10-29 — The reminder lane's clock can be set (a test was wrong)
+
+`test_a_due_reminder_is_said_with_a_done_card_and_a_reason_on_record`
+began failing at 04:00 UTC on the day it was written. It fired a reminder
+at a fixed 01:00 UTC, but her Yes on the card was marked done at the real
+time. "Done" counts only within `DONE_WITHIN` (3 h) of the reminder being
+said, so after 04:00 nothing was acked. The code was right; the test was
+not. With the owner's OK, `build_app(reminder_now=)` now gives the lane
+(ticks and the card's Yes) one clock that a test can set; it defaults to
+the real one. `test_reminder_lane`'s `_app` passes the test's `NOW`. The
+assertions are unchanged.

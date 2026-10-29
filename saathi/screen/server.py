@@ -529,6 +529,7 @@ def build_app(
     reminder_tick_seconds: float | None = _REMINDER_TICK_SECONDS,
     clock=None,
     clock_tick_seconds: float | None = _CLOCK_TICK_SECONDS,
+    reminder_now=None,
     inbox=None,
     inbox_tick_seconds: float | None = _INBOX_TICK_SECONDS,
 ) -> web.Application:
@@ -1141,6 +1142,14 @@ def build_app(
     # Lost: speaking over the call (the other person hears Saathi talk
     # over them) and a chime (both of them hear that too).
     reminder_cards: set[str] = set()
+    # What "now" is for the reminder lane: a tick, and her Yes on its
+    # card (done within DONE_WITHIN of being said). The real clock unless
+    # a test sets one, so a test's reminder and her tap share one time.
+    if reminder_now is None:
+
+        def reminder_now() -> datetime:
+            return datetime.now(timezone.utc)
+
     stale_card: dict[str, object] = {"id": None, "since": 0.0}
     # The silent card in this call: which call, the occurrences she has
     # answered on it (down for the rest of the call, even when another
@@ -1252,7 +1261,7 @@ def build_app(
         if path is None:
             return []
         if in_call():
-            show_reminders_silently(path, now or datetime.now(timezone.utc))
+            show_reminders_silently(path, now or reminder_now())
             return []
         if not free_to_speak_first():
             return []
@@ -1263,7 +1272,7 @@ def build_app(
         from saathi.initiative.policy import PolicyContext, evaluate
         from saathi.initiative.scheduler import InitiativeCandidate
 
-        now = now or datetime.now(timezone.utc)
+        now = now or reminder_now()
         with IdentityStore(path) as own:
             repeat_after, attempts = reminder_rules.settings(own)
             actions = reminder_rules.due(own, now, repeat_after=repeat_after, attempts=attempts)
@@ -1321,7 +1330,7 @@ def build_app(
         from saathi.identity.store import IdentityStore
         from saathi.initiative import reminders as reminder_rules
 
-        now = datetime.now(timezone.utc)
+        now = reminder_now()
         with IdentityStore(path) as own:
             if shown_silently is None:
                 done = reminder_rules.acknowledge(own, now)

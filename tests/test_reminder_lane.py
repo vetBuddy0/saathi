@@ -39,6 +39,9 @@ def _app(store, core, session=None, **kwargs):
         capture_source_id="src",
         store=store,
         reminder_tick_seconds=None,
+        # Her taps on a card happen at the test's time, not the real one:
+        # "done" counts only within DONE_WITHIN of the reminder being said.
+        reminder_now=lambda: NOW,
         **kwargs,
     )
 
