@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saathi.invalid/contracts/reply.schema.json",
+  "title": "Reply",
+  "description": "devices/{id}/inbox/{msgId}/replies/{replyId}. What she said back to a message. Written by the device only.",
+  "type": "object",
+  "required": [
+    "ts",
+    "text"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    }
+  }
+}
