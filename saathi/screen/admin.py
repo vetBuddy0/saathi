@@ -26,6 +26,10 @@ console can't make a state the rest of the system doesn't understand:
 - **Keys** are shown as set/missing only, never a value. On the phone the
   shell owns them (encrypted prefs); the page writes them through the
   shell's bridge, not through here.
+- **Pairing a phone** (2026-10-29) writes a 6-digit code to the family
+  cloud (`cloud/pairing.py`) through the same client the inbox polls
+  with; with no cloud on this run it answers 409 "Cloud is not set up"
+  rather than a code nobody can claim.
 
 After an edit the session recompiles her context in the background
 (`refresh_context`), between turns like every compile, so the next turn
@@ -70,6 +74,7 @@ MAX_EPISODES = 300
 MAX_TURNS = 20
 MAX_TEXT = 2000
 SOURCE_PREFIX = "Noted by the care team: "
+CLOUD_NOT_SET_UP = "Cloud is not set up"
 
 # What each key the engine reads is for, in the order the console lists
 # them. `GOOGLE_APPLICATION_CREDENTIALS` is a path to a JSON file; the
@@ -144,6 +149,13 @@ TABLES: dict[str, tuple[str, str, str]] = {
         "The reminder tick and her \"done\" (card or voice).",
         "Not sent.",
     ),
+    "cloud_links": (
+        "What the family's app already has from this device: which of their reminders "
+        "became which local one (and at which edit), which messages were said, which "
+        "reminder events were sent. The latest row per item wins.",
+        "The family inbox poll (cloud/inbox.py), every few seconds.",
+        "Not sent.",
+    ),
     "turns": (
         "One row per reply: how long each stage took, tokens, cost, which voice spoke. "
         "No words: what she said is not kept here.",
@@ -190,10 +202,14 @@ class Console:
         session: Any = None,
         info: Callable[[], dict[str, Any]] | None = None,
         settings_changed: Callable[[], None] | None = None,
+        cloud: Any = None,
     ) -> None:
         self.store_path = Path(store_path)
         self.session = session
         self._info = info
+        # The family cloud (cloud/inbox.py's Inbox: `.client`, `.device_id`),
+        # or None when this device has none -- pairing then answers 409.
+        self.cloud = cloud
         # Called on the loop after a setting is written, so an open face
         # shows it now (captions on the tablet, 2026-10-29) rather than
         # after its next reconnect.
@@ -543,6 +559,52 @@ class Console:
             store.create()
             write_preference(store, key, value)
 
+    # -- pairing a caregiver's phone (cloud/pairing.py) -------------------
+    # The code is written to Firestore by the device; the caregiver's app
+    # claims it. The console only shows it, its QR, and who has paired.
+
+    def _cloud(self) -> Any:
+        if self.cloud is None or getattr(self.cloud, "client", None) is None:
+            raise web.HTTPConflict(text=CLOUD_NOT_SET_UP)
+        return self.cloud
+
+    def paired(self) -> dict[str, Any]:
+        from saathi.cloud import pairing
+
+        cloud = self._cloud()
+        try:
+            caregivers = pairing.paired_caregivers(cloud.client, cloud.device_id)
+        except Exception as exc:
+            logger.exception("paired caregivers not read")
+            raise web.HTTPBadGateway(text=f"Couldn't reach the cloud: {exc}") from None
+        return {"caregivers": caregivers}
+
+    def pair(self) -> dict[str, Any]:
+        from saathi.call.family_server import qr_svg
+        from saathi.cloud import pairing
+
+        cloud = self._cloud()
+        now = datetime.now(timezone.utc)
+        try:
+            device = pairing.ensure_device(
+                cloud.client,
+                cloud.device_id,
+                now,
+                name=getattr(cloud, "device_name", None) or "Saathi",
+                device_uid=getattr(cloud, "device_uid", None),
+            )
+            code, expires_at = pairing.issue_code(cloud.client, cloud.device_id, now)
+        except Exception as exc:
+            logger.exception("pairing code not issued")
+            raise web.HTTPBadGateway(text=f"Couldn't reach the cloud: {exc}") from None
+        return {
+            "code": code,
+            "expires_at": expires_at.isoformat(),
+            "seconds": int((expires_at - now).total_seconds()),
+            "qr_svg": qr_svg(pairing.QR_PREFIX + code),
+            "caregivers": pairing.caregivers_of(device),
+        }
+
     def _refresh(self) -> None:
         refresh = getattr(self.session, "refresh_context", None)
         if callable(refresh):
@@ -703,4 +765,10 @@ def add_routes(app: web.Application, console: Console) -> None:
     app.router.add_get("/admin/api/reminders", getter(console.reminder_list))
     app.router.add_post("/admin/api/reminders", save_reminder)
     app.router.add_post("/admin/api/reminders/{reminder_id}/cancel", cancel_reminder)
+    @loopback
+    async def pair(_request):
+        return web.json_response(await run(console.pair), headers={"Cache-Control": "no-store"})
+
+    app.router.add_get("/admin/api/pairing", getter(console.paired))
+    app.router.add_post("/admin/api/pairing", pair)
     app.router.add_static("/admin/static/", STATIC_DIR)

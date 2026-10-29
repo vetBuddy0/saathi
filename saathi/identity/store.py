@@ -169,6 +169,32 @@ _SCHEMA: dict[str, str] = {
             kind TEXT NOT NULL
         )
     """,
+    # What this device has already exchanged with the caregivers' cloud
+    # (2026-10-29, `cloud/inbox.py`). Append-only; the latest row per
+    # (kind, remote_id) wins, like `preferences`:
+    #   kind "reminder": a caregiver's reminder doc -> the local
+    #     `reminders` row standing for it (`local_id`, NULL when it is
+    #     inactive or unusable), at its `updatedAt` (`version`). An edit
+    #     retires the old local row and appends a new one, so a remote
+    #     reminder can have several rows here over time.
+    #   kind "message": an inbox message that has been said to her
+    #     (`version` = its `createdAt`, the poll's cursor).
+    #   kind "event": a `reminder_events` row (`local_id`) pushed to
+    #     the cloud's `events`, once.
+    # Lost: a `remote_id` column on `reminders` (it can't hold the
+    # remote `updatedAt` an edit is recognised by, nor the two cursors)
+    # and a table per kind (three tables for one idea: "what the cloud
+    # already has").
+    "cloud_links": """
+        CREATE TABLE IF NOT EXISTS cloud_links (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL,
+            remote_id TEXT NOT NULL,
+            local_id INTEGER,
+            version TEXT,
+            ts TEXT NOT NULL
+        )
+    """,
     "initiatives": """
         CREATE TABLE IF NOT EXISTS initiatives (
             id INTEGER PRIMARY KEY,

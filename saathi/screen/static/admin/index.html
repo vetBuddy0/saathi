@@ -206,6 +206,18 @@
       <p class="muted small">No date: the next time it comes round. Every week repeats on the date's weekday.</p>
       <div class="table-wrap"><table class="table" id="reminders"></table></div>
       <details><summary>Recently said, done or missed</summary><ul class="rows" id="reminder-history"></ul></details>
+
+      <h2>Family phones</h2>
+      <p class="lead">Her family pair a phone once; then they can send her messages, which Saathi reads to her
+        word for word, and set her reminders. Press the button and type the code into the family app, or scan it.</p>
+      <div class="actions"><button class="btn" type="button" id="pair">Pair a phone</button>
+        <span class="muted small" id="pair-status"></span></div>
+      <div class="pairing" id="pairing" hidden>
+        <div class="pairing__code" id="pair-code"></div>
+        <div class="pairing__qr" id="pair-qr"></div>
+        <p class="muted" id="pair-left"></p>
+      </div>
+      <ul class="rows" id="caregivers"></ul>
     </section>
   </main>
 

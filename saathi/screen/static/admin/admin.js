@@ -363,6 +363,75 @@ $("reminder-form").addEventListener("submit", (event) => {
 });
 $("reminder-new").addEventListener("click", resetReminderForm);
 
+// -- Family phones (cloud/pairing.py) -------------------------------------------------
+// "Pair a phone" writes a 6-digit code to the family cloud; the caregiver's
+// app claims it. Shown with its QR and a countdown; while it is up, the
+// list of paired phones is re-read so a phone that just claimed it appears.
+// With no cloud on this run the server says so (409) and that is shown here,
+// as a state of the section, not as an error toast.
+
+let pairTimer = null;
+
+function drawCaregivers(list) {
+  $("caregivers").replaceChildren(...(list.length
+    ? list.map((uid) => h("li", { class: "row" },
+        h("div", { class: "row__text" }, uid),
+        h("span", { class: "pill pill--good" }, "paired")))
+    : [empty("No phone paired yet.")]));
+}
+
+function stopPairing() {
+  clearInterval(pairTimer);
+  pairTimer = null;
+}
+
+async function loadCaregivers() {
+  try {
+    drawCaregivers((await api("pairing")).caregivers || []);
+    $("pair-status").textContent = "";
+  } catch (error) {
+    $("pair-status").textContent = error.message;
+  }
+}
+
+function showPairing(data) {
+  stopPairing();
+  $("pair-code").textContent = data.code;
+  // The QR is SVG the server drew from the code; parsed, never run.
+  const svg = new DOMParser().parseFromString(data.qr_svg, "text/html").body.querySelector("svg");
+  $("pair-qr").replaceChildren(...(svg ? [document.importNode(svg, true)] : []));
+  $("pairing").classList.remove("pairing--expired");
+  $("pairing").hidden = false;
+  drawCaregivers(data.caregivers || []);
+  const ends = Date.now() + data.seconds * 1000;
+  let ticks = 0;
+  const tick = () => {
+    const left = Math.max(0, Math.round((ends - Date.now()) / 1000));
+    if (left === 0) {
+      stopPairing();
+      $("pairing").classList.add("pairing--expired");
+      $("pair-left").textContent = "This code has expired. Press Pair a phone for a new one.";
+      return;
+    }
+    $("pair-left").textContent = `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+    ticks += 1;
+    if (ticks % 5 === 0) loadCaregivers();
+  };
+  tick();
+  pairTimer = setInterval(tick, 1000);
+}
+
+$("pair").addEventListener("click", async () => {
+  $("pair-status").textContent = "";
+  try {
+    showPairing(await api("pairing", { json: {} }));
+  } catch (error) {
+    stopPairing();
+    $("pairing").hidden = true;
+    $("pair-status").textContent = error.message;
+  }
+});
+
 // -- Keys & settings ----------------------------------------------------------------
 
 function drawKeys(serverKeys) {
@@ -502,3 +571,4 @@ const TABS = ["how", "memory", "hood", "persona", "contacts", "keys"];
 const wanted = (location.hash || "").slice(1);
 show(TABS.includes(wanted) ? wanted : "how");
 loadAll();
+loadCaregivers();

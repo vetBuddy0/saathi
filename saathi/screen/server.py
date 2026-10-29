@@ -178,6 +178,12 @@ off; the window after her name alone ("Saathi" ... "Yes?") stays,
 because there she has just addressed Saathi. Lost: a shorter window
 (the video still talks within any window) and a voice match (no
 speaker model on the device).
+
+The family inbox (2026-10-29, `inbox`, cloud/inbox.py): a message her
+caregivers sent from their app is said between turns, word for word,
+the way a reminder is, and her next words go back to them as the
+reply. Off unless `build_app` is given an inbox; nothing crosses this
+socket for it.
 """
 
 from __future__ import annotations
@@ -263,6 +269,17 @@ _TIMER_SAY_WITHIN = 300.0
 _TIMER_NOTE = "the timer she set has run out; the clock beside you shows it"
 CHECK_CLOCK = web.AppKey("check_clock", object)
 _CLOCK_TASK = web.AppKey("clock_task", asyncio.Task)
+
+# The family inbox (cloud/inbox.py): how often the cloud is asked for
+# messages to read her (and her caregivers' reminders are synced).
+_INBOX_TICK_SECONDS = 10.0
+_MESSAGE_NOTE = (
+    "you read her a message from her family, in their words. What she says next is "
+    "sent to them as her reply"
+)
+# For tests: one tick of the inbox lane, awaited.
+CHECK_INBOX = web.AppKey("check_inbox", object)
+_INBOX_TASK = web.AppKey("inbox_task", asyncio.Task)
 
 # Robustness pass (checkpoint 2): a 401/429/timeout/connection-reset from
 # Groq used to be an uncaught exception with nowhere good to land — the
@@ -512,6 +529,8 @@ def build_app(
     reminder_tick_seconds: float | None = _REMINDER_TICK_SECONDS,
     clock=None,
     clock_tick_seconds: float | None = _CLOCK_TICK_SECONDS,
+    inbox=None,
+    inbox_tick_seconds: float | None = _INBOX_TICK_SECONDS,
 ) -> web.Application:
     app = web.Application()
     websockets: set[web.WebSocketResponse] = set()
@@ -538,6 +557,8 @@ def build_app(
         """One exchange to the cloud copy (cloud/sync.py), with the clip
         the transcriber heard. Only queues: the upload never delays her
         reply."""
+        if inbox is not None:
+            reply_heard(heard)  # her answer to a family message, if it was one
         if cloud is not None:
             cloud.record_turn(heard, reply, audio=getattr(session, "last_audio", None))
 
@@ -1317,6 +1338,128 @@ def build_app(
         app.on_startup.append(start_clock)
         app.on_cleanup.append(stop_clock)
 
+    # -- The family inbox (cloud/inbox.py) -------------------------------
+    # A message from her family is said like a reminder: only when she
+    # is free and no card is in the way, `core` taking "initiative",
+    # with why on record. The poll is the network, so it runs on the
+    # executor; speaking happens back here on the loop. One message per
+    # tick, oldest first, so her answer belongs to exactly one: her next
+    # words in the conversation that follows (the window after speaking
+    # first, or talking over it) go to whoever sent it. The conversation
+    # closing (IDLE or SLEEPING) ends that. It counts as said once the
+    # state leaves SPEAKING -- finished, or interrupted by her. Like a
+    # reminder's "fired", that is also what a failed text-to-speech
+    # looks like (say_first logs it and carries on); lost: a "said"
+    # signal out of say_first, which the reminder and clock lanes share.
+    inbox_reply: dict[str, object] = {"message": None, "said": False}
+    inbox_failing = {"value": False}
+
+    def _in_background(what: str, fn, *args) -> None:
+        future = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
+        def finished(done) -> None:
+            if not done.cancelled() and done.exception() is not None:
+                logger.error("%s failed", what, exc_info=done.exception())
+
+        future.add_done_callback(finished)
+
+    def follow_message(state, _event: Event) -> None:
+        message = inbox_reply["message"]
+        if message is None:
+            return
+        if not inbox_reply["said"] and state != State.SPEAKING:
+            inbox_reply["said"] = True
+            _in_background(
+                "marking a message spoken",
+                inbox.mark_spoken,
+                message.id,
+                datetime.now(timezone.utc),
+            )
+        if state in (State.IDLE, State.SLEEPING):
+            inbox_reply["message"] = None
+
+    def reply_heard(heard: str) -> None:
+        message = inbox_reply["message"]
+        if message is None or not inbox_reply["said"]:
+            return
+        inbox_reply["message"] = None
+        logger.info("her reply to message %s: %r", message.id, heard)
+        _in_background(
+            "sending her reply", inbox.record_reply, message.id, heard, datetime.now(timezone.utc)
+        )
+
+    async def check_inbox(now: datetime | None = None) -> list:
+        """One tick: poll (reminders in, events out, messages to say),
+        then say the oldest message if she is free. Returns what was
+        said."""
+        if inbox is None:
+            return []
+        loop = asyncio.get_running_loop()
+        messages = await loop.run_in_executor(None, inbox.check, now)
+        if not messages or inbox_reply["message"] is not None:
+            return []
+        if not free_to_speak_first() or _card_in_the_way():
+            return []
+        message = messages[0]
+        path = getattr(store, "path", None)
+        if path is not None:
+            from saathi.identity.store import IdentityStore
+            from saathi.initiative.policy import PolicyContext, evaluate
+            from saathi.initiative.scheduler import InitiativeCandidate
+
+            # Logged before `core` takes the initiative, as the reminder
+            # lane does: a failure here must not leave the face SPEAKING
+            # with nothing said. What the policy holds back stays unsaid.
+            reason = f"Message from {message.sender or 'family'} [message_id={message.id}]"
+            with IdentityStore(path) as own:
+                rows = evaluate(
+                    own,
+                    [InitiativeCandidate(kind="scheduled", reason=reason)],
+                    PolicyContext(presence=True),
+                    now=now or datetime.now(timezone.utc),
+                )
+            if any(row["suppressed_by"] is not None for row in rows):
+                return []
+        if not core.handle(Event("initiative")):
+            return []
+        inbox_reply["message"], inbox_reply["said"] = message, False
+        logger.info("message said: %r", message.line)
+        say_first(message.line, _MESSAGE_NOTE)
+        return [message]
+
+    app[CHECK_INBOX] = check_inbox
+
+    if inbox is not None:
+        core.subscribe(follow_message)
+
+    if inbox is not None and inbox_tick_seconds:
+
+        async def inbox_ticks() -> None:
+            while True:
+                await asyncio.sleep(inbox_tick_seconds)
+                try:
+                    await check_inbox()
+                    inbox_failing["value"] = False
+                except Exception:
+                    # Offline is normal: the first failure in a row gets
+                    # the traceback, the rest a line each.
+                    if not inbox_failing["value"]:
+                        logger.exception("inbox tick failed")
+                    else:
+                        logger.warning("inbox tick failed again")
+                    inbox_failing["value"] = True
+
+        async def start_inbox(app_: web.Application) -> None:
+            app_[_INBOX_TASK] = asyncio.get_running_loop().create_task(inbox_ticks())
+
+        async def stop_inbox(app_: web.Application) -> None:
+            task = app_.get(_INBOX_TASK)
+            if task is not None:
+                task.cancel()
+
+        app.on_startup.append(start_inbox)
+        app.on_cleanup.append(stop_inbox)
+
     async def close_window_on_cleanup(_app: web.Application) -> None:
         close_window()
 
@@ -1615,6 +1758,7 @@ def build_app(
                 session=session,
                 info=admin_info,
                 settings_changed=lambda: (_send_all(_settings_message(store)), refresh_wake()),
+                cloud=inbox,
             ),
         )
     app.router.add_get("/ws", websocket_handler)
