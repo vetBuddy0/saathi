@@ -1,0 +1,345 @@
+rules_version = '2';
+
+// Why this file exists: the tablet, the caregiver app and the Cloud
+// Functions all talk to one Firestore, and the only thing standing between
+// a family member and a stranger reading her conversations is this file.
+// The shapes it enforces are the ones in contracts/schemas/; the rules
+// tests in contracts/test/ write the samples in contracts/samples/ through
+// these rules, so a schema and a rule cannot drift apart unnoticed.
+//
+// Who is who:
+//   - The device signs in as its own Email/Password user,
+//     device-{id}@saathi.invalid, and devices/{id}.deviceUid is that uid.
+//   - A caregiver is any signed-in user whose uid is in
+//     devices/{id}.caregivers. There is no caregiver role or claim: the
+//     array is the whole membership model.
+//
+// Contested decisions (the option that lost, and why):
+//   - Lost: a separate devices/{id}/caregivers/{uid} membership
+//     collection. The app's "my devices" screen needs one
+//     array-contains query; a subcollection would need a collection-group
+//     query plus an index, for a list that holds two or three people.
+//   - Lost: claiming a pairing code with the code alone, no extra field.
+//     A rule on devices/{id} cannot discover which pairing/{code} doc
+//     justifies the write, so the claim batch also sets
+//     devices/{id}.pairingCode. This is the one field beyond the shared
+//     contract; it is optional and only the claim writes it.
+//   - Lost: letting a device overwrite another device's expired pairing
+//     doc when its random code collides. "Its own pairing docs" is the
+//     contract; on a collision the device picks another code.
+//   - Lost: shape checks only on caregiver writes. The device's writes are
+//     checked too, so a device client that drifts from the contract fails
+//     against the emulator instead of writing documents the app can't read.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- helpers -------------------------------------------------------
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function devicePath(deviceId) {
+      return /databases/$(database)/documents/devices/$(deviceId);
+    }
+
+    function pairingPath(code) {
+      return /databases/$(database)/documents/pairing/$(code);
+    }
+
+    // The signed-in user is this device's own account.
+    function isDevice(deviceId) {
+      return signedIn()
+        && exists(devicePath(deviceId))
+        && get(devicePath(deviceId)).data.deviceUid == request.auth.uid;
+    }
+
+    // The signed-in user is listed as one of this device's caregivers.
+    function isCaregiver(deviceId) {
+      return signedIn()
+        && exists(devicePath(deviceId))
+        && request.auth.uid in get(devicePath(deviceId)).data.caregivers;
+    }
+
+    // A device id is random and long enough not to be guessed. The device
+    // account's email is derived from it, and Email/Password sign-up is
+    // open, so whoever registers device-{id}@saathi.invalid first owns
+    // devices/{id}: an id nobody can predict is what makes that the real
+    // tablet. It also keeps the id safe to splice into a regex.
+    function validDeviceId(id) {
+      return id is string && id.matches('^[A-Za-z0-9_-]{16,64}$');
+    }
+
+    function isText(v, max) {
+      return v is string && v.size() > 0 && v.size() <= max;
+    }
+
+    function optional(data, key, test) {
+      return !(key in data) || test;
+    }
+
+    // ---- devices/{deviceId} --------------------------------------------
+
+    function validDevice(d) {
+      return d.keys().hasAll(['name', 'createdAt', 'caregivers', 'deviceUid'])
+        && d.keys().hasOnly(['name', 'createdAt', 'caregivers', 'deviceUid', 'pairingCode'])
+        && isText(d.name, 100)
+        && d.createdAt is timestamp
+        && d.caregivers is list
+        && d.caregivers.size() <= 20
+        && d.deviceUid is string
+        && optional(d, 'pairingCode', d.get('pairingCode', '') is string
+                                      && d.get('pairingCode', '').matches('^[0-9]{6}$'));
+    }
+
+    // A caregiver joining through an unexpired, unclaimed pairing code that
+    // this same batch claims. get() is the state before the batch and
+    // getAfter() the state after it, so the code must have been open
+    // before and be claimed by this uid after: an old code this caregiver
+    // claimed once cannot be replayed to rejoin after the device removed
+    // them.
+    function joinsByPairing(deviceId) {
+      let uid = request.auth.uid;
+      let before = resource.data;
+      let after = request.resource.data;
+      let code = after.get('pairingCode', '');
+      return code is string
+        && code.matches('^[0-9]{6}$')
+        && !(uid in before.caregivers)
+        && after.diff(before).affectedKeys().hasOnly(['caregivers', 'pairingCode'])
+        && after.caregivers.toSet() == before.caregivers.toSet().union([uid].toSet())
+        && after.caregivers.size() == before.caregivers.size() + 1
+        && exists(pairingPath(code))
+        && get(pairingPath(code)).data.deviceId == deviceId
+        && get(pairingPath(code)).data.expiresAt > request.time
+        && !('claimedBy' in get(pairingPath(code)).data)
+        && getAfter(pairingPath(code)).data.get('claimedBy', '') == uid;
+    }
+
+    // A caregiver may rename the device, or leave it. They may never take
+    // anyone else off the list or put anyone on it (joining is pairing).
+    function caregiverEdits(deviceId) {
+      let uid = request.auth.uid;
+      let before = resource.data;
+      let after = request.resource.data;
+      // Sizes as well as sets: a set comparison alone would let a caregiver
+      // pad the list with duplicates up to the cap and block every pairing.
+      return uid in before.caregivers
+        && after.diff(before).affectedKeys().hasOnly(['name', 'caregivers'])
+        && ((after.caregivers.toSet() == before.caregivers.toSet()
+             && after.caregivers.size() == before.caregivers.size())
+            || (after.caregivers.toSet() == before.caregivers.toSet().difference([uid].toSet())
+                && after.caregivers.size() == before.caregivers.size() - 1));
+    }
+
+    match /devices/{deviceId} {
+      // resource.data rather than get(): the app lists its devices with
+      // where('caregivers', 'array-contains', uid), and a query is only
+      // allowed when the rule can be proved from the query itself.
+      allow read: if signedIn()
+        && (resource.data.deviceUid == request.auth.uid
+            || request.auth.uid in resource.data.caregivers);
+
+      // The device creates its own doc. Binding the doc id to the auth
+      // email means no one can create devices/{id} for a device id that
+      // isn't theirs, and it starts with nobody on the list.
+      allow create: if signedIn()
+        && validDeviceId(deviceId)
+        && request.auth.token.email == 'device-' + deviceId + '@saathi.invalid'
+        && validDevice(request.resource.data)
+        && request.resource.data.deviceUid == request.auth.uid
+        && request.resource.data.caregivers.size() == 0
+        && !('pairingCode' in request.resource.data);
+
+      allow update: if signedIn()
+        && validDevice(request.resource.data)
+        && request.resource.data.deviceUid == resource.data.deviceUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && (resource.data.deviceUid == request.auth.uid  // the device: anything else
+            || caregiverEdits(deviceId)
+            || joinsByPairing(deviceId));
+
+      allow delete: if signedIn() && resource.data.deviceUid == request.auth.uid;
+
+      // ---- turns: written by the device, read by both ----
+      match /turns/{turnId} {
+        function validTurn(d) {
+          return d.keys().hasAll(['ts', 'heard', 'said', 'language'])
+            && d.keys().hasOnly(['ts', 'heard', 'said', 'language', 'clipPath'])
+            && d.ts is timestamp
+            && d.heard is string
+            && d.said is string
+            && isText(d.language, 20)
+            && optional(d, 'clipPath', d.get('clipPath', '') is string
+                                       && d.get('clipPath', '').matches('^devices/' + deviceId + '/audio/[^/]+[.]wav$'));
+        }
+        allow read: if isDevice(deviceId) || isCaregiver(deviceId);
+        allow create, update: if isDevice(deviceId) && validTurn(request.resource.data);
+        allow delete: if isDevice(deviceId);
+      }
+
+      // ---- events: written by the device, read by both ----
+      match /events/{eventId} {
+        function validEvent(d) {
+          return d.keys().hasAll(['ts', 'kind', 'text'])
+            && d.keys().hasOnly(['ts', 'kind', 'text', 'reminderId'])
+            && d.ts is timestamp
+            && d.kind in ['fired', 'acked', 'missed', 'timer_done', 'message_spoken']
+            && d.text is string
+            && optional(d, 'reminderId', isText(d.get('reminderId', ''), 200));
+        }
+        allow read: if isDevice(deviceId) || isCaregiver(deviceId);
+        allow create, update: if isDevice(deviceId) && validEvent(request.resource.data);
+        allow delete: if isDevice(deviceId);
+      }
+
+      // ---- inbox: caregivers write messages, the device marks them spoken ----
+      match /inbox/{msgId} {
+        function validMessage(d) {
+          return d.keys().hasAll(['from', 'fromUid', 'text', 'createdAt'])
+            && d.keys().hasOnly(['from', 'fromUid', 'text', 'createdAt', 'spokenAt'])
+            && isText(d.from, 100)
+            && d.fromUid is string
+            && isText(d.text, 1000)
+            && d.createdAt is timestamp
+            && optional(d, 'spokenAt', d.get('spokenAt', null) is timestamp);
+        }
+        allow read: if isDevice(deviceId) || isCaregiver(deviceId);
+
+        // Signed with the sender's own uid, and never pre-marked spoken.
+        allow create: if isCaregiver(deviceId)
+          && validMessage(request.resource.data)
+          && request.resource.data.fromUid == request.auth.uid
+          && !('spokenAt' in request.resource.data);
+
+        // Only the device writes spokenAt, and nothing else about a message.
+        allow update: if isDevice(deviceId)
+          && validMessage(request.resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['spokenAt']);
+
+        // The sender may take back a message she hasn't heard yet.
+        allow delete: if isDevice(deviceId)
+          || (isCaregiver(deviceId)
+              && resource.data.fromUid == request.auth.uid
+              && !('spokenAt' in resource.data));
+
+        // ---- replies: what she said back; only the device writes them ----
+        match /replies/{replyId} {
+          function validReply(d) {
+            return d.keys().hasOnly(['ts', 'text'])
+              && d.keys().hasAll(['ts', 'text'])
+              && d.ts is timestamp
+              && isText(d.text, 4000);
+          }
+          allow read: if isDevice(deviceId) || isCaregiver(deviceId);
+          allow create, update: if isDevice(deviceId) && validReply(request.resource.data);
+          allow delete: if isDevice(deviceId);
+        }
+      }
+
+      // ---- reminders: set by caregivers, read by the device ----
+      match /reminders/{rid} {
+        function validReminder(d) {
+          return d.keys().hasAll(['text', 'time', 'repeat', 'active', 'createdBy', 'updatedAt'])
+            && d.keys().hasOnly(['text', 'time', 'date', 'repeat', 'active', 'createdBy', 'updatedAt'])
+            && isText(d.text, 500)
+            && d.time is string
+            && d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+            && optional(d, 'date', d.get('date', '') is string
+                                   && d.get('date', '').matches('^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'))
+            && d.repeat in ['none', 'daily', 'weekdays', 'weekly']
+            && d.active is bool
+            && d.createdBy is string
+            && d.updatedAt is timestamp;
+        }
+        allow read: if isDevice(deviceId) || isCaregiver(deviceId);
+
+        allow create: if isCaregiver(deviceId)
+          && validReminder(request.resource.data)
+          && request.resource.data.createdBy == request.auth.uid;
+
+        // Any caregiver of this device may edit any of its reminders (a
+        // family shares them), but who created it never changes. The
+        // device may only switch one off (a one-off that has been said).
+        allow update: if validReminder(request.resource.data)
+          && request.resource.data.createdBy == resource.data.createdBy
+          && (isCaregiver(deviceId)
+              || (isDevice(deviceId)
+                  && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active', 'updatedAt'])));
+
+        allow delete: if isCaregiver(deviceId);
+      }
+
+      // No catch-all: a collection under a device that isn't listed above
+      // is denied to everyone, the device included. Lost: letting the
+      // device write any subcollection of its own -- a new collection
+      // should arrive as a contract change both ends see, not as data
+      // the app has no schema for.
+    }
+
+    // ---- pairing/{code} ------------------------------------------------
+    match /pairing/{code} {
+      function validPairing(d) {
+        return d.keys().hasAll(['deviceId', 'expiresAt'])
+          && d.keys().hasOnly(['deviceId', 'expiresAt', 'claimedBy'])
+          && validDeviceId(d.deviceId)
+          && d.expiresAt is timestamp;
+      }
+
+      function ownsPairing(data) {
+        return isDevice(data.deviceId);
+      }
+
+      // The device lists and reads its own codes. Anyone signed in may
+      // fetch one code they already know, while it is open, so the app
+      // can learn which device it is for; the claimer may still read it
+      // afterwards. Listing is never open to them: that would hand out
+      // every live code at once.
+      allow get: if signedIn()
+        && (ownsPairing(resource.data)
+            || (resource.data.expiresAt > request.time && !('claimedBy' in resource.data))
+            || resource.data.get('claimedBy', '') == request.auth.uid);
+      allow list: if signedIn() && ownsPairing(resource.data);
+
+      // The device opens a code for itself: 6 digits, at most 10 minutes
+      // out (plus one minute for the tablet's clock), unclaimed. On a
+      // collision create fails and the device picks another code.
+      allow create: if code.matches('^[0-9]{6}$')
+        && validPairing(request.resource.data)
+        && ownsPairing(request.resource.data)
+        && !('claimedBy' in request.resource.data)
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(11, 'm');
+
+      // A caregiver claims an open code by setting claimedBy to their own
+      // uid, in the same batch that adds them to the device's caregivers
+      // (getAfter sees that write). Single use: an already claimed code
+      // can't be claimed again.
+      allow update: if signedIn()
+        && validPairing(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['claimedBy'])
+        && !('claimedBy' in resource.data)
+        && resource.data.expiresAt > request.time
+        && request.resource.data.claimedBy == request.auth.uid
+        && request.auth.uid in getAfter(devicePath(resource.data.deviceId)).data.caregivers
+        && getAfter(devicePath(resource.data.deviceId)).data.get('pairingCode', '') == code;
+
+      allow delete: if signedIn() && ownsPairing(resource.data);
+    }
+
+    // ---- users/{uid} ---------------------------------------------------
+    match /users/{uid} {
+      function validUser(d) {
+        return d.keys().hasOnly(['name', 'fcmTokens'])
+          && d.keys().hasAll(['name', 'fcmTokens'])
+          && isText(d.name, 100)
+          && d.fcmTokens is list
+          && d.fcmTokens.size() <= 20;
+      }
+      allow read, delete: if signedIn() && request.auth.uid == uid;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && validUser(request.resource.data);
+    }
+  }
+}
