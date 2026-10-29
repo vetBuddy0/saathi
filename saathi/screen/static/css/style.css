@@ -605,6 +605,103 @@ body.media--fullscreen.call--open #face-container {
   }
 }
 
+/* A card during a call (2026-10-29): compact, a band across the top of
+   the phone panel, and the phone's own content moves down below it, so
+   the card never covers End call (tests/test_call_card_layout.py). Any
+   card: a reminder's "Done?" or a "Timer done" shown silently while she
+   talks (screen/server.py), the Holding card of a spacebar hang-up, the
+   "Answer?" of a ringing call. Its buttons sit in one row; the floors
+   still hold (no text under 32px, no target under 100px tall). Lost:
+   the full right-half card over the phone panel, which hid End call
+   exactly when she might want it, and a card over the face, which must
+   never be hidden. The band is capped and clips rather than grow into
+   the button. The guarantee is geometric, not a hope about content:
+   End call is pinned to the bottom (`--call-end-zone` is it and the space
+   round it) and the band may never reach into that zone, so on a short
+   screen a tall card covers the caller's name, never the button. The
+   name, number and timer sit between the two; at 1920x1080 every kind of
+   card with a two-line title ends above them (`--call-card-band`). The
+   title and a read-back's value stop at two lines, so the buttons, last
+   in the card, are not what the clip takes. */
+body.call--open {
+  --call-card-band: 36vh;
+  --call-end-zone: calc(140px + 8vh);
+}
+body.call--open #card-panel {
+  inset: 0 0 auto 60%;
+  max-height: calc(100% - var(--call-end-zone));
+  overflow: hidden;
+  align-items: flex-start;
+  padding: 2vh 1.6vw;
+  border-left: 1px solid rgba(255, 206, 133, 0.12);
+  border-bottom: 1px solid rgba(255, 206, 133, 0.24);
+}
+body.call--open.card--open #call-panel {
+  padding-top: calc(var(--call-card-band) + 2vh);
+  padding-bottom: var(--call-end-zone);
+  gap: 2.5vh;
+}
+body.call--open.card--open .call-panel__end {
+  position: absolute;
+  bottom: 4vh;
+  left: 50%;
+  transform: translateX(-50%);
+}
+body.call--open.card--open .call-panel__name {
+  font-size: clamp(40px, 3vw, 64px);
+}
+body.call--open.card--open .call-panel__timer {
+  font-size: clamp(40px, 3vw, 64px);
+}
+body.call--open .card {
+  flex-flow: row wrap;
+  align-items: stretch;
+  gap: 1.5vh 0.8vw;
+}
+body.call--open .card__title {
+  flex: 1 1 100%;
+  font-size: clamp(32px, 1.9vw, 40px);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+body.call--open .card__options {
+  flex: 1 1 100%;
+  flex-direction: row;
+  gap: 0.8vw;
+}
+body.call--open .card__options--row {
+  flex: 2 1 0;
+}
+body.call--open .card__option {
+  flex: 1 1 0;
+  min-width: 0;
+}
+body.call--open .card__option,
+body.call--open .card__dismiss {
+  min-height: 100px;
+  padding: 0 1vw;
+  font-size: 32px;
+}
+body.call--open .card__dismiss {
+  flex: 1 1 0;
+}
+body.call--open .card__image {
+  display: none;
+}
+body.call--open .card__value {
+  flex: 1 1 100%;
+  font-size: clamp(44px, 3vw, 64px);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+body.call--open .card__progress {
+  flex: 1 1 100%;
+}
+
 /* The clock (clock-panel.js, 2026-10-29): the time and date in big
    figures, her timers counting down and a stopwatch, on the right 40%
    like the phone panel; the face fits the left 60%. A card, a call or

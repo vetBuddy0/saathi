@@ -19,7 +19,8 @@
 // CHIME_AGAIN_MS while it is shown and not stopped, like a kitchen
 // timer, but never more often. Behind a card, the phone or the
 // media panel the clock is hidden (those are what she is answering or
-// watching); the spoken "done" still reaches her.
+// watching); the spoken "done" still reaches her. During a call it is
+// silent, chime and words both, and a small card says it instead.
 //
 // The time and date are content she asked for, beside the face like
 // the phone's screen -- not a status label under it (CLAUDE.md).
@@ -136,6 +137,11 @@ export function createClockPanel(send, options = {}) {
   }
 
   function ring() {
+    // Not during a call: the other person would hear it too. The phone
+    // panel's compact "Timer done" card is the signal then. If the timer
+    // is still shown when the call ends (the server keeps a finished one
+    // a minute) and nobody stopped it, it chimes then.
+    if (document.body.classList.contains("call--open")) return;
     const t = localNow();
     let due = false;
     for (const timer of state.timers) {

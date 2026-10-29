@@ -4017,3 +4017,57 @@ stopwatch etc".
   day after one "what time is it?".
 - **Tests changed.** test_cli's two pinned tool sets gained `clock`: the
   owner changed what the model may do.
+
+## 2026-10-29 — A reminder or timer during a call: a small silent card
+
+The owner: "the card should also regardless showup even if in call use a
+smaller card or something for those events", and chose a small silent
+card. Before this, a reminder or timer due during a call showed nothing
+until the call ended, and any card that was up covered the phone
+panel's End call button.
+- **Layout** (`style.css`, pinned by `tests/test_call_card_layout.py`).
+  While a call is on, every card (reminder, timer, a spacebar Holding
+  card, a ringing call's "Answer?") is a band across the top of the
+  phone panel, buttons in one row, with the same floors (100px targets,
+  32px text, a way out). The phone's name, number and timer move below
+  the band. End call is pinned to the bottom and the band may not reach
+  into that zone. The title and a read-back's value stop at two lines,
+  so the buttons always fit, and anything taller is clipped. On a short
+  screen a tall card can cover the caller's name, never the button.
+  Lost: the right-half card over the phone panel (it hid End call), and
+  a card over the face (the face is never hidden).
+- **Reminders.** During a call a due reminder's "Done?" card is shown,
+  not said, and nothing is recorded: no `fired` event and no
+  `initiatives` row. An attempt is a saying, and she has not heard one,
+  so the repeats and the `missed` count are unchanged. After the call the
+  lane says it as before. Yes on the silent card marks that occurrence
+  done (it was never said, so `acknowledge()`'s "said in the last 3
+  hours" can't find it). Once she answers the card (No or "Never mind"),
+  that reminder stays down for the rest of the call, even if another one
+  comes due. If a Holding card pushed it off, it comes back. It never
+  replaces another card. A reminder that only has its `missed` left gets
+  no card, and its `missed` is recorded after the call, as before. With
+  no voice session there is no card: no reminder is ever said then.
+- **Timers.** The clock panel is hidden during a call, so a timer that
+  finishes then gets a "Timer done" read-back card (value "Tea", or
+  "1 minute"). It is said after the call within `_TIMER_SAY_WITHIN`, as
+  before. After the call the card is cleared when it is said, or when it
+  is too late to say. Its Okay is the clock's Stop: the timer goes, and
+  nothing is said after the call, the same way a reminder's Yes means
+  "done". It may replace a silent reminder card, which then waits for it
+  like any card. It does not replace a ringing call's "Answer?" or a
+  Holding card. It stays up for at most 5 minutes of timer, less than
+  the 10 minutes a card holds a reminder back, so the two cards can't
+  keep replacing each other.
+- **No chime in a call.** `clock-panel.js` was still chiming a finished
+  timer behind the hidden clock during a call. It now waits for the call
+  to end. If the clock still shows the timer then (it keeps a finished
+  one for a minute) and nobody stopped it, it chimes.
+- **Lost:** saying it over the call (the other person hears Saathi talk
+  over them, and she has to follow two voices), and a chime or tone
+  (both ends hear it, and it means nothing without words). Also lost:
+  holding everything until the call ends, which was the old behaviour
+  and what the owner asked to change.
+- **Tests.** No existing assertion changed. `CHECK_REMINDERS` and
+  `CHECK_CLOCK` still return `[]` during a call: their return value is
+  what was said or given up on, and a silent card is neither.

@@ -195,7 +195,7 @@ from aiohttp import WSCloseCode, WSMsgType, web
 from saathi.audio.capture import Capture
 from saathi.audio.wake import Endpointer, vad_is_speech
 from saathi.core import Core, Event, State
-from saathi.screen.cards import confirm
+from saathi.screen.cards import confirm, readback
 from saathi.identity.preferences import (
     CAPTIONS_KEY,
     LANGUAGE_KEY,
@@ -1110,8 +1110,32 @@ def build_app(
     # reminder ever fires. An empty room gets the repeats, then a
     # `missed`. The noticed/social lane stays off: it changes what she
     # hears unprompted, and is the owner's call.
+    #
+    # During a call (owner, 2026-10-29: "the card should also regardless
+    # showup even if in call") a due reminder is shown, not said: its
+    # "Done?" card comes up small beside the phone panel and Saathi stays
+    # quiet. Nothing is recorded for that showing -- an attempt is a
+    # saying, and she has not heard one -- so once the call is over the
+    # lane says it as it would have. A Yes during the call marks it done.
+    # Lost: speaking over the call (the other person hears Saathi talk
+    # over them) and a chime (both of them hear that too).
     reminder_cards: set[str] = set()
     stale_card: dict[str, object] = {"id": None, "since": 0.0}
+    # The silent card in this call: which call, the occurrences she has
+    # answered on it (down for the rest of the call, even when another
+    # reminder comes due), and the occurrences and id of the one up --
+    # so a tick does not put it up again, but does after a Holding card
+    # pushed it off. `silent_actions` is what each one's Yes marks done.
+    silent_reminders: dict[str, object] = {
+        "call": None,
+        "down": set(),
+        "shown": frozenset(),
+        "id": None,
+    }
+    silent_actions: dict[str, list] = {}
+
+    def in_call() -> bool:
+        return calls is not None and calls.current_id is not None
 
     def _card_in_the_way() -> bool:
         current = cards.current if cards is not None else None
@@ -1126,7 +1150,7 @@ def build_app(
         return (
             session is not None
             and core.state in (State.IDLE, State.SLEEPING)
-            and not (calls is not None and calls.current_id is not None)
+            and not in_call()
             and not (hold is not None and hold.active)
         )
 
@@ -1157,11 +1181,59 @@ def build_app(
 
         asyncio.get_running_loop().create_task(speak())
 
+    def show_reminders_silently(path, now: datetime) -> None:
+        """During a call: the due reminders' "Done?" card, compact
+        (style.css) and unspoken. Nothing is written to the store. A
+        reminder with only its `missed` left gets no card; that is
+        recorded after the call, as before."""
+        # No session, no reminders said at all: a card only in calls
+        # would be the one place they appear.
+        if cards is None or session is None or _card_in_the_way():
+            return
+        from saathi.identity.store import IdentityStore
+        from saathi.initiative import reminders as reminder_rules
+
+        if silent_reminders["call"] != calls.current_id:
+            silent_reminders.update(
+                call=calls.current_id, down=set(), shown=frozenset(), id=None
+            )
+        with IdentityStore(path) as own:
+            repeat_after, attempts = reminder_rules.settings(own)
+            actions = reminder_rules.due(own, now, repeat_after=repeat_after, attempts=attempts)
+        down = silent_reminders["down"]
+        due_now = [
+            action
+            for action in actions
+            if action.kind == "fire" and (action.reminder_id, action.due_at) not in down
+        ]
+        if not due_now:
+            return
+        shown = frozenset((action.reminder_id, action.due_at) for action in due_now)
+        current = cards.current
+        if (
+            shown == silent_reminders["shown"]
+            and current is not None
+            and current.id == silent_reminders["id"]
+        ):
+            return
+        card = confirm(reminder_rules.card_title(due_now), spoken=reminder_rules.line(due_now))
+        silent_actions[card.id] = due_now
+        reminder_cards.add(card.id)
+        silent_reminders.update(shown=shown, id=card.id)
+        cards.show(card)
+        logger.info("reminder shown during a call: %r", card.title)
+
     def check_reminders(now: datetime | None = None) -> list:
         """One tick: say what is due, give up on what went unanswered.
-        Returns the reminder actions found (for tests and the log)."""
+        Returns the reminder actions said or given up on (for tests and
+        the log); during a call that is none -- the card is only shown."""
         path = getattr(store, "path", None)
-        if path is None or not free_to_speak_first():
+        if path is None:
+            return []
+        if in_call():
+            show_reminders_silently(path, now or datetime.now(timezone.utc))
+            return []
+        if not free_to_speak_first():
             return []
         if _card_in_the_way():
             return []
@@ -1217,14 +1289,34 @@ def build_app(
         if result.card_id not in reminder_cards:
             return
         reminder_cards.discard(result.card_id)
+        shown_silently = silent_actions.pop(result.card_id, None)
+        if shown_silently is not None and result.source != "code":
+            silent_reminders["down"].update(
+                (action.reminder_id, action.due_at) for action in shown_silently
+            )
         path = getattr(store, "path", None)
         if result.yes is not True or path is None:
             return
         from saathi.identity.store import IdentityStore
         from saathi.initiative import reminders as reminder_rules
 
+        now = datetime.now(timezone.utc)
         with IdentityStore(path) as own:
-            done = reminder_rules.acknowledge(own, datetime.now(timezone.utc))
+            if shown_silently is None:
+                done = reminder_rules.acknowledge(own, now)
+            else:
+                # Never said, so not `pending()`: the card's own
+                # occurrences are the ones her Yes means.
+                done = []
+                for action in shown_silently:
+                    events = own.read(
+                        "reminder_events",
+                        reminder_id=action.reminder_id,
+                        due_at=action.due_at.isoformat(),
+                    )
+                    if not any(event["kind"] in ("acked", "missed") for event in events):
+                        reminder_rules.record(own, action, "acked", now)
+                        done.append(action)
         logger.info("reminder done (%s): %s", result.source, [action.text for action in done])
 
     if cards is not None:
@@ -1255,12 +1347,73 @@ def build_app(
     # up: she asked for it seconds or minutes ago, and the egg does not
     # wait for a forgotten song choice. A call or a turn in progress
     # still holds it back (`_TIMER_SAY_WITHIN`).
+    #
+    # During a call the clock panel is hidden behind the phone's, so a
+    # timer that runs out then gets a small "Timer done" card instead
+    # (compact, style.css), unspoken, and is said once the call is over
+    # as before. Its Okay is the clock's Stop: she has seen it, so it is
+    # not said afterwards either. It waits for any other card but a
+    # reminder's -- the "Answer?" of a ringing call, a Holding card --
+    # and a reminder waits for it as for any card. Lost, as for
+    # reminders: speaking over the call, and a chime both ends hear.
+    #
+    # The card is up only while its timers are still to be said, which
+    # is at most `_TIMER_SAY_WITHIN` (5 min) -- shorter than the 10 min
+    # a card holds a reminder back, so the two cannot keep replacing
+    # each other. After the call, it goes when they are said or when
+    # they age out unsaid.
     timers_to_say: list = []
+    timer_card: dict[str, object] = {"id": None, "timers": ()}
+
+    def show_timers_silently() -> None:
+        if cards is None or not timers_to_say:
+            return
+        current = cards.current
+        ours = current is not None and current.id == timer_card["id"]
+        if not ours and _card_in_the_way():
+            return
+        if ours and tuple(timer_card["timers"]) == tuple(timers_to_say):
+            return
+        from saathi.tools.clock import done_line, duration_words
+
+        names = ", ".join(
+            t.label[:1].upper() + t.label[1:] if t.label else duration_words(t.seconds)
+            for t in timers_to_say
+        )
+        title = "Timer done" if len(timers_to_say) == 1 else "Timers done"
+        card = readback(title, names, spoken=done_line(timers_to_say), group=False)
+        timer_card.update(id=card.id, timers=tuple(timers_to_say))
+        cards.show(card)
+        logger.info("timer shown during a call: %r", names)
+
+    def clear_timer_card_if_done() -> None:
+        current = cards.current if cards is not None else None
+        if current is None or current.id != timer_card["id"]:
+            return
+        if not any(t in timers_to_say for t in timer_card["timers"]):
+            cards.clear()
+
+    def timer_answered(result) -> None:
+        """Okay on the in-call timer card is the clock's Stop. A card
+        that replaced it says nothing about the timer."""
+        if result.card_id != timer_card["id"]:
+            return
+        timer_card["id"] = None
+        if result.source == "code":
+            return
+        seen = {t.id for t in timer_card["timers"]}
+        timers_to_say[:] = [t for t in timers_to_say if t.id not in seen]
+        if clock is not None:
+            for timer_id in seen:
+                clock.dismiss(timer_id)
+
+    if cards is not None:
+        cards.on_answer(timer_answered)
 
     def check_clock() -> list:
         """One tick: lets the clock mark what ran out (the face draws
-        it), and says the finished timers if she is free. Returns the
-        timers said."""
+        it), and says the finished timers if she is free -- during a
+        call, shows them on a card instead. Returns the timers said."""
         if clock is None:
             return []
         from saathi.tools.clock import done_line
@@ -1268,12 +1421,19 @@ def build_app(
         now = clock.now()
         timers_to_say.extend(clock.finished())
         timers_to_say[:] = [t for t in timers_to_say if now - t.ends_at < _TIMER_SAY_WITHIN]
+        if in_call():
+            show_timers_silently()
+            return []
+        # Said, or too late to say: the in-call card has done its job,
+        # and the clock behind it shows what is left of "Time's up".
+        clear_timer_card_if_done()
         if not timers_to_say or not free_to_speak_first():
             return []
         if not core.handle(Event("initiative")):
             return []
         said = list(timers_to_say)
         timers_to_say.clear()
+        clear_timer_card_if_done()
         line = done_line(said)
         path = getattr(store, "path", None)
         if path is not None:
