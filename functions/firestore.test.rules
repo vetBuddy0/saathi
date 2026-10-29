@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// EMULATOR ONLY. Wide open so the functions e2e can seed and read freely
+// (it uses the Admin SDK anyway, which bypasses rules). The real rules
+// are owned by contracts/ and are never these.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

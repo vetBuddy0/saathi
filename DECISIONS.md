@@ -4017,3 +4017,55 @@ stopwatch etc".
   day after one "what time is it?".
 - **Tests changed.** test_cli's two pinned tool sets gained `clock`: the
   owner changed what the model may do.
+
+## 2026-10-29 — Caregiver push through Cloud Functions (not deployed: Blaze unconfirmed)
+
+Caregivers must hear on their phones when she misses a reminder or
+answers them, even with the app closed. `functions/` (TypeScript,
+firebase-functions v2) does this with three Firestore triggers:
+`onEventCreated` (`kind == "missed"` goes to every caregiver's
+tokens), `onReplyCreated` (goes to the message's sender) and
+`onMessageSpoken` (the first time `spokenAt` is set, goes to the
+sender).
+- **Server-side push, not device-side.** Sending FCM takes a service
+  account, and the device holds none, by design: a tablet in her home
+  carrying credentials that can message any phone is the wrong blast
+  radius. The device already writes the events and replies, and the
+  functions react to those writes, so the device gains no new
+  permission. Lost: **polling in the caregiver app only.** It costs
+  nothing and needs no Blaze, but it notifies nobody while the app is
+  closed, and a missed medicine is exactly the case where nobody has
+  the app open.
+- **Not deployed.** Cloud Functions need Blaze, a billing account, which
+  is the owner's money call and has not been made. Written, unit-tested
+  and e2e-tested in the emulator only. The README has the cost (about
+  $0 at this scale) and the deploy command.
+- **Replies only reach a current caregiver.** If `fromUid` is no longer
+  in `caregivers`, they get no reply or "heard" push. Lost: notifying
+  `fromUid` unconditionally, which leaks her words to someone who was
+  removed.
+- **Only dead-token errors prune** (`registration-token-not-registered`,
+  `invalid-registration-token`). Lost: pruning on any failure, which
+  lets a quota blip silently unsubscribe a caregiver. That includes
+  `invalid-argument`, which FCM also returns for a bad payload. A dead
+  token shared by two caregivers is pruned from both.
+- **Retries on, with a 15-minute cutoff and no idempotency key.** A
+  failed send is retried; a failed prune is only logged, so pushes that
+  already went out aren't re-sent. Lost: (a) retries off, the v2
+  default, which turns one FCM 503 into a lost missed-medicine alert;
+  (b) a per-event "sent" marker, which either loses the alert when it is
+  written before the send or still duplicates when written after, and
+  needs a collection outside the shared contract. A rare duplicate push
+  is the better failure.
+- **Emulator sends go to `_test_outbox`**, and only when
+  `SAATHI_FCM_OUTBOX=1` *and* `FUNCTIONS_EMULATOR=true`. Lost: the flag
+  alone. A flag copied into prod would swallow every alert.
+- **Region `asia-south1`, `maxInstances: 5`.** The region must match the
+  Firestore location picked when the project is created. Change both
+  together. The instance cap is the cheap guard against a runaway bill.
+- **Tests run on `node:test`, not vitest or jest.** vitest 3 carries
+  critical `tinypool` advisories, vitest 4 crashes npm 10.9's installer
+  on this box, and `node:test` needs no dependency.
+- **firebase-admin pinned to 13.x.** 14 pulls in `jwks-rsa@4`, which
+  needs Node 22.12 or later for `require(esm)`. The host Node is 22.11,
+  so the emulator can't load it. Move to 14 when the host Node moves.
