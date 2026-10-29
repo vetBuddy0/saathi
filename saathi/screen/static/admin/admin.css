@@ -247,3 +247,17 @@ textarea { width: 100%; resize: vertical; line-height: 1.55; }
   .facts dt { margin-top: 0.4rem; }
   .row { grid-template-columns: 1fr; }
 }
+
+/* Pairing a family phone: the code big enough to read across a room. */
+.pairing {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 24px;
+  margin: 12px 0; padding: 16px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.pairing__code {
+  font-size: 56px; font-weight: 700; letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+.pairing__qr { width: 180px; }
+.pairing__qr svg { width: 100%; height: auto; display: block; }
+.pairing--expired .pairing__code { color: var(--muted); text-decoration: line-through; }

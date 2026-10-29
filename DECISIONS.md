@@ -4095,3 +4095,76 @@ gone and the same data goes to the owner's Firebase project.
 - **SPEC.md.** A line is proposed in the PR, not applied: "A copy may be
   sent to the owner's Firebase project; the device remains the source of
   truth."
+
+## 2026-10-29 — Family app on the device: pairing and the inbox
+
+The owner chose Firebase for the caregivers' app: they pair with her
+device, send messages Saathi says aloud, and set her reminders. This is
+the device's half. The REST client (`cloud/firebase.py`) is another
+unit's; `cloud/pairing.py` and `cloud/inbox.py` take it injected,
+typed by a `Protocol` in `pairing.py`, and the tests use a fake.
+- **Pairing.** "Pair a phone" on the console's Keys & settings tab
+  writes `pairing/{code}` (6 digits from `secrets`, 10 minutes) and
+  shows the code, a QR of `saathi-pair:{code}` and a countdown. It
+  creates `devices/{id}` the first time, so a caregiver's claim has a
+  `caregivers` array to join. Paired phones are listed by uid: the
+  contract has no names for them. With no cloud the route says
+  "Cloud is not set up" (409). Lost: a long token in a QR only (a code
+  can be read out over the phone to a relative abroad).
+- **Polling, not a push.** The engine polls every 10 s
+  (`build_app(inbox=)`, on the executor). Lost: an FCM or Firestore
+  listener in the Kotlin shell waking the engine. That means two
+  processes to keep in step and a Firebase SDK in the APK, and reminders
+  would still need a sync at start. A message a few seconds late
+  doesn't matter for a note read aloud. Both queries use a cursor
+  (`createdAt`, `updatedAt` at or after the last one seen), so an
+  empty tick is about two reads.
+- **Verbatim, not through the model.** She hears "Message from Priya:
+  …" with Priya's words unchanged (SPEC: phrasing may not invent). Lost:
+  having the model say it warmly. "Running late, home by 8" retold as
+  "Priya will be home by 8" is a promise Priya didn't make.
+- **When it is said.** It goes through the reminder lane's gates: she
+  must be free, with no card in the way. The reason is logged through
+  `policy.evaluate` (`scheduled`, "Message from Priya [message_id=…]")
+  before `core` takes "initiative", as the reminder lane does, so a
+  failed log can't leave the face SPEAKING with nothing said. A message
+  the policy holds back stays unsaid. One message per tick, oldest
+  first. It counts as said when the state leaves SPEAKING, either
+  finished or talked over. It is recorded locally first and `spokenAt`
+  second, so a failed write can't make her hear it twice. Quiet hours
+  are not applied, as for reminders.
+- **Her reply.** Her next words, before the conversation closes (back
+  to IDLE/SLEEPING), go to `inbox/{msg}/replies`. That covers the window
+  after speaking first and talking over the message. Only the first
+  turn counts. The model is told the message was read to her and that
+  what she says next is sent. It is told nothing more, and it sends
+  nothing: the server does.
+- **Caregiver reminders become local ones.** The reminder lane then
+  says them, repeats them and records them, offline too. Times resolve
+  through `tools/reminders.resolve`, like the voice tool and the
+  console. An edit (a newer `updatedAt`) retires the old row and
+  appends a new one. `active=false` retires it. A reminder with no
+  usable time is logged and skipped, and not retried until it is
+  edited. `fired`/`acked`/`missed` go to `devices/{id}/events` once
+  each, in order, with the caregiver's `reminderId` where there is
+  one. Each is a `patch_doc` at a fixed id, so a resend after a crash
+  is the same event.
+- **Schema: `cloud_links`, a new table in `_SCHEMA`.** It is
+  append-only (latest row per kind and remote id wins) and records
+  which remote reminder is which local row at which edit, which
+  messages were said, and which events were sent. SPEC.md's Memory
+  section does not list it. The change is proposed in the PR and SPEC.md
+  is not edited. Lost: a `remote_id` column on `reminders`, which can't
+  hold the edit version or the two cursors, and one table per kind.
+- **What the client is assumed to do.** `create_doc` with an existing
+  `doc_id` raises (a code collision is then retried). `patch_doc`
+  creates or updates, as Firestore's PATCH does. `order_by` is a field
+  name, ascending. The family app should write `createdAt` and
+  `updatedAt` as server timestamps: the cursors trust them.
+- **Not done here.**
+  - Deleting a reminder doc, instead of setting `active=false`, isn't
+    seen.
+  - A caregiver reminder she cancels by voice stays active in the
+    cloud.
+  - `cli.py` is not wired: the client isn't on this branch, so the
+    coordinator passes `build_app(inbox=Inbox(...))` after the merge.
