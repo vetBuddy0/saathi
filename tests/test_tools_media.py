@@ -1097,3 +1097,50 @@ def test_an_ended_naming_another_video_is_a_late_report(results):
     assert controller.playing is True
     controller.on_browser_event("ended", results[1].video_id)
     assert controller.playing is False
+
+
+def _item(video_id: str, title: str, channel: str = "") -> dict:
+    return {"id": {"videoId": video_id}, "snippet": {"title": title, "channelTitle": channel}}
+
+
+def test_uploads_of_the_same_song_are_told_apart():
+    # The first laptop demo (2026-10-29) offered "Ed Sheeran - Perfect"
+    # three times over: no choice at all.
+    results = parse_search_response(
+        {
+            "items": [
+                _item("a", "Ed Sheeran - Perfect (Official Music Video)", "Ed Sheeran"),
+                _item("b", "Ed Sheeran - Perfect", "LatinHype"),
+                _item("c", "Ed Sheeran - Perfect (Lyrics)", "7clouds"),
+            ]
+        }
+    )
+    assert [r.spoken for r in results] == [
+        "One: Ed Sheeran - Perfect, the official video",
+        "Two: Ed Sheeran - Perfect, from LatinHype",
+        "Three: Ed Sheeran - Perfect, with lyrics",
+    ]
+
+
+def test_two_of_the_same_kind_fall_back_to_their_channels():
+    results = parse_search_response(
+        {
+            "items": [
+                _item("a", "Perfect (Lyrics)", "7clouds"),
+                _item("b", "Perfect (Lyric Video)", "Taj Tracks"),
+            ]
+        }
+    )
+    assert [r.title for r in results] == ["Perfect, with lyrics", "Perfect, from Taj Tracks"]
+
+
+def test_titles_that_already_differ_are_left_short():
+    results = parse_search_response(
+        {
+            "items": [
+                _item("a", "Teresa Teng - 月亮代表我的心 (Official MV)", "x"),
+                _item("b", "Teresa Teng 甜蜜蜜 (Live)", "y"),
+            ]
+        }
+    )
+    assert [r.title for r in results] == ["Teresa Teng - 月亮代表我的心", "Teresa Teng 甜蜜蜜"]

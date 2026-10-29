@@ -391,11 +391,65 @@ def clean_title(raw: str, max_width: int = MAX_TITLE_WIDTH) -> str:
 # -- the API -----------------------------------------------------------------
 
 
+# What tells two uploads of one song apart, read from the raw title
+# before `clean_title` strips it. First match wins; the words are what
+# she hears after the title ("Ed Sheeran - Perfect, with lyrics").
+_VARIANTS = (
+    (re.compile(r"\blyric", re.I), "with lyrics"),
+    (re.compile(r"\blive\b|現場|现场", re.I), "live"),
+    (re.compile(r"\bcover\b|翻唱", re.I), "a cover"),
+    (re.compile(r"\bremix\b", re.I), "a remix"),
+    (re.compile(r"\bkaraoke\b|\binstrumental\b|伴奏|卡拉", re.I), "karaoke"),
+    (re.compile(r"\bacoustic\b", re.I), "acoustic"),
+    (re.compile(r"official\s+(?:music\s+)?video|official\s+mv|\bmv\b", re.I), "the official video"),
+    (re.compile(r"\baudio\b", re.I), "audio only"),
+)
+
+
+def _variants(raw_title: str, channel: str) -> list[str]:
+    """What could be said to tell this upload apart, best first: its
+    kind from the title, then its channel."""
+    found = [words for pattern, words in _VARIANTS if pattern.search(raw_title)][:1]
+    channel = clean_title(channel or "", max_width=24)
+    if channel:
+        found.append(f"from {channel}")
+    return found
+
+
+def _tell_apart(results: list[MediaResult], variants: list[list[str]]) -> list[MediaResult]:
+    """Results whose cleaned titles are the same get what tells them
+    apart added back. Why: the first laptop demo (2026-10-29) offered
+    "One: Ed Sheeran - Perfect. Two: Ed Sheeran - Perfect. Three: Ed
+    Sheeran - Perfect", which is no choice at all. The owner had chosen
+    that morning to keep offering a choice rather than play the top one
+    (the udhibranch revert), so the choice has to be one she can make.
+    Titles that already differ are left alone: the offer stays short."""
+    seen: dict[str, int] = {}
+    for result in results:
+        key = result.title.casefold()
+        seen[key] = seen.get(key, 0) + 1
+    told: list[MediaResult] = []
+    used: set[str] = set()
+    for result, variant in zip(results, variants):
+        title = result.title
+        if seen[title.casefold()] > 1:
+            for words in variant:
+                candidate = f"{title}, {words}"
+                if candidate.casefold() not in used:
+                    title = candidate
+                    break
+        used.add(title.casefold())
+        told.append(replace(result, title=title))
+    return told
+
+
 def parse_search_response(body: dict[str, Any], limit: int = MAX_RESULTS) -> list[MediaResult]:
     """`search.list` -> at most `limit` `MediaResult`s, numbered from
     one. Anything that isn't a video with an id and a title is skipped,
-    not an error."""
+    not an error. Uploads of the same song are told apart
+    (`_tell_apart`)."""
     results: list[MediaResult] = []
+    variants: list[list[str]] = []
     for item in body.get("items", []):
         video_id = (item.get("id") or {}).get("videoId")
         snippet = item.get("snippet") or {}
@@ -408,9 +462,10 @@ def parse_search_response(body: dict[str, Any], limit: int = MAX_RESULTS) -> lis
         results.append(
             MediaResult(index=len(results) + 1, video_id=video_id, title=title, thumbnail=thumbnail)
         )
+        variants.append(_variants(snippet.get("title", ""), snippet.get("channelTitle", "")))
         if len(results) == limit:
             break
-    return results
+    return _tell_apart(results, variants)
 
 
 def playable_video_ids(body: dict[str, Any]) -> list[str]:

@@ -4501,3 +4501,20 @@ chose to close it.
     assertions);
   - the contracts rules suite;
   - the app's validation and emulator tests, and the e2e seed.
+
+## 2026-10-29 — Uploads of the same song are told apart in the offer
+
+The first laptop demo offered "One: Ed Sheeran - Perfect. Two: Ed
+Sheeran - Perfect. Three: Ed Sheeran - Perfect." `clean_title` strips
+"(Official Music Video)" and "(Lyrics)", which is right for one title
+but leaves several uploads of one song looking identical.
+- **The fix.** `parse_search_response` adds back what tells them apart,
+  only when the cleaned titles are the same: the kind from the raw title
+  (the official video, with lyrics, live, a cover, a remix, karaoke,
+  acoustic, audio only), else the channel ("from 7clouds"). If two are
+  the same kind, the second falls back to its channel.
+- **Kept:** the choice of up to three. The owner chose that this morning
+  over playing the top result (the udhibranch revert), so this makes it
+  a choice she can actually make.
+- **Lost:** playing the top one when all results are the same song. That
+  undoes the owner's revert and is theirs to decide.
