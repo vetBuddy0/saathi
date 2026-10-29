@@ -436,8 +436,16 @@ def test_importing_the_module_has_no_side_effects(tmp_path):
     assert list(home.iterdir()) == []  # nothing written anywhere
 
 
-def test_the_aws_keys_for_the_cloud_copy_are_ones_the_engine_reads(tmp_path):
-    names = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_S3_BUCKET")
+def test_the_firebase_keys_for_the_cloud_copy_are_ones_the_engine_reads(tmp_path):
+    # Was the four AWS_ names: the owner moved the cloud copy to Firebase
+    # on 2026-10-29 (DECISIONS.md).
+    names = ("FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_STORAGE_BUCKET")
     config = {"data_dir": str(tmp_path), "port": 0, "keys": {name: "x" for name in names}}
     _host, _port, _dir, keys = android._read_config(config)
     assert sorted(keys) == sorted(names)
+    stale = {"data_dir": str(tmp_path), "port": 0, "keys": {"AWS_ACCESS_KEY_ID": "x"}}
+    with pytest.raises(ValueError, match="'AWS_ACCESS_KEY_ID' is not one the engine reads"):
+        android._read_config(stale)
+    emulated = {"data_dir": str(tmp_path), "port": 0, "keys": {"FIREBASE_AUTH_EMULATOR_HOST": "h"}}
+    with pytest.raises(ValueError, match="'FIREBASE_AUTH_EMULATOR_HOST' is not one the engine"):
+        android._read_config(emulated)

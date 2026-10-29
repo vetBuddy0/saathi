@@ -85,10 +85,9 @@ KEYS: list[tuple[str, str]] = [
     ("TWILIO_FROM_NUMBER", "The Twilio number calls come from."),
     ("TWILIO_TEST_NUMBER", "What “call the test number” rings."),
     ("TWILIO_TWIML_APP_SID", "TwiML App (AP...) the tablet's calls dial through."),
-    ("AWS_ACCESS_KEY_ID", "AWS access key (AKIA...): copies conversations, clips and memory to S3."),
-    ("AWS_SECRET_ACCESS_KEY", "AWS secret access key."),
-    ("AWS_REGION", "The bucket's region, e.g. ap-southeast-1."),
-    ("AWS_S3_BUCKET", "The S3 bucket name."),
+    ("FIREBASE_API_KEY", "Firebase web API key: copies conversations, clips and memory to Firebase."),
+    ("FIREBASE_PROJECT_ID", "The Firebase project id, e.g. saathi-family."),
+    ("FIREBASE_STORAGE_BUCKET", "The project's Storage bucket, e.g. saathi-family.firebasestorage.app."),
 ]
 PREFERENCE_KEYS = (
     LANGUAGE_KEY,

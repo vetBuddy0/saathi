@@ -640,12 +640,15 @@ def test_an_unknown_audio_mode_is_refused_not_guessed(seams, monkeypatch):
         cli.build_runtime()
 
 
-def test_cloud_backup_needs_all_four_aws_names_and_says_which_are_missing(tmp_path, monkeypatch):
+def test_cloud_backup_needs_all_three_firebase_names_and_says_which_are_missing(tmp_path, monkeypatch):
+    # Was ..._all_four_aws_names_...: the owner moved the cloud copy from
+    # AWS to Firebase on 2026-10-29 (DECISIONS.md).
     from types import SimpleNamespace
 
+    from saathi.cloud.firebase import FirebaseClient
     from saathi.cloud.sync import CloudSync
 
-    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_S3_BUCKET"):
+    for name in ("FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_STORAGE_BUCKET"):
         monkeypatch.delenv(name, raising=False)
     runtime = SimpleNamespace(
         notes=[],
@@ -653,12 +656,15 @@ def test_cloud_backup_needs_all_four_aws_names_and_says_which_are_missing(tmp_pa
         store=SimpleNamespace(path=tmp_path / "identity.sqlite3"),
     )
     assert cli._cloud(runtime) is None and runtime.notes == []  # none set: no cloud, no fault
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA1")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    assert runtime.firebase is None
+    monkeypatch.setenv("FIREBASE_API_KEY", "AIza1")
     assert cli._cloud(runtime) is None
-    assert runtime.notes == ["Cloud backup off: needs AWS_REGION, AWS_S3_BUCKET."]
-    monkeypatch.setenv("AWS_REGION", "ap-southeast-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "saathi-data")
+    assert runtime.notes == ["Cloud backup off: needs FIREBASE_PROJECT_ID, FIREBASE_STORAGE_BUCKET."]
+    assert runtime.firebase is None
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "saathi-family")
+    monkeypatch.setenv("FIREBASE_STORAGE_BUCKET", "saathi-family.firebasestorage.app")
     monkeypatch.setattr(CloudSync, "start", lambda self: None)
     cloud = cli._cloud(runtime)
-    assert cloud.target.bucket == "saathi-data" and "saathi-data" in cloud.status()
+    assert isinstance(runtime.firebase, FirebaseClient) and cloud.client is runtime.firebase
+    assert runtime.firebase.config.project_id == "saathi-family" and "saathi-family" in cloud.status()
+    assert "AIza1" not in cloud.status() and "AIza1" not in repr(runtime.firebase)

@@ -219,9 +219,12 @@ class Runtime:
     # an engine, so the screen server always has the route to offer a
     # phone; it only does anything once a client connects.
     remote_audio: Any = None
-    # The AWS copy of every exchange, her clips and the memory file
-    # (cloud/sync.py), when the AWS_* keys are all set.
+    # The Firebase copy of every exchange, her clips and the memory file
+    # (cloud/sync.py), when the FIREBASE_* keys are all set.
     cloud: Any = None
+    # The Firebase client that copy signs in with (cloud/firebase.py),
+    # shared with pairing and the caregiver inbox; None when not set up.
+    firebase: Any = None
 
 
 @dataclass
@@ -697,23 +700,30 @@ def console_info(runtime: Runtime) -> dict[str, Any]:
 
 
 def _cloud(runtime: Runtime):
-    """The AWS copy (cloud/sync.py) when every AWS_* key is set; a note
-    naming what is missing when only some are; nothing when none are
-    (a device with no cloud is the default, not a fault)."""
-    from saathi.cloud import s3
+    """The Firebase copy (cloud/sync.py) when every FIREBASE_* key is
+    set; a note naming what is missing when only some are; nothing when
+    none are (a device with no cloud is the default, not a fault). Sets
+    `runtime.firebase` to the client either way (None when off). Nothing
+    here touches the network: the device signs in on the sync thread."""
+    from saathi.cloud import firebase
     from saathi.cloud.sync import CloudSync
 
-    target = s3.S3Target.from_env(os.environ)
-    if target is None:
-        missing = s3.missing(os.environ)
-        if len(missing) < len(s3.ENV_NAMES):
+    runtime.firebase = None
+    config = firebase.FirebaseConfig.from_env(os.environ)
+    if config is None:
+        missing = firebase.missing(os.environ)
+        if len(missing) < len(firebase.ENV_NAMES):
             runtime.notes.append(f"Cloud backup off: needs {', '.join(missing)}.")
         return None
+    if config.auth_emulator or config.firestore_emulator or config.storage_emulator:
+        runtime.notes.append("Cloud backup goes to the Firebase emulators, not the real project.")
+    client = firebase.FirebaseClient(config)
     try:
-        cloud = CloudSync(runtime.config.data_dir, target, runtime.store.path)
+        cloud = CloudSync(runtime.config.data_dir, client, runtime.store.path)
     except OSError as exc:
         runtime.notes.append(f"Cloud backup off: {exc}")
         return None
+    runtime.firebase = client
     cloud.start()
     return cloud
 

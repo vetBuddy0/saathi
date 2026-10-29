@@ -114,10 +114,14 @@ GCP_CREDENTIALS_FILE = "gcp.json"
 
 # The env var names the shell may hand over, and nothing else: the ones
 # the engine reads. `TWILIO_*` is a prefix because `call/twilio.py` owns
-# that list (`TwilioCredentials`), not this module; `AWS_*` likewise
-# (`cloud/s3.py`'s ENV_NAMES).
+# that list (`TwilioCredentials`), not this module; `FIREBASE_*` likewise
+# (`cloud/firebase.py`'s ENV_NAMES).
 KEY_NAMES = frozenset({"OPENAI_API_KEY", "GROQ_API_KEY", "YOUTUBE_API_KEY", GOOGLE_JSON_KEY})
-KEY_PREFIXES = ("TWILIO_", "AWS_")
+KEY_PREFIXES = ("TWILIO_", "FIREBASE_")
+# FIREBASE_AUTH_EMULATOR_HOST and friends match the prefix but are for a
+# laptop's tests: on a tablet they would send its password and token over
+# plain http to whatever host they name.
+KEY_REFUSED_SUFFIX = "_EMULATOR_HOST"
 
 _lock = threading.Lock()
 _running: "_Engine | None" = None
@@ -233,7 +237,8 @@ def _read_config(config: Any) -> tuple[str, int, Path, dict[str, str]]:
     keys: dict[str, str] = {}
     for name, value in dict(raw_keys).items():
         name = str(name)
-        if name not in KEY_NAMES and not name.startswith(KEY_PREFIXES):
+        refused = name.endswith(KEY_REFUSED_SUFFIX)
+        if refused or (name not in KEY_NAMES and not name.startswith(KEY_PREFIXES)):
             allowed = ", ".join(sorted(KEY_NAMES) + [f"{prefix}*" for prefix in KEY_PREFIXES])
             raise ValueError(f"config keys: {name!r} is not one the engine reads ({allowed})")
         text = "" if value is None else str(value).strip()
