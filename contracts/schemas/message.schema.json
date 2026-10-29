@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saathi.invalid/contracts/message.schema.json",
+  "title": "Message",
+  "description": "devices/{id}/inbox/{msgId}. A caregiver's message for Saathi to say to her. from is the name she hears it from; fromUid must be the sender's own uid. Only the device sets spokenAt.",
+  "type": "object",
+  "required": [
+    "from",
+    "fromUid",
+    "text",
+    "createdAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "from": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "fromUid": {
+      "type": "string",
+      "minLength": 1
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "spokenAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

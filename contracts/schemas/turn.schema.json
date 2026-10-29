@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saathi.invalid/contracts/turn.schema.json",
+  "title": "Turn",
+  "description": "devices/{id}/turns/{turnId}. One exchange: what she said (heard) and what Saathi said back (said). Written by the device only. clipPath is the Storage path of her audio, devices/{id}/audio/{turnId}.wav, when one was kept.",
+  "type": "object",
+  "required": [
+    "ts",
+    "heard",
+    "said",
+    "language"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "heard": {
+      "type": "string"
+    },
+    "said": {
+      "type": "string"
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20
+    },
+    "clipPath": {
+      "type": "string",
+      "pattern": "^devices/[A-Za-z0-9_-]{16,64}/audio/[^/]+\\.wav$"
+    }
+  }
+}

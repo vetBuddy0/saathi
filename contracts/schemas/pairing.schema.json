@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saathi.invalid/contracts/pairing.schema.json",
+  "title": "Pairing",
+  "description": "pairing/{code}, where code is 6 digits. Opened by the device for at most 10 minutes. Claimed once by a caregiver, in one batch that sets claimedBy to their uid, adds that uid to devices/{deviceId}.caregivers and sets devices/{deviceId}.pairingCode to this code.",
+  "type": "object",
+  "required": [
+    "deviceId",
+    "expiresAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "deviceId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16,64}$"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "claimedBy": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

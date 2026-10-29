@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saathi.invalid/contracts/event.schema.json",
+  "title": "Event",
+  "description": "devices/{id}/events/{eventId}. Something the device did: a reminder said (fired), confirmed (acked) or given up on (missed), a timer finishing, a caregiver's message spoken. Written by the device only.",
+  "type": "object",
+  "required": [
+    "ts",
+    "kind",
+    "text"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "kind": {
+      "enum": [
+        "fired",
+        "acked",
+        "missed",
+        "timer_done",
+        "message_spoken"
+      ]
+    },
+    "reminderId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "text": {
+      "type": "string"
+    }
+  }
+}

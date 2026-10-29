@@ -4017,3 +4017,64 @@ stopwatch etc".
   day after one "what time is it?".
 - **Tests changed.** test_cli's two pinned tool sets gained `clock`: the
   owner changed what the model may do.
+
+## 2026-10-29 — contracts/: the shared Firebase contract, written down
+
+The owner moved the cloud to Firebase. The device, the caregiver app and
+the Cloud Functions now meet only in Firestore and Storage, so the
+contract between them lives in `contracts/`. It holds the schemas, one
+sample of each, the rules and the rules tests.
+- **One place, both ends.** pytest checks the samples against the
+  schemas (`tests/test_contracts.py`). The mocha suite writes the same
+  samples through the rules, against the real emulators. Lost: a
+  separately published package, which lets the two ends pin different
+  versions.
+- **One field beyond the agreed contract: `devices/{id}.pairingCode`.**
+  A rule on `devices/{id}` can't find the `pairing/{code}` doc that
+  justifies a caregiver joining unless the write names the code. The
+  claim batch sets it next to `arrayUnion(uid)`.
+  - Both rules check both sides of the batch with `get`/`getAfter`. The
+    code must have been open before the batch and be claimed by this uid
+    after it.
+  - That also stops a removed caregiver replaying an old code to rejoin.
+  - Lost: a `devices/{id}/claims/{uid}` collection, a new path for the
+    same proof.
+- **Device create is bound to the auth email and a random id.**
+  - Only `device-{id}@saathi.invalid` can create `devices/{id}`. It must
+    set `deviceUid` to itself and start with no caregivers.
+  - `{id}` must be 16 to 64 characters of `[A-Za-z0-9_-]`.
+  - Email/Password sign-up is open, so an id someone could predict would
+    let them register the device account first and own her device. The
+    pattern also makes the id safe to put into the clipPath regex.
+  - Lost: short ids like `d1`.
+- **Raised, not fixed: 6-digit codes can be brute-forced.** Any
+  signed-in user can try all 10^6 codes within a code's 10 minutes. Rules
+  can't count attempts. The fixes are the owner's call:
+  - App Check;
+  - a claiming Cloud Function with an attempt cap (needs Blaze);
+  - a longer QR token.
+- **Every document is closed and type-checked, the device's too.**
+  Unknown fields and unknown subcollections are denied. A device client
+  that drifts from the contract then fails against the emulator, not in
+  the app. Lost: checking only what caregivers write.
+- **Caregivers don't read the memory copy in Storage.** It is the raw
+  database of everything she has said. Audio clips are readable by
+  caregivers.
+- **The device may change only `active`/`updatedAt` on a reminder, and
+  only `spokenAt` on a message.** The contract allows the device to write
+  anything under its own id. That is the ceiling, and these are what it
+  needs.
+- **A code may be set up to 11 minutes out.** The contract says 10; the
+  extra minute is for the tablet's clock. On a code collision the create
+  is denied and the device picks another code. Lost: overwriting another
+  device's expired code.
+- **Anyone signed in may `get` an open code they know**, so the app can
+  show which device it pairs with. Listing codes is never allowed. A
+  guessed live code can pair; the code is single-use, lasts 10 minutes,
+  and the device shows who is on `caregivers`.
+- **No new Python dependency.** `jsonschema` isn't installed (it is only
+  in uv.lock, transitively). The test has a ~60-line validator for the
+  keywords the schemas use. It refuses any other keyword, so a schema
+  can't silently outgrow it.
+- **Mocha 11, not 12.** Mocha 12 needs `require(esm)`, which the
+  installed Node 22.11 lacks.

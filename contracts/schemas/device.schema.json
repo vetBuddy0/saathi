@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saathi.invalid/contracts/device.schema.json",
+  "title": "Device",
+  "description": "devices/{deviceId}. Created by the device itself, signed in as device-{deviceId}@saathi.invalid, with no caregivers. Caregivers join through pairing. pairingCode is written only by a caregiver's claim batch, so the rules can find the pairing doc that justifies the join.",
+  "type": "object",
+  "required": [
+    "name",
+    "createdAt",
+    "caregivers",
+    "deviceUid"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "caregivers": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "deviceUid": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pairingCode": {
+      "type": "string",
+      "pattern": "^[0-9]{6}$"
+    }
+  }
+}
