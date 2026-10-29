@@ -4017,3 +4017,81 @@ stopwatch etc".
   day after one "what time is it?".
 - **Tests changed.** test_cli's two pinned tool sets gained `clock`: the
   owner changed what the model may do.
+
+## 2026-10-29 — Firebase replaces S3 for the cloud copy
+
+The owner decided "use Firebase for everything, don't use AWS". No AWS
+keys were ever entered, so nothing was migrated: the S3 uploader is
+gone and the same data goes to the owner's Firebase project.
+- **What goes where.** Each exchange is the Firestore document
+  `devices/<id>/turns/<turn>` `{ts, heard, said, language, clipPath?}`;
+  its clip is the Storage object `devices/<id>/audio/<turn>.wav`; the
+  memory file is `devices/<id>/memory/<UTC time>.sqlite3`. `devices/<id>`
+  `{deviceUid, caregivers: []}` is created on the first upload and never
+  overwritten, since pairing adds caregivers to it. Layout in
+  docs/CLOUD.md. Memory copies now accumulate, at most one every 5
+  minutes of talk, where S3 kept one overwritten `identity-latest` plus
+  one per day. Pruning them is left to a Storage lifecycle rule or the
+  caregiver app.
+- **Kept.** The outbox, its order and the back-off (`cloud/sync.py`).
+  Outbox items now carry a kind (doc or object). An item left by the S3
+  uploader has none; it is dropped with a log line.
+- **How the device signs in.** As its own Firebase Auth user,
+  `device-<id>@saathi.invalid`. Its random password is made once and
+  kept in `<data dir>/cloud/device-credential` (0600). The file is
+  written before the sign-up, so a crash between the two can't leave an
+  account nobody can sign in to. The password is never logged or shown.
+- **The client.** `cloud/firebase.py` covers Identity Toolkit,
+  securetoken, Firestore REST v1 and Firebase Storage REST, on urllib
+  only. Its `create_doc / patch_doc / get_doc / query / sign_in` names
+  are the seam the pairing and inbox code uses, so they stay stable.
+  They match `cloud/pairing.py`'s `FirestoreClient`, one test per
+  promise:
+  - `create_doc` with a taken id raises `AlreadyExists` (a
+    `FirebaseError`), which is how pairing finds code collisions;
+  - `patch_doc` with no mask creates or replaces the document, and with
+    a mask touches only those fields;
+  - `order_by="field"` sorts ascending;
+  - docs are dicts with an `"id"` key and aware datetimes.
+
+  Lost: the id only as an attribute, beside a dict of bare fields.
+  `runtime.firebase` holds the client, or None.
+- **Edge cases.**
+  - If `devices/<id>` already names another uid, only `deviceUid` is
+    corrected and the caregivers are kept. This happens when the device's
+    user was deleted and it signed up again.
+  - An unreadable outbox label is set aside as `.bad`, so it can't block
+    the uploads behind it.
+  - The day's JSONL on the device keeps the S3-era field names (`reply`,
+    `audio_key`) and adds `language`, so one file has one shape.
+  - `*_EMULATOR_HOST` names are refused from the Android shell. They are
+    for a laptop's tests; on a tablet they would send its credentials
+    over plain http.
+- **What lost:**
+  - firebase-admin and google-cloud-firestore. They speak gRPC, which
+    has no Chaquopy wheel, and they are tens of MB for a few requests.
+  - A service account on the device. It bypasses every security rule,
+    so a stolen tablet would expose every family's data. That is never
+    allowed.
+  - Keeping S3 alongside. It would mean two clouds and two sets of keys
+    for the same copy.
+  - Creating turn documents with `documentId`. A retry after a lost
+    reply would fail with ALREADY_EXISTS; a whole-document PATCH is
+    idempotent.
+- **Keys.** Three `FIREBASE_*` names replace the four `AWS_*` ones in
+  `screen/admin.py`'s KEYS, `android.py`'s KEY_PREFIXES and the shell's
+  `Keys.NAMES`.
+- **Tests changed** (the owner changed what the device holds):
+  - test_cli's `..._all_four_aws_names_...` is now
+    `..._all_three_firebase_names_...`;
+  - test_android_entry's AWS-keys test now checks the FIREBASE_ names and
+    also checks that AWS_ names are refused;
+  - KeysTest `theNamesAreTheFourteen...` is now `...Thirteen...`;
+  - test_cloud_sync's five tests moved to the Firebase uploader;
+  - test_cloud_s3 is deleted along with s3.py.
+
+  The server's cloud seam (`record_turn(heard, reply, audio=)`) is
+  unchanged, and so are its tests.
+- **SPEC.md.** A line is proposed in the PR, not applied: "A copy may be
+  sent to the owner's Firebase project; the device remains the source of
+  truth."

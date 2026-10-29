@@ -162,7 +162,7 @@ class KeysTest {
     }
 
     @Test
-    fun theNamesAreTheFourteenTheEngineReadsInTheDialogsOrder() {
+    fun theNamesAreTheThirteenTheEngineReadsInTheDialogsOrder() {
         assertEquals(
             listOf(
                 "OPENAI_API_KEY",
@@ -175,10 +175,9 @@ class KeysTest {
                 "TWILIO_FROM_NUMBER",
                 "TWILIO_TEST_NUMBER",
                 "TWILIO_TWIML_APP_SID",
-                "AWS_ACCESS_KEY_ID",
-                "AWS_SECRET_ACCESS_KEY",
-                "AWS_REGION",
-                "AWS_S3_BUCKET",
+                "FIREBASE_API_KEY",
+                "FIREBASE_PROJECT_ID",
+                "FIREBASE_STORAGE_BUCKET",
             ),
             Keys.NAMES,
         )

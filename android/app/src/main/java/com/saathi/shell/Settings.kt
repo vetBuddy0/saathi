@@ -193,11 +193,10 @@ class Keys internal constructor(
         /** The TwiML App the face page's Twilio calls dial through (`call/web_phone.py`). */
         const val TWILIO_TWIML_APP_SID = "TWILIO_TWIML_APP_SID"
 
-        /** The S3 copy of conversations, clips and memory (`cloud/sync.py`); all four or none. */
-        const val AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
-        const val AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
-        const val AWS_REGION = "AWS_REGION"
-        const val AWS_S3_BUCKET = "AWS_S3_BUCKET"
+        /** The Firebase copy of conversations, clips and memory (`cloud/sync.py`); all three or none. */
+        const val FIREBASE_API_KEY = "FIREBASE_API_KEY"
+        const val FIREBASE_PROJECT_ID = "FIREBASE_PROJECT_ID"
+        const val FIREBASE_STORAGE_BUCKET = "FIREBASE_STORAGE_BUCKET"
 
         /** The names the engine reads (`saathi/android.py` refuses any other), in the order the dialog lists them. */
         val NAMES: List<String> = listOf(
@@ -211,10 +210,9 @@ class Keys internal constructor(
             TWILIO_FROM_NUMBER,
             TWILIO_TEST_NUMBER,
             TWILIO_TWIML_APP_SID,
-            AWS_ACCESS_KEY_ID,
-            AWS_SECRET_ACCESS_KEY,
-            AWS_REGION,
-            AWS_S3_BUCKET,
+            FIREBASE_API_KEY,
+            FIREBASE_PROJECT_ID,
+            FIREBASE_STORAGE_BUCKET,
         )
 
         /** One of these is needed for the engine to think at all: OpenAI if set, else Groq (`provider.py`). */
