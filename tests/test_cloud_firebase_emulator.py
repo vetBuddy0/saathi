@@ -78,7 +78,7 @@ def test_a_device_signs_up_and_its_exchange_clip_and_memory_are_readable_back(tm
     assert list(cloud.outbox.iterdir()) == []
 
     home = client.get_doc(f"devices/{device}")
-    assert home == {"deviceUid": client.account.uid, "caregivers": []}
+    assert home == {"id": device, "deviceUid": client.account.uid, "caregivers": []}
     assert client.account.email == f"device-{device}@saathi.invalid"
 
     [turn] = client.query(f"devices/{device}", "turns", order_by="ts", limit=10)

@@ -13,7 +13,13 @@ import urllib.parse
 import pytest
 
 from saathi.cloud import firebase
-from saathi.cloud.firebase import Document, FirebaseClient, FirebaseConfig, FirebaseError
+from saathi.cloud.firebase import (
+    AlreadyExists,
+    Document,
+    FirebaseClient,
+    FirebaseConfig,
+    FirebaseError,
+)
 
 CONFIG = FirebaseConfig("AIzaKEY", "saathi-family", "saathi-family.firebasestorage.app")
 DOCS = "https://firestore.googleapis.com/v1/projects/saathi-family/databases/(default)/documents"
@@ -302,7 +308,7 @@ def test_documents_are_created_patched_and_read_with_the_bearer_token():
     assert opener.requests[1].full_url == f"{DOCS}/devices?documentId=d1"
     assert opener.requests[1].headers["Authorization"] == "Bearer tok1"
     assert opener.body(1) == {"fields": {"caregivers": {"arrayValue": {}}}}
-    assert made == {"caregivers": []} and made.id == "d1" and made.path == "devices/d1"
+    assert made == {"id": "d1", "caregivers": []} and made.path == "devices/d1"
     client.patch_doc("devices/d1/turns/t1", {"heard": "hi"})
     assert opener.requests[2].get_method() == "PATCH"
     assert opener.requests[2].full_url == f"{DOCS}/devices/d1/turns/t1"
@@ -310,7 +316,7 @@ def test_documents_are_created_patched_and_read_with_the_bearer_token():
     assert opener.requests[3].full_url == f"{DOCS}/devices/d1?updateMask.fieldPaths=deviceUid"
     got = client.get_doc("devices/d1")
     assert opener.requests[4].get_method() == "GET"
-    assert isinstance(got, Document) and got == {"deviceUid": "u2", "caregivers": []}
+    assert isinstance(got, dict) and got == {"id": "d1", "deviceUid": "u2", "caregivers": []}
     assert client.get_doc("devices/missing") is None
 
 
@@ -357,7 +363,7 @@ def test_a_query_is_one_run_query_with_the_filters_anded():
             "limit": 1,
         }
     }
-    assert found == [{"code": "123456", "used": False}] and found[0].id == "p1"
+    assert found == [{"id": "p1", "code": "123456", "used": False}]
     client, opener = _client([])
     assert client.query("devices/d1", "inbox", where=[("ts", ">", 5)]) == []
     assert opener.requests[0].full_url == f"{DOCS}/devices/d1:runQuery"
@@ -383,3 +389,66 @@ def test_an_object_is_uploaded_in_one_request_with_the_bearer_token():
     assert request.headers["Content-type"] == "audio/wav" and request.data == b"RIFF...."
     assert client.download("devices/d1/audio/t 1.wav") == b"RIFF...."
     assert opener.requests[2].full_url.endswith("/o/devices%2Fd1%2Faudio%2Ft%201.wav?alt=media")
+
+
+# -- the contract the pairing and inbox code (cloud/pairing.py's
+# FirestoreClient) is written against: one test per promise ------------
+
+
+def test_contract_create_with_a_taken_id_raises_already_exists_never_overwrites():
+    exists = {"code": 409, "message": "Document already exists: x", "status": "ALREADY_EXISTS"}
+    client, opener = _client(http_error(409, exists))
+    with pytest.raises(AlreadyExists) as caught:
+        client.create_doc("pairing", {"deviceId": "d1"}, doc_id="123456")
+    assert isinstance(caught.value, FirebaseError) and caught.value.status == 409
+    # createDocument with documentId: a POST to the collection, not a PATCH
+    assert opener.requests[0].get_method() == "POST"
+    assert opener.requests[0].full_url == f"{DOCS}/pairing?documentId=123456"
+    # Any other refusal is not mistaken for a collision.
+    client, _ = _client(http_error(403, {"status": "PERMISSION_DENIED", "message": "no"}))
+    with pytest.raises(FirebaseError) as caught:
+        client.create_doc("pairing", {}, doc_id="1")
+    assert not isinstance(caught.value, AlreadyExists)
+
+
+def test_contract_patch_without_a_mask_creates_or_replaces_the_whole_document():
+    client, opener = _client(_doc("devices/d1/inbox/m1", {"text": "hi"}))
+    client.patch_doc("devices/d1/inbox/m1", {"text": "hi"})
+    request = opener.requests[0]
+    # No mask and no currentDocument precondition: Firestore creates the
+    # document if missing and otherwise replaces it.
+    assert request.get_method() == "PATCH"
+    assert request.full_url == f"{DOCS}/devices/d1/inbox/m1"
+    assert opener.body(0) == {"fields": {"text": {"stringValue": "hi"}}}
+
+
+def test_contract_patch_with_a_mask_touches_only_the_listed_fields():
+    client, opener = _client(_doc("devices/d1", {"deviceUid": "u", "caregivers": ["c"]}))
+    client.patch_doc(
+        "devices/d1", {"caregivers": ["c"], "pairedAt": 5}, update_mask=["caregivers", "pairedAt"]
+    )
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(opener.requests[0].full_url).query)
+    assert query == {"updateMask.fieldPaths": ["caregivers", "pairedAt"]}
+
+
+def test_contract_order_by_a_field_name_is_ascending():
+    client, opener = _client([])
+    client.query("devices/d1", "inbox", order_by="createdAt")
+    assert opener.body(0)["structuredQuery"]["orderBy"] == [
+        {"field": {"fieldPath": "createdAt"}, "direction": "ASCENDING"}
+    ]
+
+
+def test_contract_docs_are_dicts_with_an_id_key_and_aware_timestamps():
+    stored = {"deviceId": "d1", "expiresAt": "2026-10-29T02:53:05.217123456Z"}
+    raw = _doc("pairing/123456", {"deviceId": "d1"})
+    raw["fields"]["expiresAt"] = {"timestampValue": stored["expiresAt"]}
+    client, _ = _client(raw, [{"document": raw}], raw)
+    for doc in (client.get_doc("pairing/123456"), client.query("", "pairing")[0]):
+        assert isinstance(doc, dict) and isinstance(doc, Document)
+        assert doc["id"] == "123456" and doc["deviceId"] == "d1"
+        assert doc["expiresAt"] == datetime.datetime(
+            2026, 10, 29, 2, 53, 5, 217123, tzinfo=datetime.timezone.utc
+        )
+    made = client.create_doc("pairing", {"deviceId": "d1"}, doc_id="123456")
+    assert made["id"] == "123456"

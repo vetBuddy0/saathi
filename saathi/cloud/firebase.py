@@ -23,8 +23,9 @@ names and signatures, duck-typed; keep them stable):
     sign_in(email, password) -> Account
     create_doc(path, fields, doc_id=None) -> Document
         `path` is a collection ("devices/abc/turns"). With no doc_id
-        Firestore picks one. Raises FirebaseError(409, "ALREADY_EXISTS")
-        if doc_id is taken.
+        Firestore picks one. Raises AlreadyExists (a FirebaseError, 409
+        ALREADY_EXISTS) if doc_id is taken: pairing finds code
+        collisions this way, so it must never overwrite.
     patch_doc(path, fields, update_mask=None) -> Document
         `path` is a document. With no mask the document becomes exactly
         `fields` (created if missing); with a mask only those field
@@ -39,9 +40,11 @@ names and signatures, duck-typed; keep them stable):
         name, "-field" for descending, or a list of those.
 
 A `Document` is a plain dict of decoded fields (str, int, float, bool,
-None, aware datetime, list, dict, bytes) with `.id`, `.path` (relative
-to `documents/`) and `.update_time` attributes, so `doc == {...}`
-compares fields only.
+None, aware datetime, list, dict, bytes) plus an "id" key holding the
+document's id (a stored field named "id" is shadowed by it). It also has
+`.id`, `.path` (relative to `documents/`) and `.update_time` attributes.
+Lost: the bare field dict with the id only as an attribute; the pairing
+and inbox code reads `doc["id"]`, as a plain dict would carry it.
 
 Requests carry the signed-in user's ID token as `Bearer`. The token is
 cached until a minute before it expires, then refreshed through
@@ -109,6 +112,11 @@ class FirebaseError(Exception):
         super().__init__(f"{status} {code}")
         self.status = status
         self.code = code
+
+
+class AlreadyExists(FirebaseError):
+    """`create_doc` with a `doc_id` that is taken (Firestore's 409
+    ALREADY_EXISTS)."""
 
 
 @dataclass(frozen=True)
@@ -191,6 +199,7 @@ class Document(dict):
         update_time: str | None = None,
     ):
         super().__init__(fields)
+        self["id"] = id
         self.id = id
         self.path = path
         self.update_time = update_time
@@ -354,7 +363,10 @@ class FirebaseClient:
             with self._open(request, timeout=TIMEOUT_SECONDS) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            raise FirebaseError(exc.code, _error_code(exc)) from None
+            code = _error_code(exc)
+            if exc.code == 409 and code == "ALREADY_EXISTS":
+                raise AlreadyExists(exc.code, code) from None
+            raise FirebaseError(exc.code, code) from None
         if not parse:
             return raw
         return json.loads(raw) if raw else None

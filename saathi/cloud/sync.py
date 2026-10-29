@@ -62,8 +62,8 @@ from typing import Any
 
 from saathi.cloud.firebase import (
     Account,
+    AlreadyExists,
     FirebaseClient,
-    FirebaseError,
     decode_fields,
     encode_fields,
 )
@@ -303,9 +303,7 @@ class CloudSync:
         try:
             fields = {"deviceUid": uid, "caregivers": []}
             self.client.create_doc("devices", fields, doc_id=self.device)
-        except FirebaseError as exc:
-            if exc.code != "ALREADY_EXISTS":
-                raise
+        except AlreadyExists:
             existing = self.client.get_doc(home)
             if existing is not None and existing.get("deviceUid") != uid:
                 logger.warning("cloud sync: %s named another user; updating deviceUid", home)

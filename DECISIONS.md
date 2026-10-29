@@ -4045,6 +4045,16 @@ gone and the same data goes to the owner's Firebase project.
   securetoken, Firestore REST v1 and Firebase Storage REST, on urllib
   only. Its `create_doc / patch_doc / get_doc / query / sign_in` names
   are the seam the pairing and inbox code uses, so they stay stable.
+  They match `cloud/pairing.py`'s `FirestoreClient`, one test per
+  promise:
+  - `create_doc` with a taken id raises `AlreadyExists` (a
+    `FirebaseError`), which is how pairing finds code collisions;
+  - `patch_doc` with no mask creates or replaces the document, and with
+    a mask touches only those fields;
+  - `order_by="field"` sorts ascending;
+  - docs are dicts with an `"id"` key and aware datetimes.
+
+  Lost: the id only as an attribute, beside a dict of bare fields.
   `runtime.firebase` holds the client, or None.
 - **Edge cases.**
   - If `devices/<id>` already names another uid, only `deviceUid` is

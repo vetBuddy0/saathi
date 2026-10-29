@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from saathi.cloud import sync as sync_module
-from saathi.cloud.firebase import Account, FirebaseError
+from saathi.cloud.firebase import Account, AlreadyExists, FirebaseError
 from saathi.cloud.sync import CloudSync, device_id
 from saathi.identity.preferences import LANGUAGE_KEY, write_preference
 from saathi.identity.store import IdentityStore
@@ -44,7 +44,7 @@ class Project:
     def create_doc(self, path, fields, doc_id=None):
         self._net(("create", f"{path}/{doc_id}"))
         if f"{path}/{doc_id}" in self.docs:
-            raise FirebaseError(409, "ALREADY_EXISTS")
+            raise AlreadyExists(409, "ALREADY_EXISTS")
         self.docs[f"{path}/{doc_id}"] = dict(fields)
 
     def patch_doc(self, path, fields, update_mask=None):
